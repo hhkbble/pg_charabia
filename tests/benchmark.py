@@ -159,20 +159,23 @@ def verify_library(session):
 
 def capture_plan(session, name, sql, index):
     defaults = "SET enable_seqscan=on;SET enable_indexscan=on;SET enable_indexonlyscan=on;SET enable_bitmapscan=on;"
-    default = json.loads(statement(session, defaults + "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF) " + sql,
+    # Planner GUCs do not invalidate an existing generic prepared plan. Both
+    # observations must replan in this exclusively owned benchmark session.
+    default = json.loads(statement(session, defaults + "DISCARD PLANS;EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF) " + sql,
                                    name + "-default-plan"))
     # GIN's actual access path is bitmap-only. Merely disabling seqscan can
     # choose a primary-key scan that filters rows and proves no FTS index use.
     ordinary = "off" if index.endswith("_gin") else "on"
     force = f"SET enable_seqscan=off;SET enable_indexscan={ordinary};SET enable_indexonlyscan={ordinary};SET enable_bitmapscan=on;"
-    forced = json.loads(statement(session, force + "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF) " + sql,
+    forced = json.loads(statement(session, force + "DISCARD PLANS;EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF) " + sql,
                                   name + "-index-plan"))
     target = [node for node in nodes(forced) if node.get("Index Name") == index and
               node.get("Node Type") in ("Index Scan", "Bitmap Index Scan") and node.get("Actual Loops", 0) > 0]
     check(bool(target), name + " did not execute the target index", forced)
     if "bm25" in index:
         check(all(node["Node Type"] == "Index Scan" for node in target), name + " used a non-BM25 scan", target)
-    results["plans"][name] = {"sql": sql, "default": default, "forced": forced, "target_index": index}
+    results["plans"][name] = {"sql": sql, "default": default, "forced": forced, "target_index": index,
+                              "planner_reset":"DISCARD PLANS before each EXPLAIN; prepared SQL objects retained"}
     checkpoint()
     return forced
 
