@@ -93,7 +93,7 @@ def registration_failures(session):
     results["registration_savepoint"]={"output":output,"before":before,"after":after}
 
 
-def interrupt(session,reason):
+def interrupt(session,reason,cleanup_failure=False):
     import threading
     session.value("SET application_name='pgcb_errors_ready'")
     session.value("SET statement_timeout='300ms'" if reason=="timeout" else "SET statement_timeout=0")
@@ -115,6 +115,8 @@ def interrupt(session,reason):
             time.sleep(0.02)
         else:
             raise AssertionError("Fault wait point was not reached")
+        if cleanup_failure:
+            raise AssertionError("injected observer failure")
         if reason=="cancel":
             assert run(f"SELECT pg_cancel_backend({session.pid})",timeout=10)=="t"
         worker.join(timeout=15)
@@ -128,14 +130,42 @@ def interrupt(session,reason):
         assert session.value("SELECT to_tsvector('charabia.default_v1','hello')")=="'hello':1"
         results[reason]={"output":outcome[0],"before":before,"after":after,"pid":session.pid}
     finally:
-        if worker.is_alive():
-            run(f"SELECT pg_cancel_backend({session.pid})",check=False,timeout=10)
-            worker.join(timeout=10)
-        if worker.is_alive():
-            run(f"SELECT pg_terminate_backend({session.pid})",check=False,timeout=10)
-            worker.join(timeout=10)
-        assert not worker.is_alive(),"Owned query thread failed to exit"
-        save("errors-results.json",results)
+        primary_error=sys.exception()
+        cleanup_errors=[]
+        try:
+            for operation in ("pg_cancel_backend","pg_terminate_backend"):
+                if not worker.is_alive():
+                    break
+                try:
+                    if cleanup_failure and operation=="pg_cancel_backend":
+                        # A real psql timeout exercises cleanup's exception
+                        # branch without replacing PostgreSQL with a mock.
+                        run("SELECT pg_sleep(2)",check=False,timeout=0.05)
+                    else:
+                        run(f"SELECT {operation}({session.pid})",check=False,timeout=10)
+                except BaseException as error:
+                    cleanup_errors.append(f"{operation}: {error!r}")
+                finally:
+                    worker.join(timeout=10)
+            if worker.is_alive():
+                # If control connections are unavailable, killing this owned
+                # psql closes its stdout and releases query()'s reader thread.
+                try:
+                    session.process.kill()
+                except BaseException as error:
+                    cleanup_errors.append(f"owned psql kill: {error!r}")
+                finally:
+                    worker.join(timeout=10)
+        finally:
+            results.setdefault("interrupt_cleanup",[]).append({
+                "reason":reason,"failure_probe":cleanup_failure,
+                "thread_exited":not worker.is_alive(),"errors":cleanup_errors})
+            save("errors-results.json",results)
+        if worker.is_alive() or cleanup_errors:
+            message=f"Interrupt cleanup: alive={worker.is_alive()}, errors={cleanup_errors}"
+            if primary_error is None:
+                raise AssertionError(message)
+            primary_error.add_note(message)
 
 
 try:
@@ -160,6 +190,24 @@ try:
             registration_failures(session)
             interrupt(session,"cancel")
             interrupt(session,"timeout")
+        try:
+            with Session() as probe:
+                probe_pid=probe.pid
+                interrupt(probe,"cancel",cleanup_failure=True)
+        except AssertionError as error:
+            assert str(error)=="injected observer failure",repr(error)
+            notes=getattr(error,"__notes__",[])
+            assert any("TimeoutExpired" in note for note in notes),notes
+            assert results["interrupt_cleanup"][-1]["thread_exited"]
+            assert results["interrupt_cleanup"][-1]["failure_probe"]
+            deadline=time.monotonic()+5
+            while run(f"SELECT count(*) FROM pg_stat_activity WHERE pid={probe_pid}")!="0":
+                assert time.monotonic()<deadline,"Owned probe backend did not exit"
+                time.sleep(0.02)
+            results["cleanup_failure_probe"]={"primary_error":str(error),"notes":notes,
+                                              "thread_exited":True,"backend_exited":True}
+        else:
+            raise AssertionError("Cleanup failure probe did not raise its primary failure")
 finally:
     save("errors-results.json",results)
 print(json.dumps({"encoding_cases":len(results["encoding"]),"injected_faults":len(results["faults"]),"registration_faults":len(results.get("registration_faults",[])),"test_hooks":has_hooks}))

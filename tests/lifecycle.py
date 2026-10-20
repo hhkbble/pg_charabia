@@ -98,7 +98,7 @@ def prepared_state(session, label, prepared_at, lossy, expected_ids, default_con
     # the Charabia golden and checks only the default-configuration dispatch.
     record["simple_control"] = json.loads(session.value(
         "SELECT jsonb_build_object('vector',to_tsvector('pg_catalog.simple','CAFÉ')::text,"
-        "'lc_ctype',current_setting('lc_ctype'),'lc_collate',current_setting('lc_collate'))"))
+        "'lc_ctype',datctype,'lc_collate',datcollate) FROM pg_database WHERE datname=current_database()"))
     # Force a fresh heap evaluation of explicit native analysis. Stale index
     # candidates intentionally differ until REINDEX, although analysis agrees.
     session.value("SET enable_seqscan=on; SET enable_bitmapscan=off; SET enable_indexscan=off")

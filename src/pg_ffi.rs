@@ -55,7 +55,7 @@ pub unsafe fn owned_state<T: 'static>(value: T) -> Internal {
         crate::test_hooks::state_released();
     }
 
-    let mut owner = Box::new(value);
+    let owner = Box::new(value);
     // SAFETY: The caller runs in the original live PG callback context.
     let context = unsafe { pg_sys::CurrentMemoryContext };
     #[cfg(feature = "test-hooks")]
@@ -72,7 +72,7 @@ pub unsafe fn owned_state<T: 'static>(value: T) -> Internal {
     // SAFETY: The allocation is aligned and large enough for this callback.
     unsafe {
         (*callback).func = Some(drop_state::<T>);
-        (*callback).arg = ptr::from_mut(owner.as_mut()).cast();
+        (*callback).arg = ptr::null_mut();
     }
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit("register_link");
@@ -80,6 +80,10 @@ pub unsafe fn owned_state<T: 'static>(value: T) -> Internal {
     // ERROR. No fallible operation is allowed before the immediate handoff.
     unsafe { pg_sys::MemoryContextRegisterResetCallback(context, callback) };
     let state = Box::into_raw(owner);
+    // SAFETY: Use the pointer returned by into_raw, not a borrow-derived pointer
+    // from before the Box moved. No PG call or fallible operation intervenes,
+    // so reset cannot observe the callback's temporary null argument.
+    unsafe { (*callback).arg = state.cast() };
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::state_registered();
     pointer(state)
