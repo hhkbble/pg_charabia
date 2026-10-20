@@ -35,10 +35,15 @@ try:
         # Warm all language resources before judging per-request reclamation.
         text="PostgreSQL 数据库 全文检索 café 日本語の検索 한국어 검색 ภาษาไทย Ελληνικά עברית"
         from support import literal
-        statement="SELECT count(to_tsvector('charabia.default_v1',"+literal(text)+")) FROM generate_series(1,250)"
+        statement="SELECT count(to_tsvector('charabia.default_v1',"+literal(text)+" || ' ' || g::text)) FROM generate_series(1,250) g"
         session.value(statement)
         for batch in range(8):
+            before=json.loads(session.value("SELECT charabia.test_stats_v1()")) if os.environ.get("PGCB_TEST_HOOKS")=="1" else None
             assert session.value(statement)=="250"
+            if before is not None:
+                after=json.loads(session.value("SELECT charabia.test_stats_v1()"))
+                assert after["parser_created"]-before["parser_created"]==250,(before,after)
+                assert after["parser_created"]==after["parser_dropped"],after
             memory=json.loads(session.value("SELECT json_build_object('bytes',sum(total_bytes),'used',sum(used_bytes),'contexts',count(*)) FROM pg_backend_memory_contexts"))
             results["memory"].append(dict(memory,batch=batch,pid=session.pid,rss_bytes=rss(session.pid)))
         tail=results["memory"][2:]

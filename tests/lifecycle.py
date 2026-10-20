@@ -43,10 +43,16 @@ drop_db="pgcb_drop_"+str(os.getpid())
 try:
     with Session() as warm:
         assert warm.value("SELECT to_tsvector('lifecycle.cfg','alpha beta')")=="'alpha':1 'beta':2"
+        before_cache=json.loads(warm.value("SELECT charabia.test_stats_v1()")) if os.environ.get("PGCB_TEST_HOOKS")=="1" else None
         run("ALTER TEXT SEARCH DICTIONARY lifecycle.latin(StopWords='[\"alpha\"]')")
         current=warm.value("SELECT to_tsvector('lifecycle.cfg','alpha beta')")
         assert current=="'beta':2" and run("SELECT to_tsvector('lifecycle.cfg','alpha beta')")==current
         results["cache"].append({"warm_backend":warm.pid,"new_value":current})
+        if before_cache is not None:
+            after_cache=json.loads(warm.value("SELECT charabia.test_stats_v1()"))
+            assert after_cache["dictionary_created"]-before_cache["dictionary_created"]==1,(before_cache,after_cache)
+            assert after_cache["dictionary_dropped"]-before_cache["dictionary_dropped"]==1,(before_cache,after_cache)
+            results["cache_counters"]={"before":before_cache,"after":after_cache}
         run("BEGIN; ALTER TEXT SEARCH DICTIONARY lifecycle.latin(StopWords='[\"beta\"]'); ROLLBACK;")
         assert warm.value("SELECT to_tsvector('lifecycle.cfg','alpha beta')")==current
         bad=run("ALTER TEXT SEARCH DICTIONARY lifecycle.latin(StopWords='{}')",check=False)

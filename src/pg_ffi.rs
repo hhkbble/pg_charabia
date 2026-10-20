@@ -3,7 +3,7 @@ use std::{
     ptr, slice, str,
 };
 
-use pgrx::{Internal, PgLogLevel, PgSqlErrorCode, ereport, pg_sys};
+use pgrx::{AnyElement, Internal, PgLogLevel, PgSqlErrorCode, ereport, pg_sys};
 
 use crate::analysis::{AnalysisError, ErrorKind, LexizeOutcome, MAX_INPUT_BYTES};
 use crate::profile::NormalizationRoute;
@@ -101,6 +101,41 @@ pub unsafe fn input<'a>(pointer: *const u8, length: i32) -> &'a str {
             "invalid UTF8 input",
         )
     })
+}
+
+/// # Safety
+/// `value` is a live text Datum supplied by the diagnostic SQL callback. The
+/// returned borrow must not outlive this callback's current memory context.
+pub unsafe fn text_input<'a>(value: AnyElement) -> &'a str {
+    require_utf8();
+    if value.oid() != pg_sys::TEXTOID {
+        fail(
+            PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
+            "diagnostic callback requires a text Datum",
+        );
+    }
+    // SAFETY: The checked text OID identifies a varlena Datum. This size helper
+    // reads TOAST metadata without first allocating the full detoasted payload.
+    let size = unsafe { pg_sys::toast_raw_datum_size(value.datum()) };
+    if size > MAX_INPUT_BYTES + pg_sys::VARHDRSZ {
+        fail(
+            PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            "pg_charabia input exceeds 262144 bytes",
+        );
+    }
+    // SAFETY: PG owns the original or detoasted allocation in the current
+    // context; packed varlena helpers support both short and ordinary headers.
+    let text = unsafe { pg_sys::pg_detoast_datum_packed(value.datum().cast_mut_ptr()) };
+    let length = unsafe { pgrx::varlena::varsize_any_exhdr(text) };
+    let data = unsafe { pgrx::varlena::vardata_any(text) };
+    let length = i32::try_from(length).unwrap_or_else(|_| {
+        fail(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "text Datum length overflow",
+        )
+    });
+    // SAFETY: The detoasted PG allocation contains this many live bytes.
+    unsafe { input(data.cast(), length) }
 }
 
 /// # Safety

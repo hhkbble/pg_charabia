@@ -54,7 +54,7 @@ def main():
     require(report.get("analysis_info_verified") and report.get("fts_callback_abi_verified"), "Runtime identity and FTS ABI were not verified")
     require(report.get("pg_textsearch", {}).get("loaded_backend_verified"), "The actual pg_textsearch backend library was not verified")
     commands = {item["label"]: item for item in report["commands"]}
-    for label in ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "analysis-info"):
+    for label in ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "analysis-info", "documentation-examples"):
         require(label in commands and commands[label]["exit_code"] == 0, f"Missing successful {label} evidence")
     for suite in REQUIRED_SUITES - {"unit"}:
         labels = [key for key in commands if key.startswith(f"suite-{suite}-")]
@@ -91,6 +91,8 @@ def main():
         for item in inner_dir.iterdir():
             if item.is_file():
                 shutil.copy2(item, verification / item.name)
+            elif item.is_dir() and item.name != "package":
+                shutil.copytree(item, verification / item.name)
         manifest = {
             "extension": "pg_charabia", "version": version, "platform": "linux/amd64",
             "postgres_major": 18, "postgres_build": report["postgres"],

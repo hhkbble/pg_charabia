@@ -30,6 +30,12 @@ CREATE FUNCTION public.raw_analyze(text) RETURNS TABLE(raw text,lemma text,kind 
         result = run("\\set VERBOSITY verbose\n"+sql, database, check=False)
         assert result.returncode != 0 and "0A000" in result.stderr, result.stderr
         results["encoding"][name] = result.stderr.strip()
+    with Session(database) as session:
+        output=session.query("SELECT * FROM public.raw_analyze(convert_from(decode('ff','hex'),'SQL_ASCII'))")
+        results["encoding"]["diagnostic_invalid_utf8"]=output
+        save("errors-results.json",results)
+        assert "0A000" in output,output
+        assert session.value("SELECT 1")=="1"
 finally:
     run(f"DROP DATABASE {database}")
 

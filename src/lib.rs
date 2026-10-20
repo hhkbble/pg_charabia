@@ -1,5 +1,5 @@
-use pgrx::JsonB;
 use pgrx::prelude::*;
+use pgrx::{AnyElement, JsonB};
 
 pgrx::pg_module_magic!();
 
@@ -19,7 +19,7 @@ mod test_hooks;
     reason = "Keep the SQL record's named columns explicit at the pgrx boundary"
 )]
 fn analyze_v1(
-    text: &str,
+    text: AnyElement,
 ) -> TableIterator<
     'static,
     (
@@ -35,7 +35,9 @@ fn analyze_v1(
         name!(route, String),
     ),
 > {
-    pg_ffi::require_utf8();
+    // SAFETY: The explicit SQL definition accepts a live text Datum. Decoding
+    // here lets the encoding and byte limit checks precede Rust str conversion.
+    let text = unsafe { pg_ffi::text_input(text) };
     let rows = pg_ffi::checked(analysis::analyze(text));
     TableIterator::new(rows.into_iter().map(|row| {
         (

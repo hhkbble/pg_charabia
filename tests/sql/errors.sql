@@ -23,6 +23,17 @@ SELECT pg_temp.expect_error($s$SELECT to_tsvector('charabia.default_v1',repeat('
 SELECT pg_temp.expect_error($s$SELECT ts_parse('charabia.parser_v1',repeat('a',262145))$s$,'54000');
 SELECT pg_temp.expect_error($s$SELECT ts_lexize('charabia.norm_latin_v1',repeat('a',262145))$s$,'54000');
 SELECT pg_temp.expect_error($s$SELECT * FROM charabia.analyze_v1(repeat('a',262145))$s$,'54000');
+CREATE TABLE errors.toasted(body text);
+INSERT INTO errors.toasted VALUES(repeat('a',262144)),(repeat('a',262145));
+DO $boundary$
+DECLARE covered bigint;
+BEGIN
+    SELECT sum(byte_end-byte_start) INTO covered FROM charabia.analyze_v1(
+        (SELECT body FROM errors.toasted WHERE octet_length(body)=262144));
+    IF covered IS DISTINCT FROM 262144 THEN RAISE EXCEPTION 'toasted text boundary: %',covered; END IF;
+END
+$boundary$;
+SELECT pg_temp.expect_error($s$SELECT * FROM charabia.analyze_v1((SELECT body FROM errors.toasted WHERE octet_length(body)=262145))$s$,'54000');
 SELECT pg_temp.expect_error($s$SELECT to_tsquery('charabia.default_v1','cat &')$s$,'42601');
 SELECT pg_temp.expect_error($s$SELECT ts_headline('charabia.default_v1','cat',plainto_tsquery('charabia.default_v1','cat'))$s$,'0A000');
 DO $$ BEGIN

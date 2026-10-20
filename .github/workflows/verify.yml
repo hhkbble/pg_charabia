@@ -11,7 +11,7 @@ jobs:
       - name: Build and verify the actual release library
         run: ./scripts/verify-linux-amd64
       - name: Supplemental guarded faults
-        run: ./scripts/verify-linux-amd64 --suite errors --test-hooks --debug --no-build-image
+        run: ./scripts/verify-linux-amd64 --suite errors,lifecycle,stress --test-hooks --debug --no-build-image
       - name: Preserve evidence on success and failure
         if: always()
         uses: actions/upload-artifact@v4

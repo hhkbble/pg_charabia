@@ -324,6 +324,8 @@ def main():
                 command(psql + ["-f", sql], f"suite-{suite}-sql")
             if python.is_file():
                 command([sys.executable, python], f"suite-{suite}-python")
+        if args.platform == "linux-amd64" and selected == all_suites:
+            command([sys.executable, ROOT / "tests/examples.py"], "documentation-examples")
         probe = env.get("PGCB_CLEANUP_PROBE")
         if probe == "sql-error":
             command(psql + ["-c", "SELECT 1/0;"], "cleanup-probe-sql-error")
