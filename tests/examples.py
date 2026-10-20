@@ -83,7 +83,9 @@ try:
     results["bm25_plans"] = {"query":ranked,"default":default_plan,"index":forced_plan}
     check(any(node.get("Node Type") == "Index Scan" and node.get("Index Name") == "documents_bm25" and node.get("Actual Loops",0) > 0 for node in nodes(forced_plan)),
           "README ranking executes the actual target BM25 index",forced_plan)
-    bm_ids = run(ranked,database)
+    results["bm25_default_ids"] = run(ranked,database)
+    bm_ids = run("SET enable_seqscan=off;" + ranked,database)
+    results["bm25_index_ids"] = bm_ids
     check(bm_ids == "1","BM25 candidate meets the independent original-text expectation",bm_ids)
     highlighted = run("SELECT ts_headline('public.charabia',body,charabia.query_any('全文','public.charabia'),'MaxFragments=2') FROM documents WHERE id=1",database)
     check("<b>全文</b>" in highlighted and "PostgreSQL" in highlighted,"standard headline keeps original source bytes around the hit",highlighted)
