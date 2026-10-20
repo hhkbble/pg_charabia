@@ -2,7 +2,9 @@
 """Real PG18 headline calls: source fidelity, strict errors and request reuse."""
 import html
 import json
+import os
 import re
+import sys
 from support import Session, literal, save
 
 report = {"status": "running", "checks": [], "errors": [], "source": {
@@ -23,12 +25,73 @@ def check(condition, label, evidence):
         raise AssertionError(label + ": " + repr(evidence))
 
 
-def headline(session, raw, query="'cafe'::tsquery", options="HighlightAll=true"):
-    sql = f"SELECT to_json(ts_headline('public.charabia',{literal(raw)},{query},{literal(options)}))"
+def headline(session, raw, query="'cafe'::tsquery", options="HighlightAll=true", config="public.charabia"):
+    sql = f"SELECT to_json(ts_headline({literal(config)},{literal(raw)},{query},{literal(options)}))"
     value = json.loads(session.value(sql))
     report.setdefault("calls", []).append({"sql": sql, "result": value})
     checkpoint()
     return value
+
+
+def fragment_positions(session):
+    """Exercise selection, which HighlightAll deliberately bypasses."""
+    schema = "pgcb_headline_" + str(os.getpid())
+    config = schema + ".positions"
+    session.value("CREATE SCHEMA " + schema)
+    try:
+        # The hole must not depend on statistical language selection. All routes
+        # explicitly stop the same raw word; surface alpha/beta are unchanged.
+        routes = json.loads(session.value(
+            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
+            "WHERE alias <> 'display_only'"))
+        settings = {"builtin_stopwords": False,
+                    "stopwords_add": {route: ["the"] for route in routes}}
+        session.value("SELECT charabia.create_config(" + literal(config) + "," +
+                      literal(json.dumps(settings)) + "::jsonb)")
+        raw = "one two three four five six seven eight nine ten alpha the beta tail final"
+        options = "MinWords=2,MaxWords=3,MaxFragments=1"
+        # Independent position contract: one Stop consumes exactly one position.
+        for query, matches, expected in (
+            ("'alpha <2> beta'::tsquery", True, "<b>alpha</b> the <b>beta</b>"),
+            ("'alpha <-> beta'::tsquery", False, "one two"),
+        ):
+            native = session.value("SELECT to_tsvector(" + literal(config) + "," +
+                                   literal(raw) + ") @@ " + query)
+            check(native == ("t" if matches else "f"),
+                  "explicit Stop hole defines the native phrase distance", native)
+            actual = headline(session, raw, query, options, config)
+            check(actual == expected,
+                  "position-aware fragment selection distinguishes true and false phrases", {
+                      "query": query, "expected": expected, "actual": actual,
+                      "basis": "PG18 hlCover and no-cover first MinWords fallback; explicit Stop hole"})
+
+        # An unambiguous English prefix makes run/running two operands for one
+        # source word. The three-word budget counts that word once and Stop once.
+        raw = ("The children were running through the garden while the teachers were reading "
+               "books and sharing their happy memories together. lead running the tail next final")
+        positions = json.loads(session.value(
+            "SELECT jsonb_object_agg(lexeme,positions) FROM unnest(to_tsvector(" +
+            literal(config) + "," + literal(raw) + ")) WHERE lexeme IN ('lead','run','running')"))
+        lead = positions.get("lead", [])
+        check(len(lead) == 1 and all(lead[0] + 1 in positions.get(term, []) for term in ("run", "running")),
+              "late fragment word actually has surface and stem at the same position", positions)
+        # Choose the only late match using a phrase anchor to exclude the prefix's
+        # earlier running; both variants still match the same raw late token.
+        actual = headline(session, raw, "'lead <-> (run | running)'::tsquery", options, config)
+        check(actual == "<b>lead</b> <b>running</b> the",
+              "fragment budget counts a Stop once and repeated variants zero times", {
+                  "expected": "<b>lead</b> <b>running</b> the", "actual": actual,
+                  "basis": "PG18 get_next_fragment/mark_hl_fragments; two content words plus one Stop"})
+    finally:
+        primary = sys.exception()
+        try:
+            session.value("DROP SCHEMA " + schema + " CASCADE")
+        except BaseException as cleanup_error:
+            report.setdefault("cleanup_errors", []).append(repr(cleanup_error))
+            checkpoint()
+            if primary is None:
+                raise
+            primary.add_note("headline fixture cleanup also failed: " + repr(cleanup_error))
 
 
 try:
@@ -63,6 +126,7 @@ try:
                              'MinWords=2,MaxWords=6,MaxFragments=2,FragmentDelimiter="[cut]"')
         check(fragments.count("<b>needle</b>") == 2 and "[cut]" in fragments and len(fragments) < len(text),
               "selector returns both separated covers in source order", fragments)
+        fragment_positions(session)
 
         # PG's deserialize_deflist owns CSV/quoting; the adapter receives parsed values.
         actual = headline(session, "CAFÉ", options='HighlightAll=YES,StartSel="[a,b]",StopSel="[/a,b]"')
