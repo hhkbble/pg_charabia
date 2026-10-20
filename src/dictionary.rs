@@ -26,6 +26,7 @@ fn dictionary_init(options: Internal) -> Internal {
     // DDL validation context; owned_state attaches cleanup to that context.
     let parameters = unsafe { pg_ffi::dictionary_options(options) };
     let route = parameters.route;
+    pgrx::check_for_interrupts!();
     let options = pg_ffi::checked(analysis::Options::new(
         route,
         parameters.stemming,
@@ -33,6 +34,7 @@ fn dictionary_init(options: Internal) -> Internal {
         &parameters.add,
         &parameters.keep,
     ));
+    pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     let generation = crate::test_hooks::dictionary_created(fst_bytes(&options));
     // SAFETY: The state owns its FST, Drop is pure Rust, and LEXIZE borrows the
@@ -74,5 +76,6 @@ fn dictionary_lexize(
         let state = unsafe { pg_ffi::state::<DictionaryState>(&state) };
         analysis::normalize(text, state.route, &state.options)
     };
+    pgrx::check_for_interrupts!();
     pg_ffi::lexemes(pg_ffi::checked(outcome))
 }

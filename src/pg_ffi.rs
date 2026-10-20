@@ -429,6 +429,7 @@ pub fn cached_inspect(id: pg_sys::Oid, text: &str, route: Route) -> crate::analy
                 crate::analysis::inspect(text, route, &state.options)
             }
         };
+        pgrx::check_for_interrupts!();
         checked(outcome)
     }
 }
