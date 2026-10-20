@@ -1,0 +1,21 @@
+name: Verify PG18 Linux AMD64
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and verify the actual release library
+        run: ./scripts/verify-linux-amd64
+      - name: Supplemental guarded faults
+        run: ./scripts/verify-linux-amd64 --suite errors --test-hooks --debug --no-build-image
+      - name: Preserve evidence on success and failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg18-linux-amd64-evidence
+          path: artifacts/
+          retention-days: 14

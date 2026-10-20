@@ -1,0 +1,104 @@
+{
+  "analysis_profile": "auto_v1",
+  "charabia": "0.10.0",
+  "charabia_commit": "bc63b9860434f06cf78b51bb0eab00aaefb69f15",
+  "lindera": "5.3.0",
+  "jieba_rs": "0.10.4",
+  "whatlang": "0.18.0",
+  "irg_kvariants": "0.1.1",
+  "features": [
+    "chinese",
+    "hebrew",
+    "japanese",
+    "thai",
+    "korean",
+    "greek",
+    "khmer",
+    "vietnamese",
+    "swedish-recomposition",
+    "turkish",
+    "german-segmentation"
+  ],
+  "runtime_downloads": false,
+  "archives": [
+    {
+      "name": "unidic-mecab-2.1.2.tar.gz",
+      "url": "https://Lindera.dev/unidic-mecab-2.1.2.tar.gz",
+      "upstream_md5": "f4502a563e1da44747f61dcd2b269e35",
+      "license": "BSD alternative",
+      "sha256": "24ac75fe4e44d973b55e65847c35fa4aec2db7a41a07b49ca125146db9fc1189",
+      "bytes": 140515741
+    },
+    {
+      "name": "mecab-ko-dic-2.1.1-20180720.tar.gz",
+      "url": "https://Lindera.dev/mecab-ko-dic-2.1.1-20180720.tar.gz",
+      "upstream_md5": "b996764e91c96bc89dc32ea208514a96",
+      "license": "Apache-2.0",
+      "sha256": "702ced21c6167e9d9aebc674ab5ee54af58d4443975f2940d37d0567c020591a",
+      "bytes": 49767335
+    }
+  ],
+  "additional_notices": [
+    {
+      "repository": "unicode-org/icu",
+      "license_source_commit": "0be8b4f8029a23027d5896aa6541679d941164c9",
+      "url": "https://raw.githubusercontent.com/unicode-org/icu/0be8b4f8029a23027d5896aa6541679d941164c9/LICENSE",
+      "notice": "notices/icu-LICENSE.txt",
+      "notice_sha256": "e09827667e0bb3c808b2a463548ba814a5e6249b67353234d70c8dfc2bcc417d",
+      "note": "Upstream notice snapshot; embedded dictionary identity is pinned separately by Charabia crate and data SHA256."
+    },
+    {
+      "repository": "PyThaiNLP/nlpo3",
+      "license_source_commit": "37ec29bdfcd0d0931dabe5d008f0580f43e3c483",
+      "url": "https://raw.githubusercontent.com/PyThaiNLP/nlpo3/37ec29bdfcd0d0931dabe5d008f0580f43e3c483/LICENSE",
+      "notice": "notices/nlpo3-LICENSE.txt",
+      "notice_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "note": "Upstream notice snapshot; embedded dictionary identity is pinned separately by Charabia crate and data SHA256."
+    },
+    {
+      "repository": "uschindler/german-decompounder",
+      "license_source_commit": "6fb4deb6c9152f2feca4b13d5c8250264f685538",
+      "url": "https://raw.githubusercontent.com/uschindler/german-decompounder/6fb4deb6c9152f2feca4b13d5c8250264f685538/NOTICE.txt",
+      "notice": "notices/german-decompounder-NOTICE.txt",
+      "notice_sha256": "abb37d58a38238c34814c4433293fddea2c53e7e377a7763abce9517219e1033",
+      "note": "Upstream notice snapshot; embedded dictionary identity is pinned separately by Charabia crate and data SHA256."
+    }
+  ],
+  "embedded_data": [
+    {
+      "crate": "charabia",
+      "version": "0.10.0",
+      "path": "dictionaries/fst/german/words.fst",
+      "sha256": "fafef0c1258549ed3a7fac0d73bbcc874226e58d43d61eb20bddf30256ed96e2",
+      "bytes": 142094
+    },
+    {
+      "crate": "charabia",
+      "version": "0.10.0",
+      "path": "dictionaries/fst/thai/words.fst",
+      "sha256": "1b7a36a693f90f83f6084dc9525d9b18bd9a7e391de0ea05f7e27c6314bd49e2",
+      "bytes": 893314
+    },
+    {
+      "crate": "charabia",
+      "version": "0.10.0",
+      "path": "dictionaries/fst/khmer/words.fst",
+      "sha256": "e971bb0b1c43497d1e492539f05ba9c058754b878cfc45543f3913428c81559e",
+      "bytes": 1042497
+    },
+    {
+      "crate": "charabia",
+      "version": "0.10.0",
+      "path": "dictionaries/bin/nonspacing_mark/marks.bin",
+      "sha256": "850e35d76291154d7ba883cd94a6986082e577933927fabe191cb3031df9ea2b",
+      "bytes": 5124
+    },
+    {
+      "crate": "charabia",
+      "version": "0.10.0",
+      "path": "dictionaries/txt/german/words.txt",
+      "sha256": "9a643bc1e0ce04337100a4b62a39d3e8ead004458d46f5ddf01c0c02ec5844a1",
+      "bytes": 304396
+    }
+  ]
+}

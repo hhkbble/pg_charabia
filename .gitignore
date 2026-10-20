@@ -1,0 +1,8 @@
+/target/
+/artifacts/
+/dist/
+/.cache/
+*.dSYM/
+.DS_Store
+__pycache__/
+*.pyc

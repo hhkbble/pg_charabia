@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Exercise successful, SQL-failing and interrupted isolated-cluster runs."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--platform", choices=("macos-arm64", "linux-amd64"), required=True)
+parser.add_argument("--debug", action="store_true", help="Use the cached debug library for cleanup probes")
+args = parser.parse_args()
+results = []
+for probe in (None, "sql-error", "sigterm"):
+    env = dict(os.environ)
+    if probe:
+        env["PGCB_CLEANUP_PROBE"] = probe
+    else:
+        env.pop("PGCB_CLEANUP_PROBE", None)
+    if args.platform == "macos-arm64":
+        argv = [str(root / "scripts/dev-test"), "--suite", "build"]
+    else:
+        argv = [str(root / "scripts/verify-linux-amd64"), "--suite", "build", "--no-build-image"]
+        if probe:
+            argv += ["--cleanup-probe", probe]
+    if args.debug:
+        argv.append("--debug")
+    proc = subprocess.run(argv, cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    sys.stdout.write(proc.stdout)
+    evidence_lines = [line for line in proc.stdout.splitlines() if "; evidence: " in line]
+    if not evidence_lines:
+        raise SystemExit("Runner omitted its evidence path")
+    evidence = Path(evidence_lines[-1].split("; evidence: ", 1)[1])
+    report = json.loads((evidence / ("run.json" if args.platform == "macos-arm64" else "outer-run.json")).read_text())
+    expected_status = "passed" if probe is None else "failed"
+    if report["status"] != expected_status or ((proc.returncode == 0) != (probe is None)):
+        raise SystemExit(f"Unexpected probe result: {report}")
+    cleanup = report["cleanup"]
+    if args.platform == "macos-arm64":
+        valid = cleanup["marker_matches"] and cleanup["cluster_stopped"] and cleanup["directory_removed"]
+    else:
+        valid = cleanup["container_removed"] and cleanup.get("volumes_removed", True)
+        inner_reports = list(evidence.glob("*/run.json"))
+        if len(inner_reports) != 1:
+            raise SystemExit("Expected one inner cluster report")
+        inner = json.loads(inner_reports[0].read_text())
+        valid = valid and all(inner["cleanup"].get(k) for k in ("marker_matches", "cluster_stopped", "directory_removed"))
+    if not valid:
+        raise SystemExit(f"Cleanup did not pass: {report}")
+    results.append({"probe": probe or "success", "evidence": str(evidence), "exit_code": proc.returncode})
+print(json.dumps({"status": "passed", "platform": args.platform, "probes": results}, indent=2))

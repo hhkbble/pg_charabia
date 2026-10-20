@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Package a fully verified Linux AMD64 release locally, without publishing."""
+import argparse
+import datetime
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import tarfile
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+REQUIRED_SUITES = {"unit", "smoke", "native", "bm25", "lifecycle", "errors", "stress", "benchmark"}
+
+def digest(path):
+    state = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            state.update(block)
+    return state.hexdigest()
+
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+def verify_checksums(package):
+    checksums = package / "SHA256SUMS"
+    require(checksums.is_file(), "The verified package lacks SHA256SUMS")
+    for line in checksums.read_text().splitlines():
+        expected, relative = line.split("  ", 1)
+        path = (package / relative).resolve()
+        require(path.is_relative_to(package.resolve()) and path.is_file(), f"Invalid package manifest path: {relative}")
+        require(digest(path) == expected, f"Package checksum mismatch: {relative}")
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run", type=Path, required=True, help="Successful outer Linux verifier evidence directory")
+    parser.add_argument("--out-dir", type=Path, default=ROOT / "dist")
+    args = parser.parse_args()
+    evidence = args.run.resolve()
+    outer = json.loads((evidence / "outer-run.json").read_text())
+    require(outer["status"] == "passed" and outer["platform"] == "linux/amd64", "A successful Linux AMD64 run is required")
+    require(outer["cleanup"]["container_removed"] and outer["cleanup"].get("volumes_removed", True), "Outer cleanup did not pass")
+    reports = list(evidence.glob("*/run.json"))
+    require(len(reports) == 1, "Expected exactly one inner verifier report")
+    inner_dir = reports[0].parent
+    report = json.loads(reports[0].read_text())
+    require(report["run_id"] == outer["run_id"] + "-inner", "Inner and outer run IDs do not match")
+    require(report["status"] == "passed" and report["platform"] == "linux-amd64", "Inner Linux verifier failed")
+    require(report.get("build_profile") == "release" and report["test_hooks"] is False, "Debug or test-hook builds cannot be packaged for delivery")
+    require(set(report["suites"]) == REQUIRED_SUITES, "All required release suites, including benchmark, must pass in the same run")
+    require(all(report["cleanup"].get(key) for key in ("marker_matches", "cluster_stopped", "directory_removed")), "Cluster cleanup did not pass")
+    require(report.get("analysis_info_verified") and report.get("fts_callback_abi_verified"), "Runtime identity and FTS ABI were not verified")
+    require(report.get("pg_textsearch", {}).get("loaded_backend_verified"), "The actual pg_textsearch backend library was not verified")
+    commands = {item["label"]: item for item in report["commands"]}
+    for label in ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "analysis-info"):
+        require(label in commands and commands[label]["exit_code"] == 0, f"Missing successful {label} evidence")
+    for suite in REQUIRED_SUITES - {"unit"}:
+        labels = [key for key in commands if key.startswith(f"suite-{suite}-")]
+        require(labels and all(commands[key]["exit_code"] == 0 for key in labels), f"Missing successful {suite} suite")
+    current_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    current_status = subprocess.check_output(["git", "status", "--porcelain=v1"], cwd=ROOT, text=True)
+    require(not report["git_status"] and not current_status, "A clean tested checkout and clean current checkout are required")
+    require(current_commit == report["git_commit"], "The current commit differs from the tested commit")
+    package = inner_dir / "package"
+    verify_checksums(package)
+    libraries = list((package / "extension").glob("pg_charabia.so"))
+    require(len(libraries) == 1, "Expected one verified Linux extension .so")
+    library_hash = digest(libraries[0])
+    require(library_hash == report["library"]["sha256"] == report["loaded_library_sha256"], "Packaged and actually loaded library hashes differ")
+    require(digest(ROOT / "Cargo.lock") == report["cargo_lock_sha256"], "Current Cargo.lock differs from the tested build")
+    require(digest(ROOT / "resources/manifest.json") == report["resources_sha256"], "Current resource manifest differs from the tested build")
+    require((ROOT / "LICENSE").is_file() and (ROOT / "README.md").is_file(), "Project LICENSE and usage README are required")
+    version = report["analysis_info"]["extension"]
+    name = f"pg_charabia-{version}-pg18-linux-amd64-{current_commit[:12]}"
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    archive = args.out_dir / (name + ".tar.gz")
+    require(not archive.exists(), f"Refusing to overwrite existing delivery artifact: {archive}")
+    with tempfile.TemporaryDirectory(prefix="pgcb-package.") as temp:
+        delivery = Path(temp) / name
+        shutil.copytree(package, delivery)
+        shutil.copy2(ROOT / "LICENSE", delivery / "LICENSE")
+        shutil.copy2(ROOT / "README.md", delivery / "README.md")
+        if (ROOT / "docs").is_dir():
+            shutil.copytree(ROOT / "docs", delivery / "docs")
+        shutil.copy2(ROOT / "docker/environment.lock.json", delivery / "environment.lock.json")
+        verification = delivery / "verification"
+        verification.mkdir()
+        shutil.copy2(evidence / "outer-run.json", verification / "outer-run.json")
+        for item in inner_dir.iterdir():
+            if item.is_file():
+                shutil.copy2(item, verification / item.name)
+        manifest = {
+            "extension": "pg_charabia", "version": version, "platform": "linux/amd64",
+            "postgres_major": 18, "postgres_build": report["postgres"],
+            "target": report["target_triple"], "build_profile": "release", "test_hooks": False,
+            "source_commit": current_commit, "source_dirty": False,
+            "verified_run": report["run_id"], "verified_outer_run": outer["run_id"],
+            "library_sha256": library_hash, "cargo_lock_sha256": report["cargo_lock_sha256"],
+            "resource_manifest_sha256": report["resources_sha256"], "image_id": outer["image_id"],
+            "packaged_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "public_upload": False,
+        }
+        (delivery / "delivery-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        checksums = [f"{digest(p)}  {p.relative_to(delivery)}" for p in sorted(delivery.rglob("*")) if p.is_file() and p != delivery / "SHA256SUMS"]
+        (delivery / "SHA256SUMS").write_text("\n".join(checksums) + "\n")
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(delivery, arcname=name)
+    archive_digest = digest(archive)
+    checksum_path = archive.with_name(archive.name + ".sha256")
+    checksum_path.write_text(f"{archive_digest}  {archive.name}\n")
+    print(json.dumps({"archive": str(archive.resolve()), "sha256": archive_digest, "checksum_file": str(checksum_path.resolve()), "source_commit": current_commit, "verified_run": report["run_id"]}, indent=2))
+
+if __name__ == "__main__":
+    main()
