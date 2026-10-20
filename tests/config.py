@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from support import EVIDENCE, PSQL, Session, literal, run, save
@@ -39,11 +40,12 @@ def error(session, sql, label, state='22023'):
     check('ERROR:'in output and state in output,label,output)
     check(session.value('SELECT 1')=='1','backend recovers after '+label)
 
-def concurrent_copy():
+def concurrent_copy(failure_probe=False):
     # An uncommitted standard COPY already holds dictionary dependency locks,
     # but is invisible to the first shared-mapping check. After waiting, ALTER
     # must inspect current catalogs even under a repeatable-read snapshot.
-    for isolation, suffix in [('READ COMMITTED','rc'),('REPEATABLE READ','rr')]:
+    cases=[('READ COMMITTED','cleanup')] if failure_probe else [('READ COMMITTED','rc'),('REPEATABLE READ','rr')]
+    for isolation, suffix in cases:
         original=schema+'.race_'+suffix
         copied=schema+'.race_copy_'+suffix
         with Session() as setup:
@@ -72,6 +74,10 @@ def concurrent_copy():
                     if run(f'SELECT {copier.pid}=ANY(pg_blocking_pids({writer.pid}))')=='t':
                         observation['blocked']=True;break
                     time.sleep(0.02)
+                if failure_probe:
+                    check(observation['blocked'],'cleanup probe reached a blocked writer',observation)
+                    check(run(f'SELECT pg_terminate_backend({copier.pid})')=='t','terminate only the owned blocker')
+                    raise AssertionError('injected config observer failure')
                 copier.value('COMMIT')
                 worker.join(timeout=20)
                 observation['outcome']=[str(item) for item in outcome]
@@ -94,21 +100,60 @@ def concurrent_copy():
             finally:
                 # Release the blocker first, then cancel and join the exact
                 # owned writer. Never leave a test thread using a closed Session.
-                copier.query('ROLLBACK')
+                primary=sys.exception()
+                cleanup_errors=[]
+                try:
+                    copier.query('ROLLBACK')
+                except BaseException as exc:
+                    cleanup_errors.append('blocker rollback: '+repr(exc))
                 if worker.is_alive():
-                    writer.cancel()
+                    try:
+                        writer.cancel()
+                    except BaseException as exc:
+                        cleanup_errors.append('writer cancel: '+repr(exc))
                 worker.join(timeout=20)
-                observation['thread_exited']=not worker.is_alive();checkpoint()
                 if worker.is_alive():
-                    writer.process.kill();worker.join(timeout=5)
-                    raise AssertionError('configuration writer thread did not join')
-                writer.query('ROLLBACK')
+                    try:
+                        run(f'SELECT pg_terminate_backend({writer.pid})',timeout=10)
+                    except BaseException as exc:
+                        cleanup_errors.append('writer terminate: '+repr(exc))
+                    finally:
+                        worker.join(timeout=10)
+                if worker.is_alive():
+                    try:
+                        writer.process.kill()
+                    except BaseException as exc:
+                        cleanup_errors.append('writer process kill: '+repr(exc))
+                    finally:
+                        worker.join(timeout=5)
+                if not worker.is_alive():
+                    try:
+                        writer.query('ROLLBACK')
+                    except BaseException as exc:
+                        cleanup_errors.append('writer rollback: '+repr(exc))
+                observation['thread_exited']=not worker.is_alive()
+                observation['cleanup_errors']=cleanup_errors;checkpoint()
+                if worker.is_alive() or cleanup_errors:
+                    message=f'configuration cleanup: alive={worker.is_alive()}, errors={cleanup_errors}'
+                    if primary is None:
+                        raise AssertionError(message)
+                    primary.add_note(message)
         run('DROP TEXT SEARCH CONFIGURATION '+copied)
         run('SELECT charabia.drop_config('+literal(original)+')')
 
 try:
     run(f'CREATE ROLE {owner};CREATE ROLE {other};CREATE SCHEMA {schema} AUTHORIZATION {owner}')
     concurrent_copy()
+    try:
+        concurrent_copy(failure_probe=True)
+    except AssertionError as exc:
+        check(str(exc)=='injected config observer failure','cleanup preserves the exact primary failure',repr(exc))
+        probe=report['concurrent_copy'][-1]
+        probe['primary_notes']=getattr(exc,'__notes__',[])
+        check(probe['thread_exited'] and any(e.startswith('blocker rollback:')for e in probe['cleanup_errors']),
+              'broken blocker connection cannot bypass writer join',probe)
+    else:
+        raise AssertionError('configuration cleanup failure probe did not execute')
     with Session() as s:
         # Default extension members cannot accumulate user settings lost by dump.
         error(s,"SELECT charabia.alter_config('public.charabia','{}')",'default is fixed')
