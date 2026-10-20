@@ -52,6 +52,8 @@ fn point_id(point: &str) -> u32 {
         "lexize" => 5,
         "register_alloc" => 6,
         "register_link" => 7,
+        "headline_selector" => 8,
+        "headline_escape" => 9,
         _ => pg_ffi::fail(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "unknown test fault point",
@@ -99,7 +101,7 @@ pub fn hit(point: &str) {
 }
 
 #[pg_extern(sql = false)]
-fn test_set_fault_v1(point: &str, mode: &str) {
+fn test_set_fault(point: &str, mode: &str) {
     let mode = match mode {
         "error" => 1,
         "panic" => 2,
@@ -114,7 +116,7 @@ fn test_set_fault_v1(point: &str, mode: &str) {
 }
 
 #[pg_extern(sql = false)]
-fn test_stats_v1() -> JsonB {
+fn test_stats() -> JsonB {
     JsonB(serde_json::json!({
         "parser_created":PARSER_CREATED.load(Ordering::Relaxed),
         "parser_dropped":PARSER_DROPPED.load(Ordering::Relaxed),

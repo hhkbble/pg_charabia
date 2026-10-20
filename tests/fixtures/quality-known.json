@@ -1,0 +1,27 @@
+{
+  "format": 2,
+  "basis": "Frozen unresolved domain expectations and observed failures from direct pinned-library probes. Inputs and failure signatures are retained below. Diagnostic controls and new failures do not expand this list.",
+  "cases": {
+    "english-den": {
+      "input": "A fox sleeps in its den after hunting through the woods with its family.",
+      "query": "den",
+      "config": "public.charabia",
+      "expected": true,
+      "actual": false
+    },
+    "code-var": {
+      "input": "The compiler stores values in a variable named var and checks them using static types.",
+      "query": "var",
+      "config": "public.charabia",
+      "expected": true,
+      "actual": false
+    },
+    "english-short-phrase": {
+      "input": "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running.",
+      "query": "cats were running",
+      "config": "public.charabia",
+      "expected": true,
+      "actual": false
+    }
+  }
+}

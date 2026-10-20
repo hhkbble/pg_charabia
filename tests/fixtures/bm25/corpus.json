@@ -1,38 +1,240 @@
 {
-  "basis": "Independent retrieval expectations. Chinese and PostgreSQL cases retain reviewed standalone Charabia smoke observations. Japanese/Korean texts and Latin accent normalization retain recorded Charabia 0.10.0 pipeline observations, including CAFÉ -> cafe. Subterm retrieval is a domain requirement. Native overlap checks index consistency, not segmentation quality.",
+  "basis": "Independent domain retrieval expectations and original texts retained from direct pinned-library probes. Original-word recall, native term-overlap consistency, and ranking quality are separate checks. Mutable IDs 20 and 21 are explicit CRUD requirements. Raw scores are observations, never golden values.",
   "documents": [
-    [1, "中文全文检索 PostgreSQL 18 支持 BM25"],
-    [2, "POSTGRESQL English documentation"],
-    [3, "unrelated banana"],
-    [4, "関西国際空港限定トートバッグ 日本語の検索"],
-    [5, "한국어의형태해석을실시할수있습니다"],
-    [6, "Café résumé naïve"],
-    [7, "foo_bar v1.2.3 /usr/local/bin https://example.com Rust"],
-    [8, "传统汉字與繁體中文"],
-    [9, ""],
-    [10, "the PostgreSQL"],
-    [11, " \t\n"]
+    [
+      1,
+      "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running."
+    ],
+    [
+      2,
+      "中文全文检索 PostgreSQL 18 支持 BM25"
+    ],
+    [
+      3,
+      "Les lettres ont été aimées par les enfants qui aiment lire des histoires et découvrir de nouvelles choses dans le monde."
+    ],
+    [
+      4,
+      "Çocukların kitapları masanın üzerinde duruyor ve öğretmenler akşamları bahçede oynayan çocuklarla konuşuyorlar IŞIKLAR."
+    ],
+    [
+      5,
+      "flickornas röster hördes över den stora gården och skogarna hästarna"
+    ],
+    [
+      6,
+      "한국어 데이터베이스 검색 시스템"
+    ],
+    [
+      7,
+      "Базы данных поддерживают быстрый поиск документов на русском языке."
+    ],
+    [
+      8,
+      "日本語の検索とデータベース"
+    ],
+    [
+      9,
+      "run"
+    ],
+    [
+      10,
+      "unrelated banana"
+    ],
+    [
+      11,
+      "A fox sleeps in its den after hunting through the woods with its family."
+    ],
+    [
+      12,
+      "The compiler stores values in a variable named var and checks them using static types."
+    ],
+    [
+      13,
+      "Les jeunes filles ont aimé les histoires racontées par leurs familles et les chevaux couraient dans la campagne française."
+    ],
+    [
+      14,
+      "CAFÉ résumé naïve"
+    ],
+    [
+      15,
+      "foo_bar v1.2.3 /usr/local/bin https://example.com Rust"
+    ],
+    [
+      16,
+      ""
+    ],
+    [
+      17,
+      " \t\n"
+    ]
   ],
   "queries": [
-    {"name": "chinese", "text": "全文", "expected_ids": [1]},
-    {"name": "english_case", "text": "PostgreSQL", "expected_ids": [1, 2, 10]},
-    {"name": "mixed_or_terms", "text": "全文 banana", "expected_ids": [1, 3]},
-    {"name": "japanese", "text": "日本語", "expected_ids": [4]},
-    {"name": "japanese_kana", "text": "トートバッグ", "expected_ids": [4]},
-    {"name": "korean", "text": "한국어", "expected_ids": [5]},
-    {"name": "latin_accent", "text": "cafe", "expected_ids": [6]},
-    {"name": "unknown", "text": "qzxnevermatchcanary", "expected_ids": []},
-    {"name": "identifier", "text": "foo_bar"},
-    {"name": "url", "text": "https://example.com"},
-    {"name": "mixed_script", "text": "中文 Rust"},
-    {"name": "traditional", "text": "繁體中文"},
-    {"name": "empty", "text": "", "expected_ids": [], "empty_analysis": true},
-    {"name": "whitespace", "text": " \t\n", "expected_ids": [], "empty_analysis": true}
-  ],
-  "stop_queries": [
-    {"name": "stop_only", "text": "the", "expected_ids": [], "empty_analysis": true},
-    {"name": "stop_plus_content", "text": "the PostgreSQL", "expected_ids": [1, 2, 10]},
-    {"name": "content_only", "text": "PostgreSQL", "expected_ids": [1, 2, 10]},
-    {"name": "uppercase_not_stop", "text": "The", "expected_ids": []}
+    {
+      "name": "chinese",
+      "text": "全文",
+      "expected_ids": [
+        2
+      ]
+    },
+    {
+      "name": "english_case",
+      "text": "PostgreSQL",
+      "expected_ids": [
+        2
+      ]
+    },
+    {
+      "name": "mixed_or_terms",
+      "text": "全文 banana",
+      "expected_ids": [
+        2,
+        10
+      ]
+    },
+    {
+      "name": "surface_running",
+      "text": "running",
+      "expected_ids": [
+        1
+      ]
+    },
+    {
+      "name": "stem_run",
+      "text": "run",
+      "expected_ids": [
+        1,
+        9
+      ]
+    },
+    {
+      "name": "surface_cats",
+      "text": "cats",
+      "expected_ids": [
+        1
+      ]
+    },
+    {
+      "name": "french_accents",
+      "text": "aimées",
+      "expected_ids": [
+        3
+      ]
+    },
+    {
+      "name": "french_surface",
+      "text": "chevaux",
+      "expected_ids": [
+        13
+      ]
+    },
+    {
+      "name": "turkish_surface",
+      "text": "kitapları",
+      "expected_ids": [
+        4
+      ]
+    },
+    {
+      "name": "turkish_casing",
+      "text": "IŞIKLAR",
+      "expected_ids": [
+        4
+      ]
+    },
+    {
+      "name": "swedish_accents",
+      "text": "röster",
+      "expected_ids": [
+        5
+      ]
+    },
+    {
+      "name": "swedish_boundary",
+      "text": "hördes",
+      "expected_ids": [
+        5
+      ]
+    },
+    {
+      "name": "swedish_fold",
+      "text": "gården",
+      "expected_ids": [
+        1,
+        5
+      ],
+      "candidate_basis": "Pinned reduced-profile probe: lossy Swedish gården stem/fold intersects English garden as well as the Swedish source; this is not a precision/relevance golden."
+    },
+    {
+      "name": "korean",
+      "text": "한국어",
+      "expected_ids": [
+        6
+      ]
+    },
+    {
+      "name": "cyrillic",
+      "text": "данных",
+      "expected_ids": [
+        7
+      ]
+    },
+    {
+      "name": "japanese",
+      "text": "日本語",
+      "expected_ids": [
+        8
+      ]
+    },
+    {
+      "name": "latin_normalization",
+      "text": "cafe",
+      "expected_ids": [
+        14
+      ]
+    },
+    {
+      "name": "identifier",
+      "text": "foo_bar",
+      "expected_ids": [
+        15
+      ]
+    },
+    {
+      "name": "url",
+      "text": "https://example.com",
+      "expected_ids": [
+        15
+      ]
+    },
+    {
+      "name": "mixed_script",
+      "text": "中文 Rust",
+      "expected_ids": [
+        2,
+        15
+      ]
+    },
+    {
+      "name": "unknown",
+      "text": "qzxnevermatchcanary",
+      "expected_ids": []
+    },
+    {
+      "name": "empty",
+      "text": "",
+      "empty_analysis": true
+    },
+    {
+      "name": "whitespace",
+      "text": " \t\n",
+      "empty_analysis": true
+    },
+    {
+      "name": "stop_only",
+      "text": "the",
+      "empty_analysis": true
+    }
   ]
 }

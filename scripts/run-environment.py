@@ -15,8 +15,9 @@ import tempfile
 import time
 import tomllib
 
+from report_contract import FORMAT, SUITES, VERIFIED, read_quality, require_known_quality_cases, select_suites, verified_status
+
 ROOT = Path(__file__).resolve().parent.parent
-SUITES = ("unit", "smoke", "native", "bm25", "lifecycle", "errors", "stress", "benchmark")
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -32,20 +33,11 @@ def main():
     parser.add_argument("--test-hooks", action="store_true", help="Supplemental fault-injection build")
     parser.add_argument("--debug", action="store_true", help="Debug packaging; Linux defaults to release")
     args = parser.parse_args()
-    selected = [s for group in args.suite or [] for s in group.split(",")]
-    all_suites = ["unit", "smoke", "native", "bm25", "lifecycle", "errors", "stress", "benchmark"]
-    if not selected:
-        selected = all_suites if args.platform == "linux-amd64" else ["unit", "native", "lifecycle", "errors"]
-    if selected == ["all"]:
-        selected = all_suites
-    if any(s not in SUITES + ("build",) for s in selected) or ("build" in selected and len(selected) != 1):
-        parser.error("Unknown or invalid suite selection")
-    # Fail before building when a named integration suite has no implementation.
-    for suite in selected:
-        if suite in ("unit", "build"):
-            continue
-        if not (ROOT / "tests/sql" / f"{suite}.sql").is_file() and not (ROOT / "tests" / f"{suite}.py").is_file():
-            parser.error(f"Suite {suite!r} is not implemented")
+    try:
+        selected = select_suites(args.suite, args.platform, ROOT)
+    except ValueError as exc:
+        parser.error(str(exc))
+    all_suites = list(SUITES)
     expected = ("Darwin", "arm64") if args.platform == "macos-arm64" else ("Linux", "x86_64")
     if (platform.system(), platform.machine()) != expected:
         parser.error(f"Expected {expected}, got {(platform.system(), platform.machine())}; no platform fallback")
@@ -62,7 +54,7 @@ def main():
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     pg_config = Path(env.get("PG_CONFIG", "/opt/homebrew/opt/postgresql@18/bin/pg_config" if args.platform == "macos-arm64" else "/usr/lib/postgresql/18/bin/pg_config"))
-    result = {"run_id": run_id, "platform": args.platform, "suites": selected, "test_hooks": args.test_hooks, "build_profile": "debug" if args.debug or args.platform == "macos-arm64" else "release", "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "temporary_directory": str(test_dir), "commands": [], "status": "running"}
+    result = {"format": FORMAT, "run_id": run_id, "platform": args.platform, "suites": selected, "test_hooks": args.test_hooks, "build_profile": "debug" if args.debug or args.platform == "macos-arm64" else "release", "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "temporary_directory": str(test_dir), "commands": [], "suite_results": {}, "status": "running"}
     pg_bin = None
     cluster_started = False
     failure = None
@@ -139,8 +131,12 @@ def main():
         result.update({"postgres": version, "rust": rust_version, "cargo_lock_sha256": lock_hash, "resources_sha256": sha256(ROOT / "resources/manifest.json"), "target_triple": target_triple, "features": feature_string, "target_cache": env["CARGO_TARGET_DIR"], "git_commit": command(["git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD"], "git-commit", True).strip(), "git_status": command(["git", "-c", f"safe.directory={ROOT}", "status", "--porcelain=v1"], "git-status", True)})
         command([sys.executable, ROOT / "scripts/prepare-resources.py", "--cache", env["LINDERA_BUILD_DICTIONARY_CACHE_DIR"]], "resource-verification")
         command(["cargo", "tree", "--locked", "--no-default-features", "--features", feature_string], "cargo-tree")
+        command(["cargo", "tree", "--locked", "-e", "features", "--no-default-features", "--features", feature_string], "cargo-feature-tree")
         if "unit" in selected:
+            command([sys.executable, ROOT / "scripts/check-report-contract"], "runner-contract")
             command(["cargo", "test", "--locked", "--lib", "--no-default-features", "--features", feature_string], "unit")
+            result["suite_results"]["unit"] = {"status": "passed", "commands": ["runner-contract", "unit"]}
+            checkpoint()
         if args.platform == "linux-amd64" and selected == all_suites:
             command(["cargo", "fmt", "--all", "--", "--check"], "fmt")
             command(["cargo", "clippy", "--locked", "--all-targets", "--no-default-features", "--features", feature_string, "--", "-D", "warnings"], "clippy")
@@ -178,6 +174,12 @@ def main():
         shutil.copytree(ROOT / "resources", package_out / "resources")
         metadata = json.loads((evidence / "cargo-metadata.log").read_text())
         resource_manifest = json.loads((ROOT / "resources/manifest.json").read_text())
+        charabia_package = next(p for p in metadata["packages"] if p["name"] == "charabia" and p["version"] == resource_manifest["charabia"])
+        charabia_node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == charabia_package["id"])
+        enabled_features = set(charabia_node["features"])
+        if enabled_features != set(resource_manifest["resolved_charabia_features"]):
+            raise RuntimeError(f"Resolved Charabia features differ from the resource manifest: {sorted(enabled_features)}")
+        result["charabia_features"] = sorted(enabled_features)
         actual_resources = []
         for item in resource_manifest["embedded_data"]:
             package = next(p for p in metadata["packages"] if p["name"] == item["crate"] and p["version"] == item["version"])
@@ -251,17 +253,24 @@ def main():
             upstream_version = command(psql + ["-Atq", "-c", "SELECT extversion FROM pg_extension WHERE extname='pg_textsearch';"], "pg-textsearch-version", True).strip()
             if upstream_version != result["pg_textsearch"]["version"]:
                 raise RuntimeError(f"Unexpected loaded pg_textsearch version: {upstream_version}")
-        analysis_info = json.loads(command(psql + ["-Atq", "-c", "SELECT charabia.analysis_info_v1();"], "analysis-info", True))
+        analysis_info = json.loads(command(psql + ["-Atq", "-c", "SELECT charabia.analysis_info('public.charabia');"], "analysis-info", True))
         expected_info = {
             "extension": tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"],
             "charabia": resource_manifest["charabia"], "pgrx": "0.19.3",
-            "profile": resource_manifest["analysis_profile"], "target": target_triple,
+            "target": target_triple,
             "cargo_lock_sha256": lock_hash, "resource_manifest_sha256": result["resources_sha256"],
             "test_hooks": args.test_hooks, "resources": resource_manifest,
         }
-        if analysis_info != expected_info:
-            (evidence / "analysis-info-expected.json").write_text(json.dumps(expected_info, indent=2) + "\n")
-            raise RuntimeError("Loaded analysis_info_v1 does not match the build inputs; see actual and expected evidence")
+        mismatches = {key: {"expected": value, "actual": analysis_info.get(key)} for key, value in expected_info.items() if analysis_info.get(key) != value}
+        if mismatches:
+            (evidence / "analysis-info-mismatches.json").write_text(json.dumps(mismatches, indent=2) + "\n")
+            raise RuntimeError("Loaded analysis_info static identity does not match build inputs; see actual and expected evidence")
+        for key, value in {"route_count": 71, "token_type_count": 72, "languages": 70, "stopword_languages": 52, "stemmer_languages": 19}.items():
+            if analysis_info.get(key) != value:
+                raise RuntimeError(f"Unexpected analysis_info {key}: {analysis_info.get(key)!r}, expected {value}")
+        for key in ("settings", "settings_fingerprint", "analysis_fingerprint", "configuration_oid", "configuration_name"):
+            if key not in analysis_info:
+                raise RuntimeError(f"analysis_info omitted {key}")
         result["analysis_info"] = analysis_info
         result["analysis_info_verified"] = True
         abi_query = """SELECT json_agg(json_build_object('name',p.proname,
@@ -269,16 +278,17 @@ def main():
             'strict',p.proisstrict) ORDER BY p.proname)
             FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
             WHERE n.nspname='charabia' AND p.proname IN
-            ('parser_start_v1','parser_gettoken_v1','parser_end_v1','parser_lextypes_v1',
-             'dictionary_init_v1','dictionary_lexize_v1');"""
+            ('parser_start','parser_gettoken','parser_end','parser_lextypes','parser_headline',
+             'dictionary_init','dictionary_lexize');"""
         actual_abi = json.loads(command(psql + ["-Atq", "-c", abi_query], "fts-callback-abi", True))
         callback_types = {
-            "parser_start_v1": ("internal, integer", "internal"),
-            "parser_gettoken_v1": ("internal, internal, internal", "internal"),
-            "parser_end_v1": ("internal", "void"),
-            "parser_lextypes_v1": ("internal", "internal"),
-            "dictionary_init_v1": ("internal", "internal"),
-            "dictionary_lexize_v1": ("internal, internal, internal, internal", "internal"),
+            "parser_start": ("internal, integer", "internal"),
+            "parser_gettoken": ("internal, internal, internal", "internal"),
+            "parser_end": ("internal", "void"),
+            "parser_lextypes": ("internal", "internal"),
+            "parser_headline": ("internal, internal, tsquery", "internal"),
+            "dictionary_init": ("internal", "internal"),
+            "dictionary_lexize": ("internal, internal, internal, internal", "internal"),
         }
         expected_abi = [{"name": name, "arguments": types[0], "returns": types[1], "strict": True} for name, types in sorted(callback_types.items())]
         if actual_abi != expected_abi:
@@ -324,6 +334,8 @@ def main():
                 command(psql + ["-f", sql], f"suite-{suite}-sql")
             if python.is_file():
                 command([sys.executable, python], f"suite-{suite}-python")
+            result["suite_results"][suite] = {"status": "passed", "commands": [item["label"] for item in result["commands"] if item["label"].startswith(f"suite-{suite}-")]}
+            checkpoint()
         if args.platform == "linux-amd64" and selected == all_suites:
             command([sys.executable, ROOT / "tests/examples.py"], "documentation-examples")
         probe = env.get("PGCB_CLEANUP_PROBE")
@@ -333,7 +345,12 @@ def main():
             os.kill(os.getpid(), signal.SIGTERM)
         elif probe:
             raise RuntimeError(f"Unknown PGCB_CLEANUP_PROBE: {probe}")
-        result["status"] = "passed"
+        result["quality"] = read_quality(evidence / "quality-results.json")
+        if "bm25" in selected:
+            require_known_quality_cases(result["quality"])
+        if result["quality"]["regressions"]:
+            raise RuntimeError(f"Unreviewed quality regressions: {result['quality']['regressions']}")
+        result["status"] = "mechanisms-passed"
     except BaseException as exc:
         failure = exc
         result["status"] = "failed"
@@ -356,16 +373,26 @@ def main():
             except BaseException as exc:
                 cleanup["error"] = str(exc)
         if cleanup["marker_matches"] and cleanup["cluster_stopped"]:
-            shutil.rmtree(test_dir)
-            cleanup["directory_removed"] = not test_dir.exists()
+            try:
+                shutil.rmtree(test_dir)
+                cleanup["directory_removed"] = not test_dir.exists()
+            except OSError as exc:
+                cleanup["error"] = str(exc)
         if not cleanup["directory_removed"]:
             result["status"] = "cleanup-failed"
             print(f"CLEANUP FAILED; preserved owned cluster: {test_dir}", file=sys.stderr)
         result["cleanup"] = cleanup
+        if result["status"] == "mechanisms-passed":
+            result["status"] = verified_status(result["quality"])
+        if "quality" not in result:
+            try:
+                result["quality"] = read_quality(evidence / "quality-results.json")
+            except (ValueError, json.JSONDecodeError) as exc:
+                result["quality_error"] = str(exc)
         result["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         checkpoint()
         print(f"[{run_id}] {result['status']}; evidence: {evidence}", flush=True)
-    return 0 if result["status"] == "passed" else 130 if isinstance(failure, InterruptedError) else 1
+    return 0 if result["status"] in VERIFIED else 130 if isinstance(failure, InterruptedError) else 1
 
 if __name__ == "__main__":
     sys.exit(main())

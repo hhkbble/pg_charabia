@@ -1,9 +1,9 @@
-use crate::{analysis, pg_ffi, profile::NormalizationRoute};
+use crate::{analysis, pg_ffi, routes::Route};
 use pgrx::{Internal, pg_extern};
 
-struct DictionaryState {
-    route: NormalizationRoute,
-    options: analysis::Options,
+pub(crate) struct DictionaryState {
+    pub(crate) route: Route,
+    pub(crate) options: analysis::Options,
     #[cfg(feature = "test-hooks")]
     generation: u64,
 }
@@ -17,17 +17,22 @@ impl Drop for DictionaryState {
 
 #[cfg(feature = "test-hooks")]
 fn fst_bytes(options: &analysis::Options) -> usize {
-    options
-        .stop_words
-        .as_ref()
-        .map_or(0, |words| words.as_fst().as_bytes().len())
+    options.fst_bytes()
 }
 
 #[pg_extern(sql = false)]
-fn dictionary_init_v1(options: Internal) -> Internal {
+fn dictionary_init(options: Internal) -> Internal {
     // SAFETY: Template INIT receives a live PG List<DefElem> in dictCtx or the
     // DDL validation context; owned_state attaches cleanup to that context.
-    let (route, options) = unsafe { pg_ffi::dictionary_options(options) };
+    let parameters = unsafe { pg_ffi::dictionary_options(options) };
+    let route = parameters.route;
+    let options = pg_ffi::checked(analysis::Options::new(
+        route,
+        parameters.stemming,
+        parameters.builtin_stopwords,
+        &parameters.add,
+        &parameters.keep,
+    ));
     #[cfg(feature = "test-hooks")]
     let generation = crate::test_hooks::dictionary_created(fst_bytes(&options));
     // SAFETY: The state owns its FST, Drop is pure Rust, and LEXIZE borrows the
@@ -46,7 +51,7 @@ fn dictionary_init_v1(options: Internal) -> Internal {
 }
 
 #[pg_extern(sql = false)]
-fn dictionary_lexize_v1(
+fn dictionary_lexize(
     state: Internal,
     token: Internal,
     length: Internal,
@@ -55,17 +60,19 @@ fn dictionary_lexize_v1(
     // SAFETY: PG owns token bytes for this callback. Length is a by-value i32
     // Datum despite the SQL internal type; this also validates direct ts_lexize.
     let text = unsafe { pg_ffi::input(pg_ffi::raw::<u8>(token), pg_ffi::by_value_length(length)) };
-    // SAFETY: The paired INIT created exactly DictionaryState in a live context.
-    let state = unsafe { pg_ffi::state::<DictionaryState>(&state) };
+    pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     {
-        crate::test_hooks::dictionary_lexized(state.generation);
+        // End the cache-state borrow before a hook can invoke PostgreSQL.
+        let generation = unsafe { pg_ffi::state::<DictionaryState>(&state) }.generation;
+        crate::test_hooks::dictionary_lexized(generation);
         crate::test_hooks::hit("lexize");
     }
-    pgrx::check_for_interrupts!();
-    pg_ffi::lexemes(pg_ffi::checked(analysis::normalize(
-        text,
-        state.route,
-        &state.options,
-    )))
+    let outcome = {
+        // SAFETY: The paired INIT created exactly DictionaryState in a live
+        // context. Only pure Rust analysis runs while this borrow is live.
+        let state = unsafe { pg_ffi::state::<DictionaryState>(&state) };
+        analysis::normalize(text, state.route, &state.options)
+    };
+    pg_ffi::lexemes(pg_ffi::checked(outcome))
 }

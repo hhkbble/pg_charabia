@@ -34,7 +34,7 @@ for probe in (None, "sql-error", "sigterm"):
         raise SystemExit("Runner omitted its evidence path")
     evidence = Path(evidence_lines[-1].split("; evidence: ", 1)[1])
     report = json.loads((evidence / ("run.json" if args.platform == "macos-arm64" else "outer-run.json")).read_text())
-    expected_status = "passed" if probe is None else "failed"
+    expected_status = "verified" if probe is None else "failed"
     if report["status"] != expected_status or ((proc.returncode == 0) != (probe is None)):
         raise SystemExit(f"Unexpected probe result: {report}")
     cleanup = report["cleanup"]

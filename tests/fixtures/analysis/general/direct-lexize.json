@@ -1,0 +1,20 @@
+{
+  "sources": {
+    "English": "Documented qdrant-rust-stemmers 1.2.2 fruitlessly -> fruitless and Snowball running -> run; surface retention is an explicit extension term-output contract",
+    "Accented": "Recorded direct calls to pinned Charabia 0.10.0 and qdrant-rust-stemmers 1.2.2 APIs. Languages/algorithms are selected explicitly, not promised by short-query detection.",
+    "Stop": "stop-words 0.10.1 NLTK English whole-table source: the is present, able is absent",
+    "Unicode": "NFC, language-specific casing, non-word classification, and empty prepared-key contracts"
+  },
+  "cases": [
+    {"route":"eng","raw":"fruitlessly","terms":["fruitlessly","fruitless"]},
+    {"route":"eng","raw":"running","terms":["running","run"]},
+    {"route":"fra","raw":"aimées","terms":["aimees","aim"]},
+    {"route":"tur","raw":"IŞIKLAR","terms":["isiklar","isik"]},
+    {"route":"swe","raw":"hästarna","terms":["hastarna","hast"]},
+    {"route":"eng","raw":"THE","terms":[]},
+    {"route":"eng","raw":"able","contains":"able"},
+    {"route":"eng","raw":" ","terms":null},
+    {"route":"und","raw":"\u0001","terms":null},
+    {"route":"eng","raw":"123","terms":["123"]}
+  ]
+}

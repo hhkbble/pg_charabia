@@ -11,6 +11,8 @@ import signal
 import subprocess
 import sys
 
+from report_contract import FORMAT, VERIFIED, digest, select_suites
+
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "pg-charabia-verify:pg18-pgrx0193"
 
@@ -20,15 +22,30 @@ def main():
     parser.add_argument("--test-hooks", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--no-build-image", action="store_true")
+    parser.add_argument("--archive", type=Path, help="Load and verify an existing delivery archive without compiling")
     parser.add_argument("--cleanup-probe", choices=("sql-error", "sigterm"), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.archive:
+        if args.suite or args.test_hooks or args.debug or args.cleanup_probe:
+            parser.error("--archive cannot be combined with suites, hooks, debug or cleanup probes")
+        args.archive = args.archive.resolve()
+        if not args.archive.is_file():
+            parser.error("Delivery archive does not exist")
+        selected = []
+        args.no_build_image = True
+    else:
+        try:
+            selected = select_suites(args.suite, "linux-amd64", ROOT)
+        except ValueError as exc:
+            parser.error(str(exc))
     run_id = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}-amd64"
     evidence = ROOT / "artifacts" / run_id
     evidence.mkdir(parents=True, exist_ok=False)
     name = "pgcb-" + run_id.lower()
     cid = None
+    create_attempted = False
     exit_code = 1
-    result = {"run_id": run_id, "container_name": name, "platform": "linux/amd64", "status": "running"}
+    result = {"format": FORMAT, "run_id": run_id, "container_name": name, "platform": "linux/amd64", "suites": selected, "status": "running"}
     def interrupted(signum, _frame):
         raise InterruptedError(f"Received signal {signum}")
     signal.signal(signal.SIGINT, interrupted)
@@ -77,6 +94,11 @@ def main():
             if source.is_file() and not target.exists():
                 shutil.copyfile(source, target)
         argv = ["docker", "create", "--platform", "linux/amd64", "--name", name, "--label", "pg_charabia.verifier=true", "--label", f"pg_charabia.run_id={run_id}", "--mount", f"type=bind,src={ROOT},dst=/workspace,readonly", "--mount", f"type=bind,src={cache_root},dst=/cache", "--mount", f"type=bind,src={evidence},dst=/evidence", "--tmpfs", "/var/lib/postgresql:rw", "--env", f"PGCB_RUN_ID={run_id}-inner", IMAGE]
+        if args.archive:
+            index = argv.index(IMAGE)
+            argv[index:index] = ["--entrypoint", "python3", "--mount", f"type=bind,src={args.archive},dst=/delivery.tar.gz,readonly"]
+            argv += ["/workspace/scripts/check-delivery.py", "--archive", "/delivery.tar.gz"]
+            result["archive"] = {"path": str(args.archive), "sha256": digest(args.archive)}
         if args.cleanup_probe:
             argv[argv.index(IMAGE):argv.index(IMAGE)] = ["--env", f"PGCB_CLEANUP_PROBE={args.cleanup_probe}"]
         for suite in args.suite or []:
@@ -85,6 +107,7 @@ def main():
             argv.append("--test-hooks")
         if args.debug:
             argv.append("--debug")
+        create_attempted = True
         cid = subprocess.check_output(argv, text=True).strip()
         result["container_id"] = cid
         (evidence / "container-id").write_text(cid + "\n")
@@ -93,7 +116,19 @@ def main():
         state = json.loads(subprocess.check_output(["docker", "inspect", cid], text=True))[0]
         (evidence / "container-inspect.json").write_text(json.dumps(state, indent=2) + "\n")
         exit_code = int(state["State"]["ExitCode"]) if exit_code == 0 else exit_code
-        result["status"] = "passed" if exit_code == 0 else "failed"
+        reports = list(evidence.glob("*/run.json"))
+        if exit_code == 0:
+            if len(reports) != 1:
+                raise RuntimeError("Expected exactly one inner verifier report")
+            inner = json.loads(reports[0].read_text())
+            if inner.get("format") != FORMAT or inner.get("status") not in VERIFIED:
+                raise RuntimeError("Container exit zero without a verified format-2 inner report")
+            if not all(inner.get("cleanup", {}).get(k) for k in ("marker_matches", "cluster_stopped", "directory_removed")):
+                raise RuntimeError("Inner cleanup did not pass")
+            result["status"] = inner["status"]
+            result["quality"] = inner.get("quality")
+        else:
+            result["status"] = "failed"
     except BaseException as exc:
         exit_code = 130 if isinstance(exc, InterruptedError) else 1
         result["error"] = str(exc)
@@ -104,14 +139,18 @@ def main():
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         # A signal can arrive after Docker creates the container but before the ID
         # reaches Python. Recover only the exact name with this run's ownership label.
-        if cid is None:
-            probe = subprocess.run(["docker", "inspect", name], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            if probe.returncode == 0:
-                candidate = json.loads(probe.stdout)[0]
-                if candidate.get("Config", {}).get("Labels", {}).get("pg_charabia.run_id") == run_id:
-                    cid = candidate["Id"]
-                    result["container_id"] = cid
         cleanup = {"container_removed": cid is None, "volumes": []}
+        if cid is None and create_attempted:
+            try:
+                probe = subprocess.run(["docker", "inspect", name], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                if probe.returncode == 0:
+                    candidate = json.loads(probe.stdout)[0]
+                    if candidate.get("Config", {}).get("Labels", {}).get("pg_charabia.run_id") == run_id:
+                        cid = candidate["Id"]
+                        result["container_id"] = cid
+            except BaseException as exc:
+                cleanup["container_removed"] = False
+                cleanup["error"] = str(exc)
         if cid:
             try:
                 state = json.loads(subprocess.check_output(["docker", "inspect", cid], text=True))[0]

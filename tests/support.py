@@ -3,10 +3,14 @@ import json
 import os
 from pathlib import Path
 import queue
+import sys
 import subprocess
 import threading
 import time
 import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from report_contract import FORMAT, quality_case, validate_quality
 
 if not __debug__:
     raise RuntimeError("Test assertions must not be disabled")
@@ -35,7 +39,7 @@ class Session:
         argv = [PSQL, "-XAtq", "-v", "ON_ERROR_STOP=0", "-v", "VERBOSITY=verbose"]
         if database:
             argv += ["-d",database]
-        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
         self.lines = queue.Queue()
         def read():
             for line in self.process.stdout:
@@ -43,8 +47,16 @@ class Session:
             self.lines.put(None)
         self.reader = threading.Thread(target=read, daemon=True)
         self.reader.start()
-        self.query("SET standard_conforming_strings=on")
-        self.pid = int(self.query("SELECT pg_backend_pid()"))
+        self.database = database
+        self.pid = None
+        try:
+            self.query("SET standard_conforming_strings=on")
+            self.pid = int(self.query("SELECT pg_backend_pid()"))
+        except BaseException:
+            self.process.kill()
+            self.process.wait()
+            self.reader.join(timeout=5)
+            raise
 
     def query(self, sql, timeout=60):
         marker = "pgcb_" + uuid.uuid4().hex
@@ -56,6 +68,7 @@ class Session:
             try:
                 line = self.lines.get(timeout=max(0.01, deadline-time.monotonic()))
             except queue.Empty as error:
+                self.cancel()
                 raise AssertionError("psql statement timed out: " + "\n".join(lines)) from error
             if line is None:
                 raise AssertionError("Backend/psql exited before statement marker: " + "\n".join(lines))
@@ -69,17 +82,33 @@ class Session:
             raise AssertionError(output)
         return output
 
+    def cancel(self):
+        if self.process.poll() is None and self.pid is not None:
+            result = run(f"SELECT pg_cancel_backend({int(self.pid)})", database=self.database, check=False, timeout=10)
+            if result.returncode:
+                raise AssertionError(f"Failed to cancel backend {self.pid}: {result.stderr}")
+
     def close(self):
+        cleanup_error = None
         if self.process.poll() is None:
-            self.process.stdin.write("\\q\n")
-            self.process.stdin.flush()
             try:
+                self.cancel()
+                self.process.stdin.write("\\q\n")
+                self.process.stdin.flush()
                 self.process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
-                raise AssertionError("psql failed to exit")
-        self.reader.join(timeout=2)
+            except BaseException as error:
+                cleanup_error = error
+            finally:
+                if self.process.poll() is None:
+                    self.process.kill()
+                    self.process.wait()
+        self.reader.join(timeout=5)
+        self.process.stdin.close()
+        self.process.stdout.close()
+        if self.reader.is_alive():
+            raise AssertionError("psql reader thread did not join")
+        if cleanup_error is not None:
+            raise AssertionError("psql failed to exit after backend cancellation") from cleanup_error
         if self.process.returncode:
             raise AssertionError(f"psql exited {self.process.returncode}")
 
@@ -105,3 +134,27 @@ def rss(pid):
                 if line.startswith("VmRSS:"): return int(line.split()[1])*1024
         raise AssertionError("Missing backend RSS")
     return int(subprocess.check_output(["ps","-o","rss=","-p",str(pid)],text=True).strip())*1024
+
+
+def record_quality_case(case_id, *, input, query, config, expected, actual, known_signature=None):
+    """Save exact domain expectations separately from mechanism assertions.
+
+    Only the three reviewed source fixtures may be known failures. A caller
+    signature is redundant evidence and cannot redefine their fields. A changed
+    result (including an unexpected improvement) is a regression until reviewed
+    in the fixture. This helper never catches test failures.
+    """
+    path = EVIDENCE / "quality-results.json"
+    document = json.loads(path.read_text()) if path.exists() else {"format": FORMAT, "cases": []}
+    validate_quality(document)
+    if any(case["id"] == case_id for case in document["cases"]):
+        raise AssertionError(f"Quality case recorded twice: {case_id}")
+    case = quality_case(case_id, input=input, query=query, config=config, expected=expected, actual=actual, known_signature=known_signature)
+    document["cases"].append(case)
+    validate_quality(document)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+    temporary.replace(path)
+    if case["status"] == "regression":
+        raise AssertionError(f"Unreviewed quality result for {case_id}; see {path}")
+    return case

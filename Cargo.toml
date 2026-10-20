@@ -1,6 +1,6 @@
 [package]
 name = "pg_charabia"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97.1"
 description = "Charabia multilingual analysis for PostgreSQL text search"
@@ -19,9 +19,14 @@ test-hooks = []
 pgrx = { version = "=0.19.3", default-features = false }
 charabia = { version = "=0.10.0", default-features = false, features = [
     "chinese", "hebrew", "japanese", "thai", "korean", "greek", "khmer",
-    "vietnamese", "swedish-recomposition", "turkish", "german-segmentation",
+    "vietnamese", "turkish",
 ] }
 fst = "=0.4.7"
+whatlang = "=0.18.0"
+unicode-normalization = "=0.1.26"
+qdrant-rust-stemmers = "=1.2.2"
+stop-words = { version = "=0.10.1", default-features = false, features = ["iso", "nltk"] }
+sha2 = "0.10"
 serde = "1.0"
 serde_json = "1.0"
 

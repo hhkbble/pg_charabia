@@ -1,24 +1,113 @@
-"""Run the published SQL examples verbatim in an owned empty database."""
+"""Execute the README SQL verbatim in an owned Linux verification database."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import sys
+
 from support import run, save
 
-readme=Path(__file__).resolve().parent.parent/"README.md"
-examples=re.findall(r"```sql\n(.*?)```",readme.read_text(),re.S)
-assert len(examples)==3,len(examples)
-database="pgcb_examples_"+str(os.getpid())
-results={"readme_sha256":hashlib.sha256(readme.read_bytes()).hexdigest(),"examples":[]}
-run(f"CREATE DATABASE {database} TEMPLATE template0")
-try:
-    for number,sql in enumerate(examples):
-        output=run(sql,database)
-        results["examples"].append({"number":number+1,"sql":sql,"output":output})
-    assert run("SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.app_search'::regconfig",database)=="18"
-    assert run("SELECT to_tsvector('public.app_search','the The')",database)=="'the':2"
-    assert run("SELECT id FROM documents WHERE to_tsvector('charabia.default_v1',body) @@ plainto_tsquery('charabia.default_v1','POSTGRESQL')",database)=="1"
-finally:
+ROOT = Path(__file__).resolve().parent.parent
+readme = ROOT / "README.md"
+examples = re.findall(r"```sql\n(.*?)```",readme.read_text(),re.S)
+assert len(examples) == 3, len(examples)
+assert os.environ["PGCB_PLATFORM"] == "linux-amd64", "The published BM25 examples require the Linux verifier and preloaded pg_textsearch"
+database = "pgcb_examples_" + str(os.getpid())
+results = {"status":"running","readme_sha256":hashlib.sha256(readme.read_bytes()).hexdigest(),"examples":[],"checks":[],"source":"README SQL plus fixed PG/Charabia contracts and independent document IDs/source text"}
+created = False
+
+
+def checkpoint():
     save("documentation-examples.json",results)
-    run(f"DROP DATABASE {database}")
-print("README SQL examples passed verbatim in an owned database")
+
+
+def check(ok,label,evidence):
+    results["checks"].append({"label":label,"passed":bool(ok),"evidence":evidence})
+    checkpoint()
+    if not ok:
+        raise AssertionError(label + ": " + repr(evidence))
+
+
+def json_lines(output):
+    return [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+
+
+def nodes(value):
+    if isinstance(value,dict):
+        yield value
+        for item in value.values():
+            yield from nodes(item)
+    elif isinstance(value,list):
+        for item in value:
+            yield from nodes(item)
+
+
+try:
+    run(f"CREATE DATABASE {database} TEMPLATE template0")
+    created = True
+    for number,sql in enumerate(examples):
+        record = {"number":number+1,"sql":sql,"status":"running"}
+        results["examples"].append(record)
+        checkpoint()
+        record["output"] = run(sql,database)
+        record["status"] = "passed"
+        checkpoint()
+    first_info = [item for item in json_lines(results["examples"][0]["output"]) if "extension" in item]
+    check(len(first_info) == 1 and first_info[0]["extension"] == "0.2.0" and first_info[0]["test_hooks"] is (os.environ.get("PGCB_TEST_HOOKS") == "1"),
+          "README loads the extension matching the selected build feature",first_info)
+    info = first_info[0]
+    check(info["route_count"] == 71 and info["token_type_count"] == 72 and info["settings"] == {"stemming":True,"builtin_stopwords":True,"stopwords_add":{},"stopwords_keep":{}},
+          "public default has the general routing and enabled defaults",{key:info[key] for key in ("route_count","token_type_count","settings")})
+    managed = json_lines(results["examples"][1]["output"])
+    original = [item for item in managed if item.get("configuration_name") == '"app"."search"']
+    # quote_qualified_identifier may omit quotes when identifiers are ordinary.
+    if not original:
+        original = [item for item in managed if item.get("configuration_name") == "app.search"]
+    check(len(original) == 2,"README inspected the custom instance before and after alter",[item.get("configuration_name") for item in managed])
+    check(original[0]["settings"] == {"stemming":False,"builtin_stopwords":True,"stopwords_add":{},"stopwords_keep":{"eng":["will"]}},
+          "create_config applies requested independent flags",original[0]["settings"])
+    replacement = {"stemming":True,"builtin_stopwords":False,"stopwords_add":{},"stopwords_keep":{}}
+    check(original[1]["settings"] == replacement,"alter_config is a full replacement",original[1]["settings"])
+    altered = [item for item in managed if item.get("maintenance_required") is True]
+    check(len(altered) == 1 and altered[0]["settings"] == replacement,"alter returns the new settings and maintenance requirement",altered)
+    check(run("SELECT count(*) FROM pg_ts_config WHERE cfgnamespace='app'::regnamespace AND cfgname='search'",database) == "0" and run("SELECT count(*) FROM pg_ts_dict WHERE dictnamespace='app'::regnamespace",database) == "0",
+          "drop_config removed the independent configuration and its dictionaries",{"schema":"app"})
+    ids = run("SELECT id FROM documents WHERE to_tsvector('public.charabia',body) @@ plainto_tsquery('public.charabia','POSTGRESQL') ORDER BY id",database)
+    check(ids == "1","native case normalization finds the independent Chinese document",ids)
+    stem_ids = run("SELECT id FROM documents WHERE to_tsvector('public.charabia',body) @@ plainto_tsquery('public.charabia','run') ORDER BY id",database)
+    check(stem_ids == "2","English upstream running->run golden is present in the long English document",stem_ids)
+    ranked = "SELECT id FROM documents ORDER BY body <@> to_bm25query('全文','public.documents_bm25') LIMIT 10"
+    default_plan = json.loads(run("EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF) " + ranked,database))
+    forced_plan = json.loads(run("SET enable_seqscan=off; EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF) " + ranked,database))
+    results["bm25_plans"] = {"query":ranked,"default":default_plan,"index":forced_plan}
+    check(any(node.get("Node Type") == "Index Scan" and node.get("Index Name") == "documents_bm25" and node.get("Actual Loops",0) > 0 for node in nodes(forced_plan)),
+          "README ranking executes the actual target BM25 index",forced_plan)
+    bm_ids = run(ranked,database)
+    check(bm_ids == "1","BM25 candidate meets the independent original-text expectation",bm_ids)
+    highlighted = run("SELECT ts_headline('public.charabia',body,charabia.query_any('全文','public.charabia'),'MaxFragments=2') FROM documents WHERE id=1",database)
+    check("<b>全文</b>" in highlighted and "PostgreSQL" in highlighted,"standard headline keeps original source bytes around the hit",highlighted)
+    json_highlight = json.loads(run("SELECT ts_headline('public.charabia','{\"text\":\"CAFÉ & cafe\"}'::jsonb,plainto_tsquery('public.charabia','cafe'),'HighlightAll=true')",database))
+    check(json_highlight == {"text":"<b>CAFÉ</b> &amp; <b>cafe</b>"},"JSONB uses the same original-text and escape contract",json_highlight)
+    results["status"] = "passed"
+except BaseException as error:
+    results["status"] = "failed"
+    results["error"] = repr(error)
+    raise
+finally:
+    primary = sys.exception()
+    checkpoint()
+    if created:
+        try:
+            run(f"DROP DATABASE {database}")
+            results["owned_database_removed"] = True
+        except BaseException as error:
+            results["owned_database_removed"] = False
+            results["cleanup_error"] = repr(error)
+            results["status"] = "cleanup-failed"
+            if primary is None:
+                raise
+            primary.add_note(f"Owned documentation database cleanup also failed: {error}")
+        finally:
+            checkpoint()
+print("README SQL examples passed verbatim in an owned Linux database")

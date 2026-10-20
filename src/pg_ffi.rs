@@ -3,10 +3,13 @@ use std::{
     ptr, slice, str,
 };
 
-use pgrx::{AnyElement, Internal, PgLogLevel, PgSqlErrorCode, ereport, pg_sys};
+use pgrx::{
+    AnyElement, FromDatum, Internal, JsonB, PgLogLevel, PgSqlErrorCode, Spi, ereport, pg_sys,
+};
 
 use crate::analysis::{AnalysisError, ErrorKind, LexizeOutcome, MAX_INPUT_BYTES};
-use crate::profile::NormalizationRoute;
+use crate::routes::{Route, TYPE_COUNT};
+use crate::settings::DictionaryParameters;
 
 pub fn fail(code: PgSqlErrorCode, message: impl AsRef<str>) -> ! {
     ereport!(PgLogLevel::ERROR, code, message.as_ref().to_owned());
@@ -229,37 +232,41 @@ fn pg_string(value: &str) -> *mut c_char {
 }
 
 pub fn lexemes(outcome: LexizeOutcome) -> Internal {
-    let term = match outcome {
+    let (first, second) = match outcome {
         LexizeOutcome::Ignore => return datum(0),
-        LexizeOutcome::Stop => None,
-        LexizeOutcome::Term(term) => Some(term),
+        LexizeOutcome::Stop => (None, None),
+        LexizeOutcome::Terms { first, second } => (Some(first), second),
     };
-    // SAFETY: Zero-filled terminators are valid TSLexeme entries. PG owns and
-    // frees both this array and the separately palloc'd lexeme, if present.
+    // SAFETY: PG owns the zero-terminated array and each separately allocated
+    // string. Distinct nvariant values express alternatives at the same position.
     unsafe {
         let result =
-            pg_sys::palloc0(std::mem::size_of::<pg_sys::TSLexeme>() * 2).cast::<pg_sys::TSLexeme>();
-        if let Some(term) = term {
+            pg_sys::palloc0(std::mem::size_of::<pg_sys::TSLexeme>() * 3).cast::<pg_sys::TSLexeme>();
+        if let Some(term) = first {
             (*result).lexeme = pg_string(&term);
+        }
+        if let Some(term) = second {
+            (*result.add(1)).lexeme = pg_string(&term);
+            (*result.add(1)).nvariant = 1;
         }
         pointer(result)
     }
 }
 
 pub fn lextypes() -> Internal {
-    // SAFETY: The zeroed final LexDescr has lexid=0; all other fields and their
-    // strings are PG-owned because ts_token_type frees them individually.
+    // SAFETY: Each descriptor/string and the zero terminator are PG-owned.
     unsafe {
-        let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::LexDescr>() * 19)
+        let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::LexDescr>() * (TYPE_COUNT + 1))
             .cast::<pg_sys::LexDescr>();
-        for (index, route) in NormalizationRoute::ALL.into_iter().enumerate() {
+        for (index, route) in Route::ALL.into_iter().enumerate() {
             let entry = result.add(index);
             (*entry).lexid = route.id();
             (*entry).alias = pg_string(route.alias());
-            (*entry).descr = pg_string(&format!(
-                "Charabia v1 normalization context: {}",
+            (*entry).descr = pg_string(if route.is_display() {
+                "Unindexed original text fragment"
+            } else {
                 route.alias()
-            ));
+            });
         }
         pointer(result)
     }
@@ -296,95 +303,450 @@ pub unsafe fn token_output(
     }
 }
 
+pub fn invalid(message: impl AsRef<str>) -> ! {
+    fail(PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE, message)
+}
+
 /// # Safety
-/// `options` is the PG-owned List<DefElem> supplied to dictionary INIT.
-pub unsafe fn dictionary_options(
-    options: Internal,
-) -> (NormalizationRoute, crate::analysis::Options) {
-    require_utf8();
-    let mut route = None;
-    let mut lossy = None;
-    let mut stopwords = None;
+/// `options` is the PG-owned List<DefElem> from INIT or deserialize_deflist.
+pub unsafe fn option_strings(options: *mut pg_sys::List) -> Vec<(String, String)> {
     pgrx::memcx::current_context(|cx| {
-        // SAFETY: INIT's documented argument is a List of DefElem pointers.
-        let list =
-            unsafe { pgrx::list::List::<*mut c_void>::downcast_ptr_in_memcx(raw(options), cx) }
-                .unwrap_or_else(|| {
-                    fail(
-                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        "invalid dictionary option list",
-                    )
-                });
+        // SAFETY: Caller supplies the documented live List<DefElem> or NIL.
+        let list = unsafe { pgrx::list::List::<*mut c_void>::downcast_ptr_in_memcx(options, cx) }
+            .unwrap_or_else(|| invalid("invalid dictionary option list"));
+        let mut result = Vec::new();
         for pointer in list.iter() {
             let def = (*pointer).cast::<pg_sys::DefElem>();
-            // SAFETY: Each element is a live DefElem; PG stores NUL-terminated
-            // option names/values and defGet* uses pgrx's guarded PG bindings.
+            // SAFETY: PG owns all option nodes/strings; defGetString is guarded.
+            let name = unsafe { CStr::from_ptr((*def).defname) }
+                .to_str()
+                .unwrap_or_else(|_| invalid("invalid option name UTF8"))
+                .to_owned();
+            let value = unsafe { CStr::from_ptr(pg_sys::defGetString(def)) }
+                .to_str()
+                .unwrap_or_else(|_| invalid("invalid option value UTF8"))
+                .to_owned();
+            result.push((name, value));
+        }
+        result
+    })
+}
+
+/// # Safety
+/// `options` is the INIT callback's live List<DefElem>.
+pub unsafe fn dictionary_options(options: Internal) -> DictionaryParameters {
+    require_utf8();
+    // SAFETY: The paired SQL template supplies the option list.
+    crate::config::parameters_from_strings(unsafe { option_strings(raw(options)) })
+}
+
+pub fn options_from_catalog(options: &str) -> DictionaryParameters {
+    require_utf8();
+    // SAFETY: PG text/list are request-owned; deserialize_deflist is a guarded
+    // binding. Rust outputs own their values before the context can change.
+    unsafe {
+        let text = pg_sys::cstring_to_text(pg_string(options));
+        let list = pg_sys::deserialize_deflist(pg_sys::Datum::from(text));
+        crate::config::parameters_from_strings(option_strings(list))
+    }
+}
+
+pub fn require_owner(class: pg_sys::Oid, id: pg_sys::Oid) {
+    // SAFETY: IDs come from a verified catalog snapshot; this is a backend call.
+    if !unsafe { pg_sys::object_ownercheck(class, id, pg_sys::GetUserId()) } {
+        fail(
+            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+            "must own the configuration and its dictionaries",
+        );
+    }
+}
+
+/// Read one owned JSONB value from current catalogs after a management lock.
+/// Ordinary SPI under REPEATABLE READ can retain a snapshot from before a
+/// concurrent COPY committed. Only management validation uses this fresh view.
+pub fn latest_catalog_json(sql: &str) -> Option<serde_json::Value> {
+    Spi::connect(|_| {
+        // SAFETY: The private caller provides a single catalog SELECT returning
+        // JSONB. SPI owns plan, snapshot stack and tuples until this connection
+        // finishes; JsonB conversion creates an independent Rust value.
+        unsafe {
+            let plan = pg_sys::SPI_prepare(pg_string(sql), 0, ptr::null_mut());
+            if plan.is_null() {
+                invalid("could not prepare configuration catalog query");
+            }
+            // Explicit read-only snapshots do not advance the command ID. This
+            // also makes the last DDL in this command visible to the reload.
+            pg_sys::CommandCounterIncrement();
+            let snapshot = pg_sys::GetLatestSnapshot();
+            let status = pg_sys::SPI_execute_snapshot(
+                plan,
+                ptr::null_mut(),
+                ptr::null(),
+                snapshot,
+                ptr::null_mut(),
+                true,
+                false,
+                1,
+            );
+            if status != pg_sys::SPI_OK_SELECT as i32 {
+                invalid("configuration catalog query was not a SELECT");
+            }
+            let table = pg_sys::SPI_tuptable;
+            if table.is_null() || (*table).numvals == 0 {
+                return None;
+            }
+            let mut is_null = false;
+            let datum = pg_sys::SPI_getbinval(*(*table).vals, (*table).tupdesc, 1, &mut is_null);
+            JsonB::from_datum(datum, is_null).map(|json| json.0)
+        }
+    })
+}
+
+pub fn lock_object(class: pg_sys::Oid, id: pg_sys::Oid) {
+    // SAFETY: Called inside a management statement. PG's resource owner holds
+    // the object lock through transaction end, including ERROR/savepoint paths.
+    unsafe { pg_sys::LockDatabaseObject(class, id, 0, pg_sys::AccessExclusiveLock as _) };
+}
+
+pub fn cached_inspect(id: pg_sys::Oid, text: &str, route: Route) -> crate::analysis::TokenAnalysis {
+    // SAFETY: Lookup returns a valid initialized dictionary entry. The Rust
+    // state borrow is confined to pure analysis; no PG call can reset dictCtx.
+    unsafe {
+        let entry = pg_sys::lookup_ts_dictionary_cache(id);
+        if entry.is_null() || !(*entry).isvalid || (*entry).dictData.is_null() {
+            invalid("invalid dictionary cache entry");
+        }
+        let outcome = {
+            let state = &*(*entry)
+                .dictData
+                .cast::<crate::dictionary::DictionaryState>();
+            if state.route != route {
+                Err(AnalysisError::new(
+                    ErrorKind::Internal,
+                    "cached dictionary route mismatch",
+                ))
+            } else {
+                crate::analysis::inspect(text, route, &state.options)
+            }
+        };
+        checked(outcome)
+    }
+}
+
+pub fn plain_query_any(config: pg_sys::Oid, text: pg_sys::Datum) -> Internal {
+    // SAFETY: plainto_tsquery_byid always returns a fresh request-owned query.
+    // Only that object is mutated; callers cannot provide a shared TSQuery.
+    unsafe {
+        let result = pgrx::direct_function_call_as_datum(
+            pg_sys::plainto_tsquery_byid,
+            &[Some(pg_sys::Datum::from(config)), Some(text)],
+        )
+        .unwrap_or_else(|| invalid("plain query returned NULL"));
+        let query = result.cast_mut_ptr::<pg_sys::TSQueryData>();
+        let size = (*query).size;
+        if size < 0 {
+            invalid("invalid plain query size");
+        }
+        let items = (*query).data.as_mut_ptr().cast::<pg_sys::QueryItem>();
+        for i in 0..size as usize {
+            let item = *items.add(i);
+            if (item.type_ as u32) == pg_sys::QI_OPR
+                && ![pg_sys::OP_AND, pg_sys::OP_OR].contains(&(item.qoperator.oper as u32))
+            {
+                invalid("non-plain operator returned by analyzer");
+            }
+            if ![pg_sys::QI_VAL, pg_sys::QI_OPR].contains(&(item.type_ as u32)) {
+                invalid("unexpected plain query item");
+            }
+        }
+        for i in 0..size as usize {
+            let item = &mut *items.add(i);
+            if (item.type_ as u32) == pg_sys::QI_OPR
+                && (item.qoperator.oper as u32) == pg_sys::OP_AND
+            {
+                item.qoperator.oper = pg_sys::OP_OR as i8;
+            }
+        }
+        Internal::from(Some(result))
+    }
+}
+
+fn headline_checked<T>(result: Result<T, crate::headline::Error>) -> T {
+    result.unwrap_or_else(|error| {
+        let code = match error.kind {
+            crate::headline::ErrorKind::InvalidInput => {
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+            }
+            crate::headline::ErrorKind::Limit => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            crate::headline::ErrorKind::Unsupported => {
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+            }
+        };
+        fail(code, error.message)
+    })
+}
+
+/// # Safety
+/// All pointers are supplied by the live PG18 HEADLINE call. The request owns
+/// their storage; no reference or pointer escapes this synchronous callback.
+pub unsafe fn headline(
+    prs: *mut pg_sys::HeadlineParsedText,
+    options: *mut pg_sys::List,
+    query: pg_sys::TSQuery,
+) -> *mut pg_sys::HeadlineParsedText {
+    require_utf8();
+    if prs.is_null() || query.is_null() {
+        fail(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "NULL headline state/query",
+        );
+    }
+    // SAFETY: The core supplied live PG structures. Empty arrays may be NULL.
+    let count = unsafe { (*prs).curwords };
+    let capacity = unsafe { (*prs).lenwords };
+    if count < 0 || capacity < count || (count > 0 && unsafe { (*prs).words.is_null() }) {
+        fail(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "invalid headline entry array",
+        );
+    }
+    // SAFETY: A detoasted TSQuery has an aligned QueryItem array immediately
+    // after its fixed-size header. Core already validated the query object.
+    let query_size = unsafe { (*query).size };
+    if query_size < 0 {
+        fail(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "invalid headline query size",
+        );
+    }
+    let items = unsafe { (*query).data.as_ptr().cast::<pg_sys::QueryItem>() };
+    for index in 0..query_size as usize {
+        // SAFETY: The discriminant selects the active union field.
+        let item = unsafe { *items.add(index) };
+        match unsafe { item.type_ } as u32 {
+            pg_sys::QI_VAL => {
+                if unsafe { item.qoperand.weight } != 0 {
+                    fail(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "headline does not support weighted query operands",
+                    );
+                }
+            }
+            pg_sys::QI_OPR => {}
+            _ => fail(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                "invalid headline query item",
+            ),
+        }
+    }
+    let policy = pgrx::memcx::current_context(|cx| {
+        // SAFETY: deserialize_deflist supplies a valid List<DefElem> or NIL.
+        let list = unsafe { pgrx::list::List::<*mut c_void>::downcast_ptr_in_memcx(options, cx) }
+            .unwrap_or_else(|| {
+                fail(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "invalid headline option list",
+                )
+            });
+        let values = list.iter().map(|pointer| {
+            let def = (*pointer).cast::<pg_sys::DefElem>();
+            if def.is_null() {
+                fail(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "NULL headline option",
+                );
+            }
+            // SAFETY: PG owns NUL-terminated option strings; defGetString uses
+            // pgrx's guarded PG binding, so ERROR unwinds Rust owners safely.
             let name = unsafe { CStr::from_ptr((*def).defname) }
                 .to_str()
                 .unwrap_or_else(|_| {
                     fail(
                         PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
-                        "invalid option name",
+                        "invalid UTF8 headline option name",
                     )
                 })
-                .to_ascii_lowercase();
-            let name = name.as_str();
-            let repeated = match name {
-                "route" => route.is_some(),
-                "lossy" => lossy.is_some(),
-                "stopwords" => stopwords.is_some(),
-                _ => fail(
-                    PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-                    format!("unknown dictionary option: {name}"),
-                ),
-            };
-            if repeated {
-                fail(
-                    PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-                    format!("duplicate dictionary option: {name}"),
-                );
-            }
-            match name {
-                "lossy" => lossy = Some(unsafe { pg_sys::defGetBoolean(def) }),
-                "route" | "stopwords" => {
-                    let value = unsafe { CStr::from_ptr(pg_sys::defGetString(def)) }
-                        .to_str()
-                        .unwrap_or_else(|_| {
-                            fail(
-                                PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
-                                "invalid UTF8 dictionary option",
-                            )
-                        });
-                    if name == "route" {
-                        route = Some(NormalizationRoute::from_alias(value).unwrap_or_else(|| {
-                            fail(
-                                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-                                "unknown normalization Route",
-                            )
-                        }));
-                    } else {
-                        if value.len() > crate::analysis::MAX_STOP_WORDS_JSON_BYTES {
-                            fail(
-                                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-                                "StopWords JSON exceeds 1048576 bytes",
-                            );
-                        }
-                        stopwords = Some(value.to_owned());
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
+                .to_owned();
+            let value = unsafe { CStr::from_ptr(pg_sys::defGetString(def)) }
+                .to_str()
+                .unwrap_or_else(|_| {
+                    fail(
+                        PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
+                        "invalid UTF8 headline option value",
+                    )
+                })
+                .to_owned();
+            (name, value)
+        });
+        headline_checked(crate::headline::Options::parse(values))
     });
-    let route = route.unwrap_or_else(|| {
+    let mut selector_options = ptr::null_mut();
+    for (name, value) in policy.selector_options() {
+        // SAFETY: All option nodes/strings are PG allocations in the request;
+        // Escape is intentionally omitted and ShortWord is always exactly 0.
+        unsafe {
+            let node = pg_sys::makeString(pg_string(&value));
+            let def = pg_sys::makeDefElem(pg_string(name), node.cast(), -1);
+            selector_options = pg_sys::lappend(selector_options, def.cast());
+        }
+    }
+    let size = (count as usize)
+        .checked_mul(std::mem::size_of::<pg_sys::HeadlineWordEntry>())
+        .unwrap_or_else(|| {
+            fail(
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                "headline scratch allocation overflow",
+            )
+        });
+    // SAFETY: PG allocator returns correctly aligned storage. A zero-sized
+    // allocation remains valid; no zero-length NULL slice is constructed.
+    let scratch_words = unsafe { pg_sys::palloc(size.max(1)).cast::<pg_sys::HeadlineWordEntry>() };
+    if count > 0 {
+        // SAFETY: Both arrays hold count entries; this is a shallow copy.
+        unsafe { ptr::copy_nonoverlapping((*prs).words, scratch_words, count as usize) };
+    }
+    for index in 0..count as usize {
+        pgrx::check_for_interrupts!();
+        // SAFETY: Each entry and its len bytes belong to the core request.
+        let entry = unsafe { *scratch_words.add(index) };
+        let route = crate::routes::Route::from_id(entry.type_() as i32).unwrap_or_else(|| {
+            fail(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                "invalid headline token type",
+            )
+        });
+        let raw = unsafe { input(entry.word.cast(), entry.len() as i32) };
+        let word = if entry.repeated() != 0 || route.is_display() {
+            false
+        } else {
+            let prepared = checked(crate::analysis::prepare(raw, route));
+            matches!(prepared.kind, charabia::TokenKind::Word) && !prepared.key.is_empty()
+        };
+        // SAFETY: Mutate only scratch type/flags. The original pos, item,
+        // repeated, raw bytes and language route remain owned by PG core.
+        unsafe {
+            let target = &mut *scratch_words.add(index);
+            target.set_type(if word { 1 } else { 12 });
+            target.set_selected(0);
+            target.set_in(0);
+            target.set_replace(0);
+            target.set_skip(0);
+        }
+    }
+    // SAFETY: Scratch has its own PG allocation; borrowed words/items are never
+    // freed here. PG18 selector writes flags/markers without reallocating words.
+    let scratch = unsafe {
+        pg_sys::palloc(std::mem::size_of::<pg_sys::HeadlineParsedText>())
+            .cast::<pg_sys::HeadlineParsedText>()
+    };
+    unsafe {
+        ptr::write(scratch, *prs);
+        (*scratch).words = scratch_words;
+        (*scratch).lenwords = count;
+        (*scratch).startsel = ptr::null_mut();
+        (*scratch).stopsel = ptr::null_mut();
+        (*scratch).fragdelim = ptr::null_mut();
+        (*scratch).startsellen = 0;
+        (*scratch).stopsellen = 0;
+        (*scratch).fragdelimlen = 0;
+    }
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit("headline_selector");
+    // SAFETY: pgrx calls the guarded PG binding using a private fcinfo; an ERROR
+    // returns through its FFI barrier rather than jumping over Rust Drop.
+    let selected = unsafe {
+        pgrx::direct_function_call_as_datum(
+            pg_sys::prsd_headline,
+            &[
+                Some(pg_sys::Datum::from(scratch)),
+                Some(pg_sys::Datum::from(selector_options)),
+                Some(pg_sys::Datum::from(query)),
+            ],
+        )
+    }
+    .unwrap_or_else(|| {
         fail(
-            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            "Route is required",
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "headline selector returned SQL NULL",
         )
     });
-    let options = checked(crate::analysis::Options::from_json(
-        lossy.unwrap_or(true),
-        stopwords.as_deref(),
-    ));
-    (route, options)
+    if selected.cast_mut_ptr::<pg_sys::HeadlineParsedText>() != scratch
+        || unsafe { (*scratch).words != scratch_words || (*scratch).curwords != count }
+    {
+        fail(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "headline selector replaced scratch entries",
+        );
+    }
+    let output = (0..count as usize).map(|index| {
+        pgrx::check_for_interrupts!();
+        // SAFETY: The selector retained scratch_words and count above.
+        let original = unsafe { *(*prs).words.add(index) };
+        let selected = unsafe { *scratch_words.add(index) };
+        if selected.skip() != 0 || selected.replace() != 0 {
+            fail(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                "headline projection unexpectedly skipped/replaced source text",
+            );
+        }
+        let raw = unsafe { input(original.word.cast(), original.len() as i32) };
+        crate::headline::OutputEntry {
+            bytes: if original.repeated() == 0 {
+                headline_checked(crate::headline::rendered_len(raw, policy.escape))
+            } else {
+                0
+            },
+            in_fragment: selected.in_() != 0,
+            repeated: original.repeated() != 0,
+            selected: selected.selected() != 0,
+            replace: selected.replace() != 0,
+            skip: selected.skip() != 0,
+        }
+    });
+    headline_checked(crate::headline::output_size(output, &policy));
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit("headline_escape");
+    for index in 0..count as usize {
+        pgrx::check_for_interrupts!();
+        // SAFETY: Copy only selector flags into originals; no PG array borrow
+        // remains live across the guarded palloc performed by pg_string.
+        let original = unsafe { *(*prs).words.add(index) };
+        let selected = unsafe { *scratch_words.add(index) };
+        let escaped = if original.repeated() == 0 {
+            let raw = unsafe { input(original.word.cast(), original.len() as i32) };
+            let rendered = headline_checked(crate::headline::escape_html(raw, policy.escape));
+            if matches!(rendered, std::borrow::Cow::Owned(_)) {
+                Some((pg_string(&rendered), rendered.len()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // SAFETY: The old shared word buffers remain owned by request context.
+        unsafe {
+            let target = &mut *(*prs).words.add(index);
+            target.set_selected(selected.selected());
+            target.set_in(selected.in_());
+            target.set_replace(selected.replace());
+            target.set_skip(selected.skip());
+            if let Some((word, length)) = escaped {
+                target.word = word;
+                target.set_len(length as u32);
+            }
+        }
+    }
+    // SAFETY: PG owns all marker allocations. Transfer them to core's state,
+    // free only scratch structs, then let exactly one generateHeadline run.
+    unsafe {
+        (*prs).startsel = (*scratch).startsel;
+        (*prs).stopsel = (*scratch).stopsel;
+        (*prs).fragdelim = (*scratch).fragdelim;
+        (*prs).startsellen = (*scratch).startsellen;
+        (*prs).stopsellen = (*scratch).stopsellen;
+        (*prs).fragdelimlen = (*scratch).fragdelimlen;
+        pg_sys::pfree(scratch_words.cast());
+        pg_sys::pfree(scratch.cast());
+    }
+    prs
 }

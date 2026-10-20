@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
+import signal
 from pathlib import Path
 import statistics
 import threading
@@ -10,6 +11,12 @@ import time
 
 from support import Session, literal, run, save, rss
 
+
+def interrupted(signum, _frame):
+    raise InterruptedError(f"Received signal {signum}")
+
+
+signal.signal(signal.SIGTERM, interrupted)
 
 HAS_HOOKS = os.environ.get("PGCB_TEST_HOOKS") == "1"
 LINUX = os.environ["PGCB_PLATFORM"] == "linux-amd64"
@@ -32,7 +39,7 @@ def nodes(value):
 
 
 def hooks(session):
-    return json.loads(session.value("SELECT charabia.test_stats_v1()")) if HAS_HOOKS else None
+    return json.loads(session.value("SELECT charabia.test_stats()")) if HAS_HOOKS else None
 
 
 def observe(session, phase, cycle):
@@ -80,8 +87,8 @@ def parallel_execution():
         )
         query = (
             "SELECT count(*) FROM stress.docs WHERE "
-            "to_tsvector('charabia.default_v1',body) @@ "
-            "plainto_tsquery('charabia.default_v1','PostgreSQL')"
+            "to_tsvector('public.charabia',body) @@ "
+            "plainto_tsquery('public.charabia','PostgreSQL')"
         )
         plan = json.loads(session.value(
             "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + query
@@ -120,22 +127,25 @@ def repeated_requests():
         # Warm all language resources before judging per-request reclamation.
         text = "PostgreSQL 数据库 全文检索 café 日本語の検索 한국어 검색 ภาษาไทย Ελληνικά עברית"
         statement = (
-            "SELECT count(to_tsvector('charabia.default_v1'," + literal(text)
+            "SELECT count(to_tsvector('public.charabia'," + literal(text)
             + " || ' ' || g::text)) FROM generate_series(1,250) g"
         )
+        headline_statement = "SELECT sum(length(ts_headline('public.charabia'," + literal(text) + " || ' ' || g::text,'cafe'::tsquery,'HighlightAll=true'))) FROM generate_series(1,250) g"
         session.value(statement)
+        session.value(headline_statement)
         for batch in range(8):
             before = hooks(session)
             assert session.value(statement) == "250"
+            assert int(session.value(headline_statement)) > 0
             sample = observe(session, "requests", batch)
             results["memory"].append(sample)
             checkpoint()
             if before is not None:
                 after = sample["hooks"]
-                assert after["parser_created"] - before["parser_created"] == 250, (before, after)
+                assert after["parser_created"] - before["parser_created"] == 500, (before, after)
                 assert after["parser_created"] == after["parser_dropped"], after
-                assert after["state_registered"] - before["state_registered"] == 250, (before, after)
-                assert after["state_released"] - before["state_released"] == 250, (before, after)
+                assert after["state_registered"] - before["state_registered"] == 500, (before, after)
+                assert after["state_released"] - before["state_released"] == 500, (before, after)
         bounded_contexts(results["memory"][2:])
         if HAS_HOOKS:
             results["test_counters"] = hooks(session)
@@ -160,12 +170,14 @@ def cache_invalidation():
     # zip() above groups each generated (JSON, metadata) pair into two tuples.
     state = results["cache_invalidation"]
     state.update({"stoplists": list(metadata), "warmup": [], "control": [], "measurement": []})
-    run(
-        "CREATE TEXT SEARCH CONFIGURATION stress.cache_config(COPY=charabia.default_v1); "
-        "CREATE TEXT SEARCH DICTIONARY stress.cache_latin(TEMPLATE=charabia.normalize_v1,"
-        "Route='latin',StopWords=" + literal(payloads[0]) + "); "
-        "ALTER TEXT SEARCH CONFIGURATION stress.cache_config ALTER MAPPING FOR latin WITH stress.cache_latin"
-    )
+    options = [json.dumps({"stemming":False,"builtin_stopwords":False,"stopwords_add":{"eng":json.loads(payload)}},ensure_ascii=False,separators=(",",":")) for payload in payloads]
+    state["settings_json_sha256"] = [hashlib.sha256(value.encode()).hexdigest() for value in options]
+    run("SELECT charabia.create_config('stress.cache_config'," + literal(options[0]) + "::jsonb)")
+    document = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. alpha beta"
+    selected = json.loads(run("SELECT json_agg(DISTINCT language) FROM charabia.analyze(" + literal(document) + ",'stress.cache_config') WHERE kind IN ('word','stop')"))
+    assert selected == ["eng"], selected
+    state["probe_document"] = document
+    state["selected_languages"] = selected
     with Session() as warm, Session() as updater:
         warm.value(
             "SET plan_cache_mode=force_generic_plan; SET jit=off; SET statement_timeout='60s'; "
@@ -173,8 +185,9 @@ def cache_invalidation():
         )
         updater.value("SET statement_timeout='60s'")
         # Parameter binding prevents constant folding from hiding cache lookup.
-        probe = "EXECUTE cache_probe('alpha beta')"
-        assert warm.value(probe) == "'beta':2"
+        probe = "EXECUTE cache_probe(" + literal(document) + ")"
+        first_value = warm.value(probe)
+        assert "'alpha':" not in first_value and "'beta':" in first_value, first_value
         initial = observe(warm, "initial", 0)
         state["initial"] = initial
         state["shared_buffers"] = warm.value("SHOW shared_buffers")
@@ -216,13 +229,12 @@ def cache_invalidation():
         def cycle(phase, number, selection, replaced):
             before = hooks(warm)
             if replaced:
-                updater.value("ALTER TEXT SEARCH DICTIONARY stress.cache_latin(StopWords=" + literal(payloads[selection]) + ")")
-            expected = "'beta':2" if selection == 0 else "'alpha':1"
+                updater.value("SELECT charabia.alter_config('stress.cache_config'," + literal(options[selection]) + "::jsonb)")
             value = warm.value(probe)
             sample = dict(observe(warm, phase, number), stoplist=selection, vector=value)
             state[phase].append(sample)
             checkpoint()
-            assert value == expected, sample
+            assert (("'alpha':" in value) == (selection == 1)) and (("'beta':" in value) == (selection == 0)), sample
             check_state(sample, before, replaced)
 
         for number in range(8):
@@ -267,7 +279,7 @@ def cache_invalidation():
             state["rss_gate_metric"] = "Linux status VmRSS - RssShmem (RssAnon + RssFile)"
             state["rss_accounting_classification"] = (
                 "unexplained-nonshared-resident-growth" if not state["nonshared_rss_gate_passed"]
-                else "total-growth-explained-by-PG-shared-buffer-residency" if not state["raw_total_rss_gate_passed"]
+                else "total-growth-accounted-as-shared-residency" if not state["raw_total_rss_gate_passed"]
                 else "raw-total-and-nonshared-residency-within-bound"
             )
             state["rss_component_first_to_last_growth_bytes"] = {
@@ -281,7 +293,8 @@ def cache_invalidation():
         checkpoint()
         assert state["nonshared_rss_gate_passed"] if LINUX else state["raw_total_rss_gate_passed"], state
         assert state["prepared_plan_counts"]["generic"] == 73 and state["prepared_plan_counts"]["custom"] == 0, state
-        assert warm.value("EXECUTE cache_probe('alpha beta')") == "'alpha':1"
+        final_value = warm.value(probe)
+        assert "'alpha':" in final_value and "'beta':" not in final_value, final_value
 
 
 def bm25_query(text):
@@ -304,7 +317,7 @@ def assert_bm25_plan(plan):
 def concurrency():
     if LINUX:
         # Every writer mutation below must maintain an already-existing index.
-        run("CREATE INDEX stress_bm25 ON stress.docs USING bm25(body) WITH(text_config='charabia.default_v1')")
+        run("CREATE INDEX stress_bm25 ON stress.docs USING bm25(body) WITH(text_config='public.charabia')")
     snapshots_ready = threading.Barrier(3)
     writes_committed = threading.Barrier(3)
     stop = threading.Event()
@@ -322,7 +335,7 @@ def concurrency():
                 with active_lock:
                     active[role] = session.pid
                     pids.append(session.pid)
-                session.value("SET statement_timeout='60s'; SET jit=off; SET enable_seqscan=off")
+                session.value("SET application_name=" + literal("pgcb_stress_" + role) + "; SET statement_timeout='60s'; SET jit=off; SET enable_seqscan=off")
                 for batch in range(8):
                     if stop.is_set():
                         break
@@ -349,7 +362,7 @@ def concurrency():
                         session.value("BEGIN ISOLATION LEVEL REPEATABLE READ")
                         snapshot = session.value("SELECT pg_current_snapshot()::text")
                         snapshots_ready.wait(timeout=90)
-                        lexemes = "tsvector_to_array(to_tsvector('charabia.default_v1',"
+                        lexemes = "tsvector_to_array(to_tsvector('public.charabia',"
                         oracle = json.loads(session.value(
                             "SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM stress.docs "
                             "WHERE " + lexemes + "body)) && " + lexemes + literal(text) + "))"
@@ -377,7 +390,7 @@ def concurrency():
                         else:
                             assert int(session.value("SELECT count(*) FROM stress.docs")) >= 20000
                         session.value("COMMIT")
-                        error = session.query("SELECT * FROM charabia.analyze_v1(repeat('x',262145))")
+                        error = session.query("SELECT * FROM charabia.analyze(repeat('x',262145))")
                         assert "ERROR:" in error and session.value("SELECT 1") == "1", error
                         observation["error_recovered"] = True
                 assert len(record["batches"]) == 8, record
@@ -391,10 +404,10 @@ def concurrency():
             snapshots_ready.abort()
             writes_committed.abort()
             with active_lock:
-                others = [pid for owner, pid in active.items() if owner != role]
-            for pid in others:
+                others = [(owner,pid) for owner, pid in active.items() if owner != role]
+            for owner,pid in others:
                 try:
-                    run(f"SELECT pg_cancel_backend({pid})")
+                    run(f"SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid={pid} AND application_name=" + literal("pgcb_stress_" + owner))
                 except BaseException as cancel_error:
                     record.setdefault("cancel_errors", []).append(repr(cancel_error))
             return record, error
@@ -403,15 +416,40 @@ def concurrency():
                 active.pop(role, None)
         return record, None
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(client, role) for role in ("writer", "reader-a", "reader-b")]
-    # Collect outcomes after every worker has exited; no failed background
-    # assertion can disappear or leave a live client behind.
+    pool = ThreadPoolExecutor(max_workers=3)
+    futures = []
+    primary = None
+    try:
+        futures = [pool.submit(client,role) for role in ("writer","reader-a","reader-b")]
+        # This wait is also interrupted by an observer/harness failure. The
+        # finally block cancels exact owned sessions before joining the pool.
+        for future in futures:
+            future.result()
+    except BaseException as error:
+        primary = error
+    finally:
+        stop.set()
+        snapshots_ready.abort()
+        writes_committed.abort()
+        with active_lock:
+            remaining_clients = list(active.items())
+        for owner,pid in remaining_clients:
+            try:
+                run(f"SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid={pid} AND application_name=" + literal("pgcb_stress_"+owner),check=False,timeout=10)
+            except BaseException as error:
+                results.setdefault("concurrency_cleanup_errors",[]).append(repr(error))
+        pool.shutdown(wait=True,cancel_futures=True)
+    # Collect every outcome after the pool joined, including failure records.
     for future in futures:
-        record, failure = future.result()
-        records.append(record)
-        if failure is not None:
-            failures.append(failure)
+        try:
+            record,failure = future.result()
+            records.append(record)
+            if failure is not None:
+                failures.append(failure)
+        except BaseException as error:
+            failures.append(error)
+    if primary is not None:
+        failures.insert(0,primary)
     results["concurrency"] = records
     results["concurrency_joined"] = True
     results["concurrency_backend_pids"] = pids
@@ -426,6 +464,8 @@ def concurrency():
         time.sleep(0.05)
     checkpoint()
     assert results["concurrency_closed_backends"] == 0, results
+    if results.get("concurrency_cleanup_errors"):
+        raise AssertionError(f"Concurrent client cleanup failed after join: {results['concurrency_cleanup_errors']}")
     if failures:
         raise AssertionError(f"Concurrent clients failed after join: {[repr(error) for error in failures]}") from failures[0]
     assert run("SELECT count(*) FROM stress.docs") == "20320"
@@ -448,7 +488,7 @@ try:
 CREATE SCHEMA stress;
 CREATE TABLE stress.docs(id integer PRIMARY KEY,body text NOT NULL);
 INSERT INTO stress.docs SELECT g,'PostgreSQL 数据库 全文检索 café '||g FROM generate_series(1,20000) g;
-CREATE INDEX stress_gin ON stress.docs USING gin(to_tsvector('charabia.default_v1',body));
+CREATE INDEX stress_gin ON stress.docs USING gin(to_tsvector('public.charabia',body));
 ANALYZE stress.docs;
 """)
     parallel_execution()

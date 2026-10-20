@@ -1,15 +1,21 @@
+//! One-pass raw segmentation and per-route, bounded general analysis.
 use std::borrow::Cow;
 use std::fmt;
 
 use charabia::normalizer::{ClassifierOption, NormalizerOption};
-use charabia::{Normalize, SeparatorKind, Token, TokenKind, TokenizerBuilder};
-use serde::de::{self, Deserialize, Deserializer, SeqAccess, Visitor};
+use charabia::{Normalize, Script, Token, TokenKind, TokenizerBuilder};
+use qdrant_rust_stemmers::Stemmer;
+use unicode_normalization::UnicodeNormalization;
 
-use crate::profile::NormalizationRoute;
+pub use crate::language::LanguageSource;
+use crate::routes::Route;
 
 pub const MAX_INPUT_BYTES: usize = 262_144;
 pub const MAX_STOP_WORDS_JSON_BYTES: usize = 1_048_576;
 pub const MAX_STOP_WORDS: usize = 65_536;
+pub const MAX_STOP_WORD_BYTES: usize = 2_046;
+pub const MAX_STOP_KEY_BYTES: usize = 16_777_216;
+pub const MAX_RAW_TOKEN_BYTES: usize = 2_046;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -25,7 +31,7 @@ pub struct AnalysisError {
 }
 
 impl AnalysisError {
-    fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -45,185 +51,148 @@ impl std::error::Error for AnalysisError {}
 pub struct Span {
     pub start: usize,
     pub end: usize,
-    pub route: NormalizationRoute,
+    pub char_start: usize,
+    pub char_end: usize,
+    pub route: Route,
+    pub script: Script,
+    pub charabia_language: Option<charabia::Language>,
+    pub language_source: LanguageSource,
 }
 
-#[derive(Debug, Clone)]
 pub struct Options {
-    pub lossy: bool,
-    pub stop_words: Option<fst::Set<Vec<u8>>>,
+    route: Route,
+    stemming: bool,
+    builtin_stopwords: bool,
+    stops: crate::stopwords::EffectiveStops,
+    stemmer: Option<Stemmer>,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            lossy: true,
-            stop_words: None,
-        }
+impl fmt::Debug for Options {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Options")
+            .field("route", &self.route)
+            .field("stemming", &self.stemming())
+            .field("builtin_stopwords", &self.builtin_stopwords())
+            .field("fst_bytes", &self.fst_bytes())
+            .field("effective_stopwords", &self.effective_stopwords())
+            .field("excluded_builtin_count", &self.excluded_builtin_count())
+            .finish()
     }
 }
 
 impl Options {
-    pub fn from_json(lossy: bool, json: Option<&str>) -> Result<Self, AnalysisError> {
-        let Some(json) = json else {
-            return Ok(Self {
-                lossy,
-                stop_words: None,
-            });
-        };
-        if json.len() > MAX_STOP_WORDS_JSON_BYTES {
+    pub fn new(
+        route: Route,
+        stemming: bool,
+        builtin: bool,
+        add: &[String],
+        keep: &[String],
+    ) -> Result<Self, AnalysisError> {
+        if route.is_display() {
             return Err(AnalysisError::new(
-                ErrorKind::Limit,
-                "StopWords JSON exceeds 1048576 bytes",
+                ErrorKind::InvalidInput,
+                "display-only has no dictionary",
             ));
         }
-        let StopWords(mut words) = serde_json::from_str(json).map_err(|error| {
-            let kind = if error.to_string().starts_with("limit:") {
-                ErrorKind::Limit
-            } else {
-                ErrorKind::InvalidInput
-            };
-            AnalysisError::new(kind, format!("invalid StopWords JSON: {error}"))
-        })?;
-        words.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        words.dedup();
-        let stop_words = if words.is_empty() {
-            None
-        } else {
-            Some(fst::Set::from_iter(words).map_err(|error| {
-                AnalysisError::new(
-                    ErrorKind::Internal,
-                    format!("cannot build stopword FST: {error}"),
-                )
-            })?)
+        // Match the public canonical settings budget on direct INIT as well.
+        // Borrow the arrays: validation does not clone user configuration data.
+        #[derive(serde::Serialize)]
+        struct LocalSettings<'a> {
+            builtin_stopwords: bool,
+            stemming: bool,
+            stopwords_add: std::collections::BTreeMap<&'a str, &'a [String]>,
+            stopwords_keep: std::collections::BTreeMap<&'a str, &'a [String]>,
+        }
+        let mut additions = std::collections::BTreeMap::new();
+        let mut retained = std::collections::BTreeMap::new();
+        if !add.is_empty() {
+            additions.insert(route.alias(), add);
+        }
+        if !keep.is_empty() {
+            retained.insert(route.alias(), keep);
+        }
+        let local = LocalSettings {
+            builtin_stopwords: builtin,
+            stemming,
+            stopwords_add: additions,
+            stopwords_keep: retained,
         };
-        Ok(Self { lossy, stop_words })
-    }
-
-    fn normalizer_options(&self) -> Result<NormalizerOption<'_>, AnalysisError> {
-        let stop_words = self
-            .stop_words
-            .as_ref()
-            .map(|words| {
-                fst::Set::new(words.as_fst().as_bytes()).map_err(|error| {
-                    AnalysisError::new(
-                        ErrorKind::Internal,
-                        format!("invalid stopword FST: {error}"),
-                    )
-                })
-            })
-            .transpose()?;
-        Ok(NormalizerOption {
-            create_char_map: false,
-            lossy: self.lossy,
-            classifier: ClassifierOption {
-                stop_words,
-                separators: None,
-            },
+        let bytes = serde_json::to_vec(&local).expect("settings only contain strings and booleans");
+        if bytes.len() > MAX_STOP_WORDS_JSON_BYTES {
+            return Err(AnalysisError::new(
+                ErrorKind::Limit,
+                "dictionary settings JSON exceeds 1048576 bytes",
+            ));
+        }
+        let stops = crate::stopwords::build(route, builtin, add, keep)?;
+        Ok(Self {
+            route,
+            stemming,
+            builtin_stopwords: builtin,
+            stops,
+            stemmer: stemming
+                .then(|| route.algorithm().map(Stemmer::create))
+                .flatten(),
         })
     }
-}
 
-struct StopWords(Vec<String>);
+    pub fn stemming(&self) -> bool {
+        self.stemming
+    }
+    pub fn builtin_stopwords(&self) -> bool {
+        self.builtin_stopwords
+    }
 
-impl<'de> Deserialize<'de> for StopWords {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct WordsVisitor;
-        impl<'de> Visitor<'de> for WordsVisitor {
-            type Value = StopWords;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an array of stopword strings")
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut words = Vec::new();
-                while let Some(word) = sequence.next_element::<String>()? {
-                    if words.len() == MAX_STOP_WORDS {
-                        return Err(de::Error::custom("limit: StopWords exceeds 65536 elements"));
-                    }
-                    if word.len() > MAX_INPUT_BYTES {
-                        return Err(de::Error::custom(
-                            "limit: StopWords item exceeds 262144 bytes",
-                        ));
-                    }
-                    if word.contains('\0') {
-                        return Err(de::Error::custom("StopWords item contains NUL"));
-                    }
-                    words.push(word);
-                }
-                Ok(StopWords(words))
-            }
-        }
-        deserializer.deserialize_seq(WordsVisitor)
+    pub fn fst_bytes(&self) -> usize {
+        self.stops.fst.as_fst().as_bytes().len()
+    }
+    pub fn effective_stopwords(&self) -> usize {
+        self.stops.fst.len()
+    }
+    pub fn excluded_builtin_count(&self) -> usize {
+        self.stops.excluded_builtin_count
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prepared {
+    pub kind: TokenKind,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LexizeOutcome {
-    Term(String),
+    Terms {
+        first: String,
+        second: Option<String>,
+    },
     Stop,
     Ignore,
 }
 
-pub fn segment(input: &str) -> Result<Vec<Span>, AnalysisError> {
-    check_input(input)?;
-    let mut builder = TokenizerBuilder::default();
-    let tokenizer = builder.build();
-    let mut spans = Vec::new();
-    let mut previous_end = 0;
-    for token in tokenizer.segment(input) {
-        check_span(input, token.byte_start, token.byte_end, previous_end)?;
-        spans.push(Span {
-            start: token.byte_start,
-            end: token.byte_end,
-            route: NormalizationRoute::from_metadata(token.script, token.language),
-        });
-        previous_end = token.byte_end;
-    }
-    if previous_end != input.len() {
-        return Err(AnalysisError::new(
-            ErrorKind::Internal,
-            "Charabia spans do not cover input",
-        ));
-    }
-    Ok(spans)
-}
-
-pub fn normalize(
-    raw: &str,
-    route: NormalizationRoute,
-    options: &Options,
-) -> Result<LexizeOutcome, AnalysisError> {
-    check_input(raw)?;
-    let (script, language) = route.metadata();
-    // Keep Unknown so Charabia's classifier runs before the lossy normalizers.
-    let token = Token {
-        lemma: Cow::Borrowed(raw),
-        script,
-        language,
-        ..Token::default()
-    }
-    .normalize(&options.normalizer_options()?);
-    outcome(token.kind, token.lemma())
-}
-
-fn outcome(kind: TokenKind, lemma: &str) -> Result<LexizeOutcome, AnalysisError> {
-    match kind {
-        TokenKind::Word if !lemma.is_empty() => Ok(LexizeOutcome::Term(lemma.to_owned())),
-        TokenKind::StopWord => Ok(LexizeOutcome::Stop),
-        TokenKind::Separator(_) | TokenKind::Word => Ok(LexizeOutcome::Ignore),
-        TokenKind::Unknown => Err(AnalysisError::new(
-            ErrorKind::Internal,
-            "Charabia returned Unknown token kind",
-        )),
+impl LexizeOutcome {
+    pub fn into_terms(self) -> Vec<String> {
+        match self {
+            Self::Terms { first, second } => {
+                let mut terms = vec![first];
+                if let Some(second) = second {
+                    terms.push(second);
+                }
+                terms
+            }
+            Self::Stop | Self::Ignore => Vec::new(),
+        }
     }
 }
 
-fn check_input(input: &str) -> Result<(), AnalysisError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenAnalysis {
+    pub prepared: Option<String>,
+    pub kind: TokenKind,
+    pub outcome: LexizeOutcome,
+}
+
+pub fn check_input(input: &str) -> Result<(), AnalysisError> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(AnalysisError::new(
             ErrorKind::Limit,
@@ -239,525 +208,462 @@ fn check_input(input: &str) -> Result<(), AnalysisError> {
     Ok(())
 }
 
-fn check_span(
+pub fn segment(input: &str) -> Result<Vec<Span>, AnalysisError> {
+    segment_counted(input).map(|(spans, _)| spans)
+}
+
+pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), AnalysisError> {
+    check_input(input)?;
+    let mut builder = TokenizerBuilder::default();
+    let tokenizer = builder.build();
+    let mut spans = Vec::new();
+    let mut previous_byte = 0;
+    let mut previous_char = 0;
+    for token in tokenizer.segment(input) {
+        let raw = checked_span(input, token.byte_start, token.byte_end, previous_byte)?;
+        if raw != token.lemma() {
+            return Err(AnalysisError::new(
+                ErrorKind::Internal,
+                "Charabia segmentation changed the raw text",
+            ));
+        }
+        let char_end = previous_char + raw.chars().count();
+        if token.char_start != previous_char || token.char_end != char_end {
+            return Err(AnalysisError::new(
+                ErrorKind::Internal,
+                "Charabia returned an invalid character range",
+            ));
+        }
+        spans.push(Span {
+            start: token.byte_start,
+            end: token.byte_end,
+            char_start: previous_char,
+            char_end,
+            route: Route::UND,
+            script: token.script,
+            charabia_language: token.language,
+            language_source: LanguageSource::None,
+        });
+        previous_byte = token.byte_end;
+        previous_char = char_end;
+    }
+    if previous_byte != input.len() {
+        return Err(AnalysisError::new(
+            ErrorKind::Internal,
+            "Charabia spans do not cover the input",
+        ));
+    }
+    let calls = crate::language::complete(input, &mut spans)?;
+    let mut bounded = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.end - span.start <= MAX_RAW_TOKEN_BYTES {
+            bounded.push(span);
+            continue;
+        }
+        // PG discards oversized raw tokens before HEADLINE sees them. Display
+        // fragments preserve every byte without turning a long word into terms.
+        let mut first_byte = span.start;
+        let mut first_char = span.char_start;
+        while first_byte < span.end {
+            let mut end = (first_byte + MAX_RAW_TOKEN_BYTES).min(span.end);
+            while !input.is_char_boundary(end) {
+                end -= 1;
+            }
+            let char_end = first_char + input[first_byte..end].chars().count();
+            bounded.push(Span {
+                start: first_byte,
+                end,
+                char_start: first_char,
+                char_end,
+                route: Route::DISPLAY,
+                language_source: LanguageSource::None,
+                ..span
+            });
+            first_byte = end;
+            first_char = char_end;
+        }
+    }
+    Ok((bounded, calls))
+}
+
+fn checked_span(
     input: &str,
     start: usize,
     end: usize,
-    previous_end: usize,
-) -> Result<(), AnalysisError> {
-    if start != previous_end || start >= end || input.get(start..end).is_none() {
+    previous: usize,
+) -> Result<&str, AnalysisError> {
+    if start != previous || start >= end {
         return Err(AnalysisError::new(
             ErrorKind::Internal,
-            "Charabia returned an invalid UTF-8 span",
+            "Charabia returned a noncontiguous or empty span",
         ));
     }
-    Ok(())
+    input.get(start..end).ok_or_else(|| {
+        AnalysisError::new(
+            ErrorKind::Internal,
+            "Charabia returned an invalid UTF-8 byte range",
+        )
+    })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnalyzedToken {
-    pub raw: String,
-    pub lemma: String,
-    pub kind: String,
-    pub script: String,
-    pub language: Option<String>,
-    pub byte_start: usize,
-    pub byte_end: usize,
-    pub char_start: usize,
-    pub char_end: usize,
-    pub route: NormalizationRoute,
+fn normalizer(lossy: bool) -> NormalizerOption<'static> {
+    NormalizerOption {
+        create_char_map: false,
+        lossy,
+        classifier: ClassifierOption {
+            stop_words: None,
+            separators: None,
+        },
+    }
 }
 
-pub fn analyze(input: &str) -> Result<Vec<AnalyzedToken>, AnalysisError> {
-    check_input(input)?;
-    let mut builder = TokenizerBuilder::default();
-    builder.lossy_normalization(true).create_char_map(false);
-    let tokenizer = builder.build();
-    let mut result = Vec::new();
-    let mut previous_end = 0;
-    for token in tokenizer.tokenize(input) {
-        check_span(input, token.byte_start, token.byte_end, previous_end)?;
-        let kind = match token.kind {
-            TokenKind::Word => "word",
-            TokenKind::StopWord => "stopword",
-            TokenKind::Separator(SeparatorKind::Soft) => "separator_soft",
-            TokenKind::Separator(SeparatorKind::Hard) => "separator_hard",
-            TokenKind::Unknown => {
-                return Err(AnalysisError::new(
-                    ErrorKind::Internal,
-                    "Charabia returned Unknown token kind",
-                ));
+pub fn prepare(raw: &str, route: Route) -> Result<Prepared, AnalysisError> {
+    check_input(raw)?;
+    if route.is_display() {
+        return Err(AnalysisError::new(
+            ErrorKind::InvalidInput,
+            "display-only has no prepared key",
+        ));
+    }
+    let token = Token {
+        lemma: Cow::Borrowed(raw),
+        script: route.script(),
+        language: route.language(),
+        ..Token::default()
+    }
+    .normalize(&normalizer(false));
+    if matches!(token.kind, TokenKind::Unknown | TokenKind::StopWord) {
+        return Err(AnalysisError::new(
+            ErrorKind::Internal,
+            "unexpected Charabia classification without a stop set",
+        ));
+    }
+    let nfc: String = token.lemma.nfc().collect();
+    let lowered = if route.language() == Some(charabia::Language::Tur) {
+        let mut text = String::with_capacity(nfc.len());
+        for character in nfc.chars() {
+            match character {
+                'I' => text.push('ı'),
+                'İ' => text.push('i'),
+                other => text.extend(other.to_lowercase()),
             }
-        };
-        result.push(AnalyzedToken {
-            raw: input[token.byte_start..token.byte_end].to_owned(),
-            lemma: token.lemma().to_owned(),
-            kind: kind.to_owned(),
-            script: format!("{:?}", token.script),
-            language: token.language.map(|language| language.code().to_owned()),
-            byte_start: token.byte_start,
-            byte_end: token.byte_end,
-            char_start: token.char_start,
-            char_end: token.char_end,
-            route: NormalizationRoute::from_metadata(token.script, token.language),
-        });
-        previous_end = token.byte_end;
+        }
+        text
+    } else {
+        nfc.to_lowercase()
+    };
+    Ok(Prepared {
+        kind: token.kind,
+        key: lowered.nfc().collect(),
+    })
+}
+
+fn finalize(key: &str, route: Route) -> String {
+    Token {
+        kind: TokenKind::Word,
+        lemma: Cow::Borrowed(key),
+        script: route.script(),
+        language: route.language(),
+        ..Token::default()
     }
-    if previous_end != input.len() {
+    .normalize(&normalizer(true))
+    .lemma
+    .into_owned()
+}
+
+pub fn inspect(raw: &str, route: Route, options: &Options) -> Result<TokenAnalysis, AnalysisError> {
+    if route != options.route {
         return Err(AnalysisError::new(
             ErrorKind::Internal,
-            "Charabia tokens do not cover input",
+            "dictionary options belong to another route",
         ));
     }
-    Ok(result)
+    let Prepared { kind, key } = prepare(raw, route)?;
+    if kind != TokenKind::Word || key.is_empty() {
+        return Ok(TokenAnalysis {
+            prepared: (!key.is_empty()).then_some(key),
+            kind,
+            outcome: LexizeOutcome::Ignore,
+        });
+    }
+    if options.stops.fst.contains(&key) {
+        return Ok(TokenAnalysis {
+            prepared: Some(key),
+            kind: TokenKind::StopWord,
+            outcome: LexizeOutcome::Stop,
+        });
+    }
+    let surface = finalize(&key, route);
+    let stem = if key
+        .chars()
+        .all(|c| c.is_alphabetic() || unicode_normalization::char::is_combining_mark(c))
+    {
+        options.stemmer.as_ref().map(|stemmer| stemmer.stem(&key))
+    } else {
+        None
+    };
+    let stem = stem.as_ref().and_then(|stem| {
+        if stem.as_ref() == key {
+            return None;
+        }
+        let term = finalize(stem, route);
+        (!term.is_empty() && term != surface).then_some(term)
+    });
+    let outcome = if surface.is_empty() {
+        stem.map_or(LexizeOutcome::Ignore, |first| LexizeOutcome::Terms {
+            first,
+            second: None,
+        })
+    } else {
+        LexizeOutcome::Terms {
+            first: surface,
+            second: stem,
+        }
+    };
+    Ok(TokenAnalysis {
+        prepared: Some(key),
+        kind,
+        outcome,
+    })
+}
+
+pub fn normalize(
+    raw: &str,
+    route: Route,
+    options: &Options,
+) -> Result<LexizeOutcome, AnalysisError> {
+    inspect(raw, route, options).map(|token| token.outcome)
 }
 
 #[cfg(test)]
 mod tests {
-    use charabia::{Language, Script};
-
     use super::*;
+    use charabia::Language;
+
+    fn route(language: Language) -> Route {
+        Route::from_language(Some(language)).unwrap()
+    }
+    fn terms(raw: &str, language: Language, stemming: bool) -> Vec<String> {
+        let route = route(language);
+        normalize(
+            raw,
+            route,
+            &Options::new(route, stemming, false, &[], &[]).unwrap(),
+        )
+        .unwrap()
+        .into_terms()
+    }
 
     #[test]
-    fn word_stop_ignore_and_empty_lemma_are_distinct() {
-        let options = Options::from_json(true, Some(r#"["the"]"#)).unwrap();
-        let route = NormalizationRoute::Latin;
+    fn independent_algorithm_goldens_preserve_pre_stem_unicode() {
+        // English is the crate's documented example; the accented examples are
+        // preserved real upstream API runs in general-language/probes records.
         assert_eq!(
-            normalize("The", route, &options).unwrap(),
-            LexizeOutcome::Term("the".into())
+            terms("fruitlessly", Language::Eng, true),
+            ["fruitlessly", "fruitless"]
+        );
+        assert_eq!(terms("aimées", Language::Fra, true), ["aimees", "aim"]);
+        assert_eq!(terms("IŞIKLAR", Language::Tur, true), ["isiklar", "isik"]);
+        assert_eq!(terms("hästarna", Language::Swe, true), ["hastarna", "hast"]);
+        assert_eq!(
+            prepare("AIME\u{301}ES", route(Language::Fra)).unwrap().key,
+            "aimées"
+        );
+        assert_eq!(prepare("I\u{307}", route(Language::Tur)).unwrap().key, "i");
+        assert_eq!(prepare("I", route(Language::Tur)).unwrap().key, "ı");
+        assert_eq!(prepare("I", route(Language::Eng)).unwrap().key, "i");
+    }
+
+    #[test]
+    fn surface_is_retained_and_stemming_stop_switches_are_independent() {
+        let r = route(Language::Eng);
+        let on = Options::new(r, true, true, &[], &[]).unwrap();
+        let no_stem = Options::new(r, false, true, &[], &[]).unwrap();
+        let no_builtin = Options::new(r, true, false, &["custom".into()], &[]).unwrap();
+        let keep = Options::new(r, true, true, &[], &["running".into(), "THE".into()]).unwrap();
+        assert_eq!(normalize("the", r, &on).unwrap(), LexizeOutcome::Stop);
+        assert_eq!(normalize("the", r, &no_stem).unwrap(), LexizeOutcome::Stop);
+        assert_eq!(
+            normalize("running", r, &no_stem).unwrap().into_terms(),
+            ["running"]
         );
         assert_eq!(
-            normalize("the", route, &options).unwrap(),
+            normalize("custom", r, &no_builtin).unwrap(),
             LexizeOutcome::Stop
         );
         assert_eq!(
-            normalize(" ", route, &options).unwrap(),
-            LexizeOutcome::Ignore
+            normalize("the", r, &no_builtin).unwrap().into_terms(),
+            ["the"]
         );
         assert_eq!(
-            normalize("\u{301}", route, &options).unwrap(),
-            LexizeOutcome::Ignore
+            normalize("running", r, &keep).unwrap().into_terms(),
+            ["running", "run"]
         );
+        assert_eq!(normalize("THE", r, &keep).unwrap().into_terms(), ["the"]);
+        assert_eq!(terms("run", Language::Eng, true), ["run"]);
+        assert_eq!(terms("123", Language::Eng, true), ["123"]);
+        assert_eq!(terms("foo_bar", Language::Eng, true), ["foo_bar"]);
+    }
+
+    #[test]
+    fn empty_keys_and_separators_are_ignore_before_stop() {
+        let r = route(Language::Eng);
+        let options = Options::new(r, true, true, &[], &[]).unwrap();
+        for raw in ["", " ", ".", "\u{1}", "\u{301}"] {
+            assert_eq!(
+                normalize(raw, r, &options).unwrap(),
+                LexizeOutcome::Ignore,
+                "{raw:?}"
+            );
+        }
         assert_eq!(
-            normalize("Thé", route, &options).unwrap(),
-            LexizeOutcome::Term("the".into())
+            inspect(" ", r, &options).unwrap().prepared.as_deref(),
+            Some(" ")
         );
+        assert_eq!(inspect("\u{1}", r, &options).unwrap().prepared, None);
         assert_eq!(
-            normalize("", route, &Options::default()).unwrap(),
-            LexizeOutcome::Ignore
-        );
-        let empty_stopword = Options::from_json(true, Some(r#"[""]"#)).unwrap();
-        assert_eq!(
-            normalize("", route, &empty_stopword).unwrap(),
-            LexizeOutcome::Stop
-        );
-        let lossless = Options::from_json(false, None).unwrap();
-        assert_eq!(
-            normalize("Thé", route, &lossless).unwrap(),
-            LexizeOutcome::Term("The\u{301}".into())
+            normalize("a", route(Language::Fra), &options)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Internal
         );
     }
 
     #[test]
-    fn input_and_utf8_span_checks_reject_invalid_ranges() {
+    fn segmentation_reconstructs_raw_utf8_and_supplements_only_missing_groups() {
+        let input = "PostgreSQL 中文 café 日本語 한국어 Русский язык";
+        let (spans, calls) = segment_counted(input).unwrap();
+        assert_eq!(
+            spans
+                .iter()
+                .map(|s| &input[s.start..s.end])
+                .collect::<String>(),
+            input
+        );
+        for span in &spans {
+            assert_eq!(input[..span.start].chars().count(), span.char_start);
+            assert_eq!(input[..span.end].chars().count(), span.char_end);
+            if span.charabia_language.is_some() {
+                assert_eq!(span.language_source, LanguageSource::Charabia);
+            }
+            assert_eq!(span.route.script(), span.script);
+        }
+        let groups = spans
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                matches!(
+                    s.script,
+                    Script::Latin | Script::Cyrillic | Script::Hebrew | Script::Devanagari
+                ) && (*i == 0 || spans[*i - 1].script != s.script)
+            })
+            .count();
+        assert_eq!(calls, groups);
+        let (korean, calls) = segment_counted("한국어 검색").unwrap();
+        assert_eq!(calls, 0);
+        assert!(
+            korean
+                .iter()
+                .all(|s| s.route.language() == Some(Language::Kor))
+        );
+        let (latin, calls) = segment_counted("these cats were running in the garden").unwrap();
+        assert_eq!(calls, 1);
+        assert!(
+            latin
+                .iter()
+                .all(|s| s.language_source == LanguageSource::Supplement)
+        );
+        assert_eq!(segment_counted("1234 !").unwrap().1, 0);
+    }
+
+    #[test]
+    fn display_fragments_preserve_long_raw_text_without_subterms() {
+        for text in ["x".repeat(2046), "x".repeat(2047), "é".repeat(1024)] {
+            let spans = segment(&text).unwrap();
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|s| &text[s.start..s.end])
+                    .collect::<String>(),
+                text
+            );
+            assert!(spans.iter().all(|s| s.end - s.start <= MAX_RAW_TOKEN_BYTES));
+            if text.len() > MAX_RAW_TOKEN_BYTES {
+                assert!(spans.iter().all(
+                    |s| s.route == Route::DISPLAY && s.language_source == LanguageSource::None
+                ));
+            } else {
+                assert!(spans.iter().all(|s| !s.route.is_display()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_separator_run_retains_the_original_small_spans() {
+        // The locked segmenter returns 4096 separate one-byte spaces, not a
+        // single oversized raw token (preserved boundary-inspection evidence).
+        let input = " ".repeat(4096);
+        let spans = segment(&input).unwrap();
+        assert_eq!(spans.len(), 4096);
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.end - span.start == 1 && !span.route.is_display())
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| &input[span.start..span.end])
+                .collect::<String>(),
+            input
+        );
+    }
+
+    #[test]
+    fn raw_boundaries_and_input_limits_are_checked() {
         assert!(segment("").unwrap().is_empty());
         assert_eq!(segment("a\0b").unwrap_err().kind, ErrorKind::InvalidInput);
-        let oversized = "a".repeat(MAX_INPUT_BYTES + 1);
-        assert_eq!(segment(&oversized).unwrap_err().kind, ErrorKind::Limit);
         assert_eq!(
-            normalize(&oversized, NormalizationRoute::Latin, &Options::default())
-                .unwrap_err()
-                .kind,
+            segment(&"a".repeat(MAX_INPUT_BYTES + 1)).unwrap_err().kind,
             ErrorKind::Limit
         );
-        assert_eq!(analyze(&oversized).unwrap_err().kind, ErrorKind::Limit);
         assert!(check_input(&"a".repeat(MAX_INPUT_BYTES)).is_ok());
-        assert!(check_input(&"中".repeat(MAX_INPUT_BYTES / 3)).is_ok());
-        assert_eq!(
-            check_input(&"中".repeat(MAX_INPUT_BYTES / 3 + 1))
-                .unwrap_err()
-                .kind,
-            ErrorKind::Limit
-        );
-        assert!(check_span("中a", 0, 3, 0).is_ok());
+        assert!(checked_span("中a", 0, 3, 0).is_ok());
         for (start, end, previous) in [(1, 3, 0), (0, 1, 0), (0, 0, 0), (0, 5, 0)] {
             assert_eq!(
-                check_span("中a", start, end, previous).unwrap_err().kind,
+                checked_span("中a", start, end, previous).unwrap_err().kind,
                 ErrorKind::Internal
             );
         }
     }
+}
 
-    // Inputs and counts are the preserved 2026-10-20 Charabia source experiment.
-    // Its direct Token::normalize result is independent of the PostgreSQL adapter.
-    #[test]
-    fn all_metadata_normalization_routes_match_charabia_89856_cases() {
-        let scripts = [
-            Script::Arabic,
-            Script::Armenian,
-            Script::Bengali,
-            Script::Cyrillic,
-            Script::Devanagari,
-            Script::Ethiopic,
-            Script::Georgian,
-            Script::Greek,
-            Script::Gujarati,
-            Script::Gurmukhi,
-            Script::Hangul,
-            Script::Hebrew,
-            Script::Kannada,
-            Script::Khmer,
-            Script::Latin,
-            Script::Malayalam,
-            Script::Myanmar,
-            Script::Oriya,
-            Script::Sinhala,
-            Script::Tamil,
-            Script::Telugu,
-            Script::Thai,
-            Script::Cj,
-            Script::Other,
-        ];
-        let languages = [
-            None,
-            Some(Language::Zho),
-            Some(Language::Epo),
-            Some(Language::Eng),
-            Some(Language::Rus),
-            Some(Language::Cmn),
-            Some(Language::Spa),
-            Some(Language::Por),
-            Some(Language::Ita),
-            Some(Language::Ben),
-            Some(Language::Fra),
-            Some(Language::Deu),
-            Some(Language::Ukr),
-            Some(Language::Kat),
-            Some(Language::Ara),
-            Some(Language::Hin),
-            Some(Language::Jpn),
-            Some(Language::Heb),
-            Some(Language::Yid),
-            Some(Language::Pol),
-            Some(Language::Amh),
-            Some(Language::Jav),
-            Some(Language::Kor),
-            Some(Language::Nob),
-            Some(Language::Dan),
-            Some(Language::Swe),
-            Some(Language::Fin),
-            Some(Language::Tur),
-            Some(Language::Nld),
-            Some(Language::Hun),
-            Some(Language::Ces),
-            Some(Language::Ell),
-            Some(Language::Bul),
-            Some(Language::Bel),
-            Some(Language::Mar),
-            Some(Language::Kan),
-            Some(Language::Ron),
-            Some(Language::Slv),
-            Some(Language::Hrv),
-            Some(Language::Srp),
-            Some(Language::Mkd),
-            Some(Language::Lit),
-            Some(Language::Lav),
-            Some(Language::Est),
-            Some(Language::Tam),
-            Some(Language::Vie),
-            Some(Language::Urd),
-            Some(Language::Tha),
-            Some(Language::Guj),
-            Some(Language::Uzb),
-            Some(Language::Pan),
-            Some(Language::Aze),
-            Some(Language::Ind),
-            Some(Language::Tel),
-            Some(Language::Pes),
-            Some(Language::Mal),
-            Some(Language::Ori),
-            Some(Language::Mya),
-            Some(Language::Nep),
-            Some(Language::Sin),
-            Some(Language::Khm),
-            Some(Language::Tuk),
-            Some(Language::Aka),
-            Some(Language::Zul),
-            Some(Language::Sna),
-            Some(Language::Afr),
-            Some(Language::Lat),
-            Some(Language::Slk),
-            Some(Language::Cat),
-            Some(Language::Tgl),
-            Some(Language::Hye),
-            Some(Language::Cym),
-        ];
-        let samples = [
-            "Å Ä Ö A\u{30a} éclair",
-            "Đại Việt ı œ Æ",
-            "ΣΟΣ ς",
-            "أَب يى ۱۲۳ ﷼",
-            "尊嚴 臺灣台灣",
-            "カタカナ ガギ",
-            "한국어",
-            "foo\u{0001}bar",
-            "\u{0001}",
-            "\u{0301}",
-            "the The THE",
-            "。！. ",
-            "👩\u{200d}💻",
-        ];
-        let mut count = 0;
-        let mut routes = std::collections::HashSet::new();
-        for script in scripts {
-            for language in languages {
-                for sample in samples {
-                    for lossy in [false, true] {
-                        for stop in [false, true] {
-                            let options =
-                                Options::from_json(lossy, stop.then_some(r#"["the"]"#)).unwrap();
-                            let normalizer = options.normalizer_options().unwrap();
-                            let expected = Token {
-                                lemma: Cow::Borrowed(sample),
-                                script,
-                                language,
-                                ..Token::default()
-                            }
-                            .normalize(&normalizer);
-                            let route = NormalizationRoute::from_metadata(script, language);
-                            routes.insert(route);
-                            let (canonical_script, canonical_language) = route.metadata();
-                            let canonical = Token {
-                                lemma: Cow::Borrowed(sample),
-                                script: canonical_script,
-                                language: canonical_language,
-                                ..Token::default()
-                            }
-                            .normalize(&normalizer);
-                            assert_eq!(
-                                (expected.lemma(), expected.kind),
-                                (canonical.lemma(), canonical.kind),
-                                "{script:?}/{language:?}/{sample:?}/{lossy}/{stop}"
-                            );
-                            assert_eq!(
-                                normalize(sample, route, &options).unwrap(),
-                                outcome(expected.kind, expected.lemma()).unwrap()
-                            );
-                            count += 1;
-                        }
-                    }
-                }
+#[cfg(test)]
+mod resource_identity_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    fn identities() -> serde_json::Value {
+        let mut data = serde_json::Map::new();
+        for route in Route::ALL.into_iter().filter(|r| !r.is_display()) {
+            let options = Options::new(route, false, true, &[], &[]).unwrap();
+            let mut hash = Sha256::new();
+            for key in options.stops.fst.stream().into_strs().unwrap() {
+                hash.update((key.len() as u64).to_le_bytes());
+                hash.update(key.as_bytes());
             }
+            data.insert(route.alias().to_owned(),serde_json::json!({"entries":options.effective_stopwords(),"excluded_builtin_entries":options.excluded_builtin_count(),"sha256":format!("{:x}",hash.finalize())}));
         }
-        assert_eq!(count, 89_856);
-        assert_eq!(routes.len(), 18);
+        serde_json::Value::Object(data)
     }
-
     #[test]
-    fn direct_pipeline_matches_route_normalization_93_segments() {
-        let fixtures = [
-            (None, "繁體中文和简体中文：臺灣台灣，後端后端。"),
-            (None, "関西国際空港限定トートバッグ 日本語の検索"),
-            (None, "한국어의형태해석을실시할수있습니다"),
-            (Some(Language::Swe), "Å Ä Ö å ä ö éclair"),
-            (Some(Language::Vie), "Đại Việt Ð đ ð"),
-            (Some(Language::Tur), "İstanbul çalışma ışık"),
-            (Some(Language::Pes), "يك یك ۱۲۳ ﷼"),
-            (Some(Language::Jpn), "漢字 カタカナ ガギグゲゴ"),
-            (Some(Language::Cmn), "尊嚴 生而自由 臺灣台灣"),
-            (Some(Language::Eng), "running runs runner"),
-        ];
-        let mut count = 0;
-        for (language, input) in fixtures {
-            let allow_list = language.map(|language| [language]);
-            let mut builder = TokenizerBuilder::default();
-            builder.lossy_normalization(true).create_char_map(false);
-            if let Some(allow_list) = &allow_list {
-                builder.allow_list(allow_list);
-            }
-            let tokenizer = builder.build();
-            let native: Vec<_> = tokenizer.tokenize(input).collect();
-            let segmented: Vec<_> = tokenizer.segment(input).collect();
-            assert_eq!(native.len(), segmented.len());
-            let mut previous_end = 0;
-            for (expected, raw_token) in native.iter().zip(&segmented) {
-                check_span(
-                    input,
-                    raw_token.byte_start,
-                    raw_token.byte_end,
-                    previous_end,
-                )
-                .unwrap();
-                let raw = &input[raw_token.byte_start..raw_token.byte_end];
-                assert_eq!(expected.byte_start, raw_token.byte_start);
-                assert_eq!(expected.byte_end, raw_token.byte_end);
-                assert_eq!(expected.char_start, raw_token.char_start);
-                assert_eq!(expected.char_end, raw_token.char_end);
-                assert_eq!(
-                    normalize(
-                        raw,
-                        NormalizationRoute::from_metadata(raw_token.script, raw_token.language),
-                        &Options::default(),
-                    )
-                    .unwrap(),
-                    outcome(expected.kind, expected.lemma()).unwrap(),
-                    "{raw:?}/{:?}/{:?}",
-                    raw_token.script,
-                    raw_token.language
-                );
-                previous_end = raw_token.byte_end;
-                count += 1;
-            }
-            assert_eq!(previous_end, input.len());
-        }
-        assert_eq!(count, 93);
+    #[ignore = "explicit resource identity generation; not a semantic golden"]
+    fn print_builtin_resource_identity() {
+        println!("PGCB_RESOURCE_ID={}", identities());
     }
-
     #[test]
-    fn stopword_json_preserves_exact_decoded_bytes_and_ordering() {
-        let options = Options::from_json(
-            false,
-            Some(r#"["the","THE",""," 中 ","the","\\","\"","\u00e9"]"#),
-        )
-        .unwrap();
-        assert!(!options.lossy);
-        let words = options.stop_words.unwrap();
-        assert_eq!(words.len(), 7);
-        for word in ["the", "THE", "", " 中 ", "\\", "\"", "é"] {
-            assert!(words.contains(word));
-        }
-        assert!(!words.contains("The"));
-        assert!(!words.contains("中"));
-        assert!(
-            Options::from_json(true, Some("[]"))
-                .unwrap()
-                .stop_words
-                .is_none()
-        );
-        assert!(Options::from_json(true, None).unwrap().lossy);
-        let empty = Options::from_json(true, Some(r#"[""]"#)).unwrap();
-        assert_eq!(
-            normalize("\u{301}", NormalizationRoute::Latin, &empty).unwrap(),
-            LexizeOutcome::Ignore
-        );
-        let punctuation = Options::from_json(true, Some(r#"["."]"#)).unwrap();
-        assert_eq!(
-            normalize(".", NormalizationRoute::Latin, &punctuation).unwrap(),
-            LexizeOutcome::Stop
-        );
-    }
-
-    #[test]
-    fn stopword_json_rejects_invalid_shape_nul_and_trailing_data() {
-        for json in [
-            "null",
-            "{}",
-            r#""limit:""#,
-            "[null]",
-            "[true]",
-            "[1]",
-            "[[\"a\"]]",
-            "[{\"a\":1}]",
-            r#"["\u0000"]"#,
-            r#"["\ud800"]"#,
-            "[\"a\"] false",
-            "[",
-        ] {
-            assert_eq!(
-                Options::from_json(true, Some(json)).unwrap_err().kind,
-                ErrorKind::InvalidInput,
-                "{json}"
-            );
-        }
-    }
-
-    #[test]
-    fn stopword_json_limits_apply_before_deduplication() {
-        let max_item = format!("[\"{}\"]", "a".repeat(MAX_INPUT_BYTES));
-        assert!(
-            Options::from_json(true, Some(&max_item))
-                .unwrap()
-                .stop_words
-                .unwrap()
-                .contains("a".repeat(MAX_INPUT_BYTES))
-        );
-        let large_item = format!("[\"{}\"]", "a".repeat(MAX_INPUT_BYTES + 1));
-        assert_eq!(
-            Options::from_json(true, Some(&large_item))
-                .unwrap_err()
-                .kind,
-            ErrorKind::Limit
-        );
-        let max_count = format!("[{}]", vec!["\"\""; MAX_STOP_WORDS].join(","));
-        assert_eq!(
-            Options::from_json(true, Some(&max_count))
-                .unwrap()
-                .stop_words
-                .unwrap()
-                .len(),
-            1
-        );
-        let large_count = format!("[{}]", vec!["\"\""; MAX_STOP_WORDS + 1].join(","));
-        assert_eq!(
-            Options::from_json(true, Some(&large_count))
-                .unwrap_err()
-                .kind,
-            ErrorKind::Limit
-        );
-        let max_json = format!("{}[]", " ".repeat(MAX_STOP_WORDS_JSON_BYTES - 2));
-        assert!(Options::from_json(true, Some(&max_json)).is_ok());
-        let large_json = format!(" {max_json}");
-        assert_eq!(
-            Options::from_json(true, Some(&large_json))
-                .unwrap_err()
-                .kind,
-            ErrorKind::Limit
-        );
-    }
-
-    #[test]
-    fn immutable_observed_auto_profile_fixtures_match_all_diagnostic_fields() {
-        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/analysis/observed-auto-v1.json"
-        ))
-        .unwrap();
-        for fixture in fixtures["fixtures"].as_array().unwrap() {
-            let input = fixture["input"].as_str().unwrap();
-            let expected = fixture["tokens"].as_array().unwrap();
-            let tokens = analyze(input).unwrap();
-            let spans = segment(input).unwrap();
-            assert_eq!(tokens.len(), expected.len(), "{input:?}");
-            assert_eq!(spans.len(), expected.len(), "{input:?}");
-            for ((token, span), expected) in tokens.iter().zip(&spans).zip(expected) {
-                assert_eq!(
-                    &serde_json::json!({
-                        "raw": token.raw,
-                        "lemma": token.lemma,
-                        "kind": token.kind,
-                        "script": token.script,
-                        "language": token.language,
-                        "byte_start": token.byte_start,
-                        "byte_end": token.byte_end,
-                        "char_start": token.char_start,
-                        "char_end": token.char_end,
-                        "route": token.route.alias(),
-                    }),
-                    expected,
-                    "{input:?}"
-                );
-                assert_eq!(span.start, token.byte_start);
-                assert_eq!(span.end, token.byte_end);
-                assert_eq!(span.route, token.route);
-                assert_eq!(input[..token.byte_start].chars().count(), token.char_start);
-                assert_eq!(input[..token.byte_end].chars().count(), token.char_end);
-            }
-            assert_eq!(
-                tokens
-                    .iter()
-                    .map(|token| token.raw.as_str())
-                    .collect::<String>(),
-                input
-            );
-        }
+    fn builtin_resource_identity_matches_locked_manifest() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../resources/manifest.json")).unwrap();
+        assert_eq!(identities(), manifest["canonical_stop_sets"]);
     }
 }

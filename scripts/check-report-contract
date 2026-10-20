@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Pure checks for suite selection, quality classification and release refusal."""
+import copy
+import importlib.util
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import tarfile
+import unittest
+
+from report_contract import FORMAT, REQUIRED_QUALITY_CASES, SUITES, digest, frozen_quality_cases, quality_case, require_release_identity, require_release_report, select_suites, validate_quality, verified_status, verify_checksums
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class ContractTests(unittest.TestCase):
+    def test_suite_validation_before_environment(self):
+        for entry in ("dev-test", "verify-linux-amd64"):
+            result = subprocess.run([str(ROOT / "scripts" / entry), "--suite", "not-a-suite"], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertNotIn("evidence:", result.stdout)
+            self.assertIn("Unknown suite", result.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "not implemented"):
+                select_suites(["headline"], "linux-amd64", directory)
+        for selection in (["all,unit"], ["build,unit"], ["unit,unit"], [""]):
+            with self.assertRaises(ValueError):
+                select_suites(selection, "linux-amd64", ROOT)
+        for selection in ("smoke", "bm25", "stress", "benchmark", "all"):
+            with self.assertRaisesRegex(ValueError, "Linux verifier"):
+                select_suites([selection], "macos-arm64", ROOT)
+
+    def test_exact_quality_failures_are_separate(self):
+        frozen = frozen_quality_cases()
+        cases = [quality_case(case_id, **values, known_signature=values) for case_id, values in frozen.items()]
+        summary = validate_quality({"format": FORMAT, "cases": cases})
+        self.assertEqual(summary["counts"], {"passed": 0, "known-failure": 3, "regression": 0})
+        self.assertEqual(verified_status(summary), "verified-with-known-quality-failures")
+        values = frozen["english-den"]
+        for field, changed in (("actual", True), ("input", "different document"), ("query", "different query"), ("config", "other.config"), ("expected", False), ("actual", 0)):
+            case = quality_case("english-den", **dict(values, **{field: changed}), known_signature=values)
+            self.assertEqual(case["status"], "regression", field)
+            self.assertEqual(verified_status(validate_quality({"format": FORMAT, "cases": [case]})), "failed")
+        case["status"] = "known-failure"
+        with self.assertRaises(ValueError):
+            validate_quality({"format": FORMAT, "cases": [case]})
+        with self.assertRaisesRegex(ValueError, "not an eligible"):
+            quality_case("new-unreviewed-failure", **values, known_signature=values)
+        with self.assertRaisesRegex(ValueError, "reviewed frozen signature"):
+            quality_case("english-den", **values)
+        for changed in ({**values, "query": "new query"}, {**values, "actual": True}, {**values, "actual": 0}):
+            with self.assertRaisesRegex(ValueError, "reviewed frozen signature"):
+                quality_case("english-den", **changed, known_signature=changed)
+        case = quality_case("english-den", **values, known_signature=values)
+        del case["known_signature"]
+        with self.assertRaises(ValueError):
+            validate_quality({"format": FORMAT, "cases": [case]})
+        self.assertEqual(quality_case("new-passing-case", **dict(values, actual=True))["status"], "passed")
+        self.assertEqual(quality_case("new-failing-case", **values)["status"], "regression")
+        with self.assertRaises(ValueError):
+            from report_contract import require_known_quality_cases
+            require_known_quality_cases(validate_quality({"format": FORMAT, "cases": []}))
+
+    def report(self):
+        labels = ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "analysis-info", "documentation-examples", "runner-contract")
+        return {"format": FORMAT, "status": "verified-with-known-quality-failures", "platform": "linux-amd64", "build_profile": "release", "test_hooks": False,
+                "suites": list(SUITES), "suite_results": {suite: {"status": "passed"} for suite in SUITES},
+                "cleanup": {key: True for key in ("marker_matches", "cluster_stopped", "directory_removed")},
+                "quality": {"format": FORMAT, "cases": [quality_case(case_id, **values, known_signature=values) for case_id, values in frozen_quality_cases().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
+                "pg_textsearch": {"loaded_backend_verified": True},
+                "commands": [{"label": label, "exit_code": 0} for label in labels] + [{"label": f"suite-{suite}-python", "exit_code": 0} for suite in SUITES if suite != "unit"]}
+
+    def test_release_refuses_incomplete_identity_or_checks(self):
+        report = self.report()
+        require_release_report(report)
+        for key, value in (("format", 1), ("status", "passed"), ("build_profile", "debug"), ("test_hooks", True), ("suites", list(SUITES[:-1])), ("suite_results", {}), ("commands", []), ("analysis_info_verified", False), ("cleanup", {})):
+            invalid = dict(report, **{key: value})
+            with self.assertRaises(ValueError, msg=key):
+                require_release_report(invalid)
+        failed = copy.deepcopy(report)
+        failed["commands"][0]["exit_code"] = 1
+        with self.assertRaises(ValueError):
+            require_release_report(failed)
+
+    def test_release_identity_refusals(self):
+        report = {"git_status": "", "git_commit": "a" * 40, "library": {"sha256": "b" * 64}, "loaded_library_sha256": "b" * 64, "cargo_lock_sha256": "c" * 64, "resources_sha256": "d" * 64}
+        identity = dict(commit="a" * 40, status="", lock_hash="c" * 64, resources_hash="d" * 64, library_hash="b" * 64)
+        require_release_identity(report, **identity)
+        for key, value in (("commit", "other"), ("status", " M src/lib.rs"), ("lock_hash", "other"), ("resources_hash", "other"), ("library_hash", "other")):
+            with self.assertRaises(ValueError, msg=key):
+                require_release_identity(report, **dict(identity, **{key: value}))
+        with self.assertRaises(ValueError):
+            require_release_identity(dict(report, git_status=" M src/lib.rs"), **identity)
+
+    def test_archive_rejects_links_and_escaping_paths(self):
+        specification = importlib.util.spec_from_file_location("delivery_check", ROOT / "scripts/check-delivery.py")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        for name, kind in (("root/../escape", tarfile.REGTYPE), ("/escape", tarfile.REGTYPE), ("root/link", tarfile.SYMTYPE), ("root/./file", tarfile.REGTYPE)):
+            with tempfile.TemporaryDirectory() as directory:
+                archive = Path(directory) / "delivery.tar.gz"
+                with tarfile.open(archive, "w:gz") as output:
+                    info = tarfile.TarInfo(name)
+                    info.type = kind
+                    info.linkname = "/outside"
+                    output.addfile(info, io.BytesIO(b""))
+                with self.assertRaises(ValueError, msg=name):
+                    module.unpack_archive(archive, Path(directory) / "unpacked")
+
+    def test_package_rejects_all_symbolic_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            package = root / "package"
+            package.mkdir()
+            data = package / "extension.so"
+            data.write_bytes(b"verified")
+            (package / "SHA256SUMS").write_text(f"{digest(data)}  extension.so\n")
+            verify_checksums(package)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "unverified-secret").write_text("must not be copied")
+            for name, target in (("leaf", data), ("outside-dir", outside), ("inside-dir", package), ("dangling", root / "absent")):
+                link = package / name
+                link.symlink_to(target, target_is_directory=target.is_dir())
+                with self.assertRaisesRegex(ValueError, "symbolic link", msg=name):
+                    verify_checksums(package)
+                link.unlink()
+            root_link = root / "package-link"
+            root_link.symlink_to(package, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                verify_checksums(root_link)
+            ancestor = root / "ancestor-link"
+            ancestor.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                verify_checksums(ancestor / "package")
+
+    def test_checksums_cover_every_file_and_forbid_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory).resolve()
+            data = package / "extension.so"
+            data.write_bytes(b"owned test data")
+            manifest = package / "SHA256SUMS"
+            manifest.write_text(f"{digest(data)}  extension.so\n")
+            verify_checksums(package)
+            (package / "unlisted").write_text("unexpected")
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                verify_checksums(package)
+            (package / "unlisted").unlink()
+            data.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "mismatch"):
+                verify_checksums(package)
+            manifest.write_text(f"{'0' * 64}  ../outside\n")
+            with self.assertRaisesRegex(ValueError, "Invalid package"):
+                verify_checksums(package)
+
+
+if __name__ == "__main__":
+    unittest.main()
