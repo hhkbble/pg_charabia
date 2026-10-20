@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import io
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,45 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class ContractTests(unittest.TestCase):
+    def test_notice_gate_rejects_missing_changed_or_unlisted_files(self):
+        specification=importlib.util.spec_from_file_location("resource_check",ROOT/"scripts/prepare-resources.py")
+        module=importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        expected=json.loads((ROOT/"resources/manifest.json").read_text())["notice_files"]
+        with tempfile.TemporaryDirectory() as directory:
+            resources=Path(directory).resolve()/"resources"
+            shutil.copytree(ROOT/"resources/notices",resources/"notices")
+            module.verify_notice_files(resources,expected)
+            missing=resources/next(iter(expected))
+            original=missing.read_bytes()
+            missing.unlink()
+            with self.assertRaisesRegex(RuntimeError,"Notice files differ"):
+                module.verify_notice_files(resources,expected)
+            missing.write_bytes(original+b"changed")
+            with self.assertRaisesRegex(RuntimeError,"SHA-256 mismatch"):
+                module.verify_notice_files(resources,expected)
+            missing.write_bytes(original)
+            (resources/"notices/unlisted").write_text("unreviewed")
+            with self.assertRaisesRegex(RuntimeError,"Notice files differ"):
+                module.verify_notice_files(resources,expected)
+            (resources/"notices/unlisted").unlink()
+            outside=resources.parent/"outside"
+            outside.mkdir()
+            (outside/"unverified").write_text("must not enter the package")
+            for label,target in (("external",outside),("internal",resources/"notices"),("dangling",resources.parent/"absent")):
+                alias=resources/"notices"/label
+                alias.symlink_to(target,target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError,"symbolic link",msg=label):
+                    module.verify_notice_files(resources,expected)
+                alias.unlink()
+            for label,target in (("root",resources),("ancestor",resources.parent)):
+                alias=resources.parent/(label+"-alias")
+                alias.symlink_to(target,target_is_directory=True)
+                input_path=alias if label=="root" else alias/"resources"
+                with self.assertRaisesRegex(RuntimeError,"symbolic link",msg=label):
+                    module.verify_notice_files(input_path,expected)
+                alias.unlink()
+
     def test_suite_validation_before_environment(self):
         for entry in ("dev-test", "verify-linux-amd64"):
             result = subprocess.run([str(ROOT / "scripts" / entry), "--suite", "not-a-suite"], text=True, capture_output=True)

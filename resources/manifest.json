@@ -1187,5 +1187,27 @@
       "url": "https://raw.githubusercontent.com/nltk/nltk_data/550b6625bcef1f2abff2ff770a5a0d272c9c6b2a/packages/corpora/stopwords.xml",
       "sha256": "25e36f0dbd1307814bda2af5b56c24d06a4d6592d769a6476b70ebb778edab0d"
     }
+  },
+  "notice_files": {
+    "notices/GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "notices/LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+    "notices/README.md": "d2774926973d669ce09deea22ca8ba2971202bd648b778588011bd802ae68fac",
+    "notices/charabia-MIT.txt": "b0b5aee3ad1a8cad84dd3b73dbac346bf2b903b33ea90b1d1b3d0800744f5a74",
+    "notices/german-decompounder-NOTICE.txt": "abb37d58a38238c34814c4433293fddea2c53e7e377a7763abce9517219e1033",
+    "notices/german-words-source.txt": "9a643bc1e0ce04337100a4b62a39d3e8ead004458d46f5ddf01c0c02ec5844a1",
+    "notices/icu-LICENSE.txt": "e09827667e0bb3c808b2a463548ba814a5e6249b67353234d70c8dfc2bcc417d",
+    "notices/ko-dic/COPYING.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "notices/lindera-ko-dic-NOTICE.txt": "56b37f2a5680b77ce2ebaec68a7931652d20e69b4b2cfabc74dc06bfdc6a927a",
+    "notices/lindera-unidic-NOTICE.txt": "eea323c4928ad00819113a4dd3547964d33b40c62eb9478bb7d2d202cf235c3c",
+    "notices/nlpo3-LICENSE.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "notices/nltk-stopwords-metadata.xml": "25e36f0dbd1307814bda2af5b56c24d06a4d6592d769a6476b70ebb778edab0d",
+    "notices/qdrant-rust-stemmers-LICENSE": "e46379f1aba07707c23fab8733d3441e9df981b1543046e0317b2036f8fdaef8",
+    "notices/qdrant-rust-stemmers-algorithms-LICENSE": "ea2879fe94b4b2e6b3c6fb18b3bf265f9ff162637e5e1ac21fabc43d8cf34961",
+    "notices/stop-words-LICENSE-APACHE": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+    "notices/stop-words-LICENSE.md": "3e5c8474b4b47979289f1d086deee42dd25a2cc62169963089dd0845dd628d0f",
+    "notices/stop-words-README.md": "723b37258d18258fea4ff9c14f2a081a088002fbdf31bbe47a6e66261c839d10",
+    "notices/stop-words-src-nltk-README": "e0365fde880eadb522f844cba2774529969b66b7406db7643cf260dcd77d6541",
+    "notices/stopwords-iso-LICENSE": "7f2982f30e863a3c9826dcc51e1ad895d2a78b1f55d4398d0f5eb9b5c0631f13",
+    "notices/unidic/COPYING.txt": "178ffb7cbc2beadb0b87a14497e58222b484076ba7cfc8938a07ac7627fa22c4"
   }
 }
