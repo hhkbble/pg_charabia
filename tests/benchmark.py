@@ -106,9 +106,10 @@ def measure(session, name, sql, repeats=1):
 
 def memory(session, phase, config):
     contexts = json.loads(statement(session,
-        "SELECT jsonb_agg(jsonb_build_object('name',name,'parent',parent,'level',level,"
-        "'total_bytes',total_bytes,'used_bytes',used_bytes,'free_bytes',free_bytes)ORDER BY level,name)"
-        "FROM pg_backend_memory_contexts", "memory-" + phase))
+        # Keep PG18's actual row, including its path, rather than assuming the
+        # parent column from an older server's memory-context view.
+        "SELECT jsonb_agg(to_jsonb(m)ORDER BY level,name)"
+        "FROM pg_backend_memory_contexts m", "memory-" + phase))
     status = Path(f"/proc/{session.pid}/status").read_text()
     rollup = Path(f"/proc/{session.pid}/smaps_rollup").read_text()
     components = {line.split(":", 1)[0]: int(line.split()[1]) * 1024 for line in status.splitlines()

@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 
-from report_contract import FORMAT, VERIFIED, digest, read_quality, require_release_report, verified_status, verify_checksums
+from report_contract import FORMAT, VERIFIED, digest, isolated_pg_environment, read_quality, require_release_report, verified_status, verify_checksums
 
 
 def unpack_archive(archive, destination):
@@ -55,7 +55,8 @@ def main():
     marker.write_text(run_id)
     result = {"format": FORMAT, "run_id": run_id, "platform": "linux-amd64", "mode": "delivery-archive",
               "archive_sha256": digest(args.archive), "temporary_directory": str(temporary), "commands": [], "status": "running"}
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    env = dict(isolated_pg_environment(os.environ), PYTHONDONTWRITEBYTECODE="1")
+    result["inherited_libpq_environment_keys_removed"] = sorted(set(os.environ) - set(env))
     pg_config = Path(env.get("PG_CONFIG", "/usr/lib/postgresql/18/bin/pg_config"))
     pg_bin = None
     started = False

@@ -15,7 +15,7 @@ import tempfile
 import time
 import tomllib
 
-from report_contract import FORMAT, SUITES, VERIFIED, read_quality, require_known_quality_cases, select_suites, verified_status
+from report_contract import FORMAT, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_known_quality_cases, select_suites, verified_status
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,10 +51,11 @@ def main():
     marker = test_dir / ".pg-charabia-owner"
     marker.write_text(run_id)
     (test_dir / "socket").mkdir()
-    env = os.environ.copy()
+    env = isolated_pg_environment(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     pg_config = Path(env.get("PG_CONFIG", "/opt/homebrew/opt/postgresql@18/bin/pg_config" if args.platform == "macos-arm64" else "/usr/lib/postgresql/18/bin/pg_config"))
     result = {"format": FORMAT, "run_id": run_id, "platform": args.platform, "suites": selected, "test_hooks": args.test_hooks, "build_profile": "debug" if args.debug or args.platform == "macos-arm64" else "release", "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "temporary_directory": str(test_dir), "commands": [], "suite_results": {}, "status": "running"}
+    result["inherited_libpq_environment_keys_removed"] = sorted(set(os.environ) - set(env))
     pg_bin = None
     cluster_started = False
     failure = None

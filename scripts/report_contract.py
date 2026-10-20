@@ -10,6 +10,15 @@ VERIFIED = ("verified", "verified-with-known-quality-failures")
 QUALITY_FIELDS = ("input", "query", "config", "expected", "actual")
 REQUIRED_QUALITY_CASES = frozenset(("english-den", "code-var", "english-short-phrase"))
 
+def isolated_pg_environment(source):
+    """Do not let libpq services/hostaddr override an owned Unix socket.
+
+    Build/test controls are distinct from client connection defaults. In
+    particular PGSERVICE must be absent, not an empty service name.
+    """
+    return {key: value for key, value in source.items()
+            if not key.startswith("PG") or key == "PG_CONFIG" or key.startswith(("PGCB_", "PGRX_"))}
+
 
 def digest(path):
     state = hashlib.sha256()

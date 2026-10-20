@@ -12,12 +12,22 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import FORMAT, REQUIRED_QUALITY_CASES, SUITES, digest, frozen_quality_cases, quality_case, require_release_identity, require_release_report, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import FORMAT, REQUIRED_QUALITY_CASES, SUITES, digest, frozen_quality_cases, isolated_pg_environment, quality_case, require_release_identity, require_release_report, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class ContractTests(unittest.TestCase):
+    def test_connection_defaults_cannot_escape_owned_cluster(self):
+        allowed={"PATH":"/tools", "PG_CONFIG":"/explicit/pg_config", "PGRX_HOME":"/private/pgrx", "PGCB_RUN_ID":"owned"}
+        client_keys=("PGSERVICE","PGSERVICEFILE","PGHOSTADDR","PGHOST","PGPORT","PGDATABASE","PGUSER","PGPASSWORD","PGPASSFILE","PGOPTIONS","PGCLIENTENCODING","PGTARGETSESSIONATTRS","PGSSLMODE","PGAPPNAME","PGCONNECT_TIMEOUT")
+        source=dict(allowed,**{key:"must not reach libpq"for key in client_keys})
+        before=source.copy()
+        clean=isolated_pg_environment(source)
+        self.assertEqual(clean,allowed)
+        self.assertEqual(source,before)
+        self.assertNotIn("PGSERVICE",clean)
+
     def test_notice_gate_rejects_missing_changed_or_unlisted_files(self):
         specification=importlib.util.spec_from_file_location("resource_check",ROOT/"scripts/prepare-resources.py")
         module=importlib.util.module_from_spec(specification)
