@@ -42,6 +42,49 @@ pub fn pointer<T>(value: *mut T) -> Internal {
     Internal::from(Some(pg_sys::Datum::from(value)))
 }
 
+/// # Safety
+/// Call only in a live backend context. `T` must own its Rust resources and its
+/// Drop implementation must neither panic nor invoke PostgreSQL. The paired
+/// callbacks must use this exact type and respect the context's lifetime.
+pub unsafe fn owned_state<T: 'static>(value: T) -> Internal {
+    #[pgrx::pg_guard]
+    unsafe extern "C-unwind" fn drop_state<T>(value: *mut c_void) {
+        // SAFETY: Registration transfers exactly one Box<T> to this callback.
+        unsafe { drop(Box::from_raw(value.cast::<T>())) };
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::state_released();
+    }
+
+    let mut owner = Box::new(value);
+    // SAFETY: The caller runs in the original live PG callback context.
+    let context = unsafe { pg_sys::CurrentMemoryContext };
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit("register_alloc");
+    // SAFETY: PG owns callback storage. Retaining the Box until allocation and
+    // registration succeed also frees it when a guarded PG allocation errors.
+    let callback = unsafe {
+        pg_sys::MemoryContextAllocZero(
+            context,
+            std::mem::size_of::<pg_sys::MemoryContextCallback>(),
+        )
+        .cast::<pg_sys::MemoryContextCallback>()
+    };
+    // SAFETY: The allocation is aligned and large enough for this callback.
+    unsafe {
+        (*callback).func = Some(drop_state::<T>);
+        (*callback).arg = ptr::from_mut(owner.as_mut()).cast();
+    }
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit("register_link");
+    // SAFETY: PG18 registration only links the initialized callback; it cannot
+    // ERROR. No fallible operation is allowed before the immediate handoff.
+    unsafe { pg_sys::MemoryContextRegisterResetCallback(context, callback) };
+    let state = Box::into_raw(owner);
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::state_registered();
+    pointer(state)
+}
+
 pub fn raw<T>(value: Internal) -> *mut T {
     value
         .unwrap()
@@ -142,7 +185,7 @@ pub unsafe fn text_input<'a>(value: AnyElement) -> &'a str {
 /// PG calls the registered method with this exact state type, and no other
 /// Rust borrow of this state may be live during this callback.
 pub unsafe fn state_mut<T>(value: &mut Internal) -> &mut T {
-    // SAFETY: State is created with Internal::new(T) by the paired method.
+    // SAFETY: State is created with owned_state(T) by the paired method.
     unsafe { value.get_mut::<T>() }.unwrap_or_else(|| {
         fail(
             PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,

@@ -17,11 +17,11 @@ EVIDENCE = Path(os.environ["PGCB_RUN_DIR"])
 def literal(value):
     return "'" + value.replace("'", "''") + "'"
 
-def run(sql, database=None, check=True):
+def run(sql, database=None, check=True, timeout=120):
     argv = [PSQL, "-XAtq", "-v", "ON_ERROR_STOP=1"]
     if database:
         argv += ["-d", database]
-    result = subprocess.run(argv, input=sql, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(argv, input=sql, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if check and result.returncode:
         raise AssertionError(f"psql failed ({result.returncode}): {result.stderr}\n{sql[:1000]}")
     return result if not check else result.stdout.strip()
@@ -53,7 +53,10 @@ class Session:
         lines = []
         deadline = time.monotonic() + timeout
         while True:
-            line = self.lines.get(timeout=max(0.01, deadline-time.monotonic()))
+            try:
+                line = self.lines.get(timeout=max(0.01, deadline-time.monotonic()))
+            except queue.Empty as error:
+                raise AssertionError("psql statement timed out: " + "\n".join(lines)) from error
             if line is None:
                 raise AssertionError("Backend/psql exited before statement marker: " + "\n".join(lines))
             if line == marker:
@@ -84,7 +87,12 @@ class Session:
         return self
 
     def __exit__(self, *args):
-        self.close()
+        try:
+            self.close()
+        except BaseException as cleanup_error:
+            if args[1] is None:
+                raise
+            args[1].add_note(f"psql cleanup also failed: {cleanup_error}")
 
 def save(name, value):
     (EVIDENCE / name).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")

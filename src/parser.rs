@@ -24,11 +24,15 @@ fn parser_start_v1(input: Internal, length: i32) -> Internal {
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::parser_created();
-    let state = Internal::new(Some(ParserState {
-        input: pointer,
-        spans,
-        cursor: 0,
-    }));
+    // SAFETY: The state owns its Vec, its Drop does not call PG, and GETTOKEN /
+    // END use exactly Option<ParserState> within the original input lifetime.
+    let state = unsafe {
+        pg_ffi::owned_state(Some(ParserState {
+            input: pointer,
+            spans,
+            cursor: 0,
+        }))
+    };
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit("start");
     state
