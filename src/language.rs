@@ -64,9 +64,11 @@ fn route_for(script: Script, language: Option<Language>) -> Result<LanguageId, A
 
 /// Complete metadata, returning the number of statistical detector calls.
 ///
-/// The fixed predicate audit proves that contiguous missing4 spans recover their
-/// original script group. Armenian overlaps do not need statistical detection.
-/// This is a grouping invariant, not a language-quality guarantee.
+/// Join adjacent spans by their detected script instead of detecting each token.
+/// Boundary tests check selected overlaps in the locked script/grouping rules.
+/// Armenian characters can join an earlier group and dominate its detected
+/// script; singleton completion needs no statistical call for those spans.
+/// These checks do not establish natural-language detection accuracy.
 pub(crate) fn complete(input: &str, spans: &mut [Span]) -> Result<usize, AnalysisError> {
     let mut calls = 0;
     let mut first = 0;

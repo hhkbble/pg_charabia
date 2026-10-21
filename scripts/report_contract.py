@@ -23,6 +23,30 @@ def isolated_pg_environment(source):
             if not key.startswith("PG") or key == "PG_CONFIG" or key.startswith(("PGCB_", "PGRX_"))}
 
 
+def require_container_cleanup(evidence, run_id):
+    """Permit removal only after the inner owner proves all PGDATA is gone."""
+    reports = list(Path(evidence).glob("*/run.json"))
+    if len(reports) != 1:
+        raise ValueError("Container retained: expected one final inner cleanup report")
+    inner = json.loads(reports[0].read_text())
+    if not isinstance(inner, dict) or inner.get("format") != FORMAT or inner.get("run_id") != run_id:
+        raise ValueError("Container retained: inner cleanup report identity mismatch")
+    if inner.get("status") not in (*VERIFIED, "failed"):
+        raise ValueError("Container retained: inner cleanup is not final or failed")
+    cleanup = inner.get("cleanup")
+    if not isinstance(cleanup, dict) or not all(cleanup.get(k) is True for k in ("marker_matches", "cluster_stopped", "directory_removed")):
+        raise ValueError("Container retained: owned PostgreSQL cleanup is unproven")
+    if "recovery_children_cleaned" in cleanup or "recovery" in inner:
+        if cleanup.get("recovery_children_cleaned") is not True:
+            raise ValueError("Container retained: recovery child cleanup is unproven")
+        child = json.loads((reports[0].parent / "recovery/results.json").read_text())
+        if not isinstance(child, dict) or child.get("format") != FORMAT or child.get("run") != run_id or child.get("status") not in ("passed", "failed"):
+            raise ValueError("Container retained: recovery cleanup report identity mismatch")
+        child_cleanup = child.get("cleanup")
+        if not isinstance(child_cleanup, dict) or not all(child_cleanup.get(k) is True for k in ("marker_matches", "clusters_stopped", "directory_removed")):
+            raise ValueError("Container retained: recovery child resources remain")
+
+
 def digest(path):
     state = hashlib.sha256()
     with Path(path).open("rb") as source:

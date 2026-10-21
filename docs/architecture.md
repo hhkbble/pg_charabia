@@ -44,7 +44,7 @@ Each `Span` stores byte/character ranges, script, original Charabia language, se
 
 `language::complete` first reuses existing Charabia language. For missing metadata, 17 scripts with one model language use direct mappings. Missing Latin, Cyrillic, Hebrew, or Devanagari metadata triggers one `whatlang::detect_lang` call for the original contiguous script group. `Script::Other` text uses `und`. Missing metadata on an unexpected path, or a script/language mismatch, is an invariant error.
 
-There is no project confidence gate, English fallback, separate detection window, per-token detection, or second normalization context. All 70 model languages remain candidates. The tests in `language.rs` and `analysis.rs` validate the fixed model/grouping assumptions. They do not prove natural-language detection accuracy.
+There is no project confidence gate, English fallback, separate detection window, per-token detection, or second normalization context. All 70 model languages remain candidates. Tests check fixed model mappings and selected raw-group boundaries, including overlapping script predicates and Armenian-dominant groups. They do not prove arbitrary Unicode grouping or natural-language detection accuracy.
 
 The Parser classifies raw spans using the public compatibility-decomposition, control-character, and classifier prefix. It returns original bytes rather than that prefix's output. Language types occupy IDs 1 through 71, `blank` is 72, and `display_only` is 73. Oversized raw tokens become bounded display fragments, preserving source bytes without indexing word fragments by default.
 

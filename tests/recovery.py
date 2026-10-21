@@ -73,6 +73,26 @@ def nodes(value):
     elif isinstance(value,list):
         for child in value:yield from nodes(child)
 
+def chinese_queries():
+    return [('gin_chinese',"SELECT id FROM lab.docs WHERE to_tsvector('lab.cfg',body) @@ plainto_tsquery('lab.cfg','全文')",'docs_gin',[2]),
+            ('gin_stored_chinese',"SELECT id FROM lab.docs WHERE v @@ plainto_tsquery('lab.cfg','全文')",'docs_stored_gin',[2]),
+            ('bm25_chinese',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('全文','lab.docs_bm25') LIMIT 20",'docs_bm25',[2])]
+
+def observe_queries(label,queries):
+    for kind,query,index,want in queries:
+        settings='SET enable_seqscan=off;SET enable_indexscan='+('off'if kind.startswith('gin')else'on')+';SET enable_bitmapscan=on;'
+        plan=json.loads(sql(settings+'EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF) '+query,label+'-'+kind+'-plan'))
+        node_type='Bitmap Index Scan'if kind.startswith('gin')else'Index Scan'
+        check(any(n.get('Index Name')==index and n.get('Node Type')==node_type and n.get('Actual Loops',0)>0 for n in nodes(plan)),label+' executed '+index,plan)
+        actual=json.loads(sql(settings+"SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM("+query+')q',label+'-'+kind+'-ids'))
+        check(actual==want,label+' '+kind+' independent IDs',actual)
+        REPORT['observations'][label]['queries'].append({'kind':kind,'plan':plan,'ids':actual});save()
+
+def observe_chinese_headline(label):
+    headline=sql("SELECT ts_headline('lab.cfg',body,plainto_tsquery('lab.cfg','全文'),'HighlightAll=true')FROM lab.docs WHERE id=2",label+'-chinese-headline')
+    check('<b>全文</b>'in headline and headline.replace('<b>','').replace('</b>','')=='中文全文检索 PostgreSQL 18 支持 BM25',
+          label+' Chinese term highlights the original source',headline)
+
 def observe(label,expected):
     heap=json.loads(sql('SELECT jsonb_agg(id ORDER BY id) FROM lab.docs',label+'-heap'))
     check(heap==expected,label+' heap at target',heap)
@@ -82,9 +102,7 @@ def observe(label,expected):
     check("'run':" in snapshot['vector'] and snapshot['stored_consistent'],label+' analysis and stored vectors restored',snapshot)
     headline=sql("SELECT ts_headline('lab.cfg',body,'run'::tsquery,'HighlightAll=true')FROM lab.docs WHERE id=1",label+'-headline')
     check('<b>running</b>'in headline,label+' filter/stem headline retains original',headline)
-    chinese_headline=sql("SELECT ts_headline('lab.cfg',body,plainto_tsquery('lab.cfg','全文'),'HighlightAll=true')FROM lab.docs WHERE id=2",label+'-chinese-headline')
-    check('<b>全文</b>'in chinese_headline and chinese_headline.replace('<b>','').replace('</b>','')=='中文全文检索 PostgreSQL 18 支持 BM25',
-          label+' Chinese term highlights the original source',chinese_headline)
+    observe_chinese_headline(label)
     REPORT.setdefault('observations',{})[label]={'heap':heap,'catalog':snapshot,'queries':[]};save()
     summary = sql("SELECT bm25_summarize_index('lab.docs_bm25')",label+'-bm25-durable-state')
     durable = {key:int(re.search(r"^  "+key+r": (\d+)$",summary,re.M).group(1)) for key in ('total_docs','total_len','docs_persisted','len_persisted')}
@@ -96,18 +114,8 @@ def observe(label,expected):
     queries=[('gin',"SELECT id FROM lab.docs WHERE to_tsvector('lab.cfg',body) @@ 'run'::tsquery",'docs_gin',[1,3,5]),
              ('gin_stored',"SELECT id FROM lab.docs WHERE v @@ 'run'::tsquery",'docs_stored_gin',[1,3,5]),
              ('bm25',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('run','lab.docs_bm25') LIMIT 20",'docs_bm25',[1,3,5]),
-             ('mixed_latin',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('PostgreSQL','lab.docs_bm25') LIMIT 20",'docs_bm25',[2]),
-             ('gin_chinese',"SELECT id FROM lab.docs WHERE to_tsvector('lab.cfg',body) @@ plainto_tsquery('lab.cfg','全文')",'docs_gin',[2]),
-             ('gin_stored_chinese',"SELECT id FROM lab.docs WHERE v @@ plainto_tsquery('lab.cfg','全文')",'docs_stored_gin',[2]),
-             ('bm25_chinese',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('全文','lab.docs_bm25') LIMIT 20",'docs_bm25',[2])]
-    for kind,query,index,want in queries:
-        settings='SET enable_seqscan=off;SET enable_indexscan='+('off'if kind.startswith('gin')else'on')+';SET enable_bitmapscan=on;'
-        plan=json.loads(sql(settings+'EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF) '+query,label+'-'+kind+'-plan'))
-        node_type='Bitmap Index Scan'if kind.startswith('gin')else'Index Scan'
-        check(any(n.get('Index Name')==index and n.get('Node Type')==node_type and n.get('Actual Loops',0)>0 for n in nodes(plan)),label+' executed '+index,plan)
-        actual=json.loads(sql(settings+"SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM("+query+')q',label+'-'+kind+'-ids'))
-        check(actual==want,label+' '+kind+' independent IDs',actual)
-        REPORT['observations'][label]['queries'].append({'kind':kind,'plan':plan,'ids':actual});save()
+             ('mixed_latin',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('PostgreSQL','lab.docs_bm25') LIMIT 20",'docs_bm25',[2])]
+    observe_queries(label,queries+chinese_queries())
 
 def literal(s):return "'"+s.replace("'","''")+"'"
 
@@ -164,6 +172,21 @@ try:
     # Crash recovery must retain committed later state and discard the rollback.
     check(sql('SELECT string_agg(id::text,\',\' ORDER BY id)FROM lab.docs','crash-heap')=='2,3,5,99','crash recovery retains committed post-target state')
     check('stem = false'in sql("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.eng_stem'::regdictionary",'crash-dictionary').lower().replace("'",""),'crash recovery dictionary parameter')
+    maps=json.loads(sql("SELECT jsonb_agg(d.dictname ORDER BY m.mapseqno)FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict JOIN ts_token_type('charabia.parser')t ON t.tokid=m.maptokentype WHERE m.mapcfg='lab.cfg'::regconfig AND t.alias='eng'",'crash-mapping'))
+    check(maps==['eng_raw'],'crash recovery retains the committed post-target mapping',maps)
+    REPORT.setdefault('observations',{})['crash']={'heap':[2,3,5,99],'maps':maps,'queries':[]};save()
+    # The later English ALTER deliberately left old postings in place. Chinese
+    # analysis is unchanged, so its fixed IDs isolate crash index reconstruction.
+    observe_queries('crash',chinese_queries())
+    observe_chinese_headline('crash')
+    with Session(env=ENV) as backend:
+        analysis_sql="SELECT to_tsvector('lab.cfg','中文全文检索')"
+        vector=backend.value(analysis_sql)
+        check("'全文':"in vector,'crash-restarted fresh backend rebuilds Chinese analysis',vector)
+        mappings=Path(f'/proc/{backend.pid}/maps').read_text()
+        (OUT/'crash-backend-maps.txt').write_text(mappings)
+        check(str(lib)in mappings,'crash-restarted backend maps exact staged release library',backend.pid)
+        REPORT['observations']['crash']['backend']={'pid':backend.pid,'sql':analysis_sql,'vector':vector,'library':str(lib)};save()
     stop(source)
     shutil.copytree(base,recovered)
     (recovered/'recovery.signal').touch()

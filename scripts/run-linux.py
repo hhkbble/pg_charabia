@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 
-from report_contract import FORMAT, VERIFIED, digest, select_suites
+from report_contract import FORMAT, VERIFIED, digest, require_container_cleanup, select_suites
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "pg-charabia-verify:pg18-pgrx0193"
@@ -160,9 +160,16 @@ def main():
                     subprocess.run(["docker", "stop", "--time", "65", cid], stdout=subprocess.DEVNULL, check=True)
                 run(["docker", "logs", cid], "container-final", check=False)
                 (evidence / "container-final-inspect.json").write_text(subprocess.check_output(["docker", "inspect", cid], text=True))
-                subprocess.run(["docker", "rm", "--volumes", cid], stdout=subprocess.DEVNULL, check=True)
-                cleanup["container_removed"] = subprocess.run(["docker", "inspect", cid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
-                cleanup["volumes_removed"] = all(subprocess.run(["docker", "volume", "inspect", v], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0 for v in volumes)
+                try:
+                    require_container_cleanup(evidence, run_id + "-inner")
+                except (OSError, ValueError, TypeError) as exc:
+                    cleanup["container_retained"] = True
+                    cleanup["retention_reason"] = str(exc)
+                    cleanup["volumes_removed"] = not volumes
+                else:
+                    subprocess.run(["docker", "rm", "--volumes", cid], stdout=subprocess.DEVNULL, check=True)
+                    cleanup["container_removed"] = subprocess.run(["docker", "inspect", cid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
+                    cleanup["volumes_removed"] = all(subprocess.run(["docker", "volume", "inspect", v], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0 for v in volumes)
             except BaseException as exc:
                 cleanup["error"] = str(exc)
                 result["status"] = "cleanup-failed"

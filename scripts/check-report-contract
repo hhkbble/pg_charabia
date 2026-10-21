@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import shutil
 from pathlib import Path
 import subprocess
@@ -18,6 +19,88 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class ContractTests(unittest.TestCase):
+    def test_outer_cleanup_preserves_unproven_inner_data(self):
+        # This exercises the actual outer wrapper with a fake Docker CLI, not
+        # PostgreSQL behavior. Target integration still runs in real containers.
+        fake = r"""#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+args=sys.argv[1:];root=Path(os.environ['PGCB_FAKE_DOCKER_ROOT'])
+with(root/'calls.jsonl').open('a')as f:f.write(json.dumps(args)+'\n')
+state=root/'state.json';case=os.environ['PGCB_FAKE_DOCKER_CASE']
+if args[:2]==['image','inspect']:
+ print(json.dumps([{'Architecture':'amd64','Os':'linux','Id':'fake-policy-image'}]));sys.exit()
+if args[0]=='create':
+ mount=next(a for a in args if a.startswith('type=bind,src=')and a.endswith(',dst=/evidence'))
+ evidence=Path(mount.split('src=',1)[1].rsplit(',dst=',1)[0])
+ run=next(a.split('=',1)[1]for a in args if a.startswith('PGCB_RUN_ID='))
+ state.write_text(json.dumps({'evidence':str(evidence),'run':run,'removed':False}))
+ print('owned-policy-container');sys.exit()
+value=json.loads(state.read_text())
+if args[0]=='start':
+ out=Path(value['evidence'])/value['run'];out.mkdir()
+ report={'format':2,'run_id':value['run'],'platform':'linux-amd64','status':'verified',
+         'cleanup':{'marker_matches':True,'cluster_stopped':True,'directory_removed':True}}
+ if case=='missing':sys.exit(1)
+ if case=='malformed':(out/'run.json').write_text('{');sys.exit(1)
+ if case=='wrong-run':report['run_id']='another-run'
+ if case=='cleanup-failed':report['status']='cleanup-failed'
+ if case=='unstopped':report['cleanup']['cluster_stopped']=False
+ if case=='truthy-flag':report['cleanup']['directory_removed']='true'
+ if case=='recovery-unproven':report['cleanup']['recovery_children_cleaned']=False
+ if case=='recovery-missing':report['cleanup']['recovery_children_cleaned']=True
+ if case in ('recovery-failed','recovery-safe-failure'):
+  report['cleanup']['recovery_children_cleaned']=True
+  child={'format':2,'run':value['run'],'status':'failed','cleanup':
+         {'marker_matches':True,'clusters_stopped':case=='recovery-safe-failure','directory_removed':True}}
+  (out/'recovery').mkdir();(out/'recovery/results.json').write_text(json.dumps(child))
+  report['recovery']=child
+ if case in ('safe-failure','recovery-safe-failure'):report['status']='failed'
+ (out/'run.json').write_text(json.dumps(report))
+ sys.exit(0 if report['status']=='verified'else 1)
+if args[0]=='inspect':
+ if value['removed']:print('No such container',file=sys.stderr);sys.exit(1)
+ print(json.dumps([{'State':{'Running':False,'ExitCode':0},'Mounts':[]}]))
+ sys.exit()
+if args[0]=='rm':value['removed']=True;state.write_text(json.dumps(value));sys.exit()
+if args[0]in('logs','stop'):sys.exit()
+raise SystemExit('unexpected fake Docker command: '+repr(args))
+"""
+        cases = ("success", "safe-failure", "recovery-safe-failure", "missing", "malformed",
+                 "wrong-run", "cleanup-failed", "unstopped", "truthy-flag",
+                 "recovery-unproven", "recovery-missing", "recovery-failed")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                (root / "resources").mkdir()
+                (root / "resources/manifest.json").write_text('{"archives":[]}')
+                for name in ("run-linux.py", "report_contract.py"):
+                    shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+                docker = root / "docker"
+                docker.write_text(fake)
+                docker.chmod(0o755)
+                env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ.get("PATH", ""),
+                           PGCB_FAKE_DOCKER_ROOT=str(root), PGCB_FAKE_DOCKER_CASE=case,
+                           PGCB_LINUX_CACHE=str(root / "cache"))
+                result = subprocess.run([sys.executable, str(root / "scripts/run-linux.py"),
+                                         "--suite", "build", "--no-build-image"],
+                                        env=env, text=True, capture_output=True)
+                calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
+                removed = any(call[0] == "rm" for call in calls)
+                safe = case in ("success", "safe-failure", "recovery-safe-failure")
+                self.assertEqual(removed, safe, {"case": case, "calls": calls,
+                                                "stdout": result.stdout, "stderr": result.stderr})
+                report = json.loads(next((root / "artifacts").glob("*/outer-run.json")).read_text())
+                if not safe:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(report["status"], "cleanup-failed")
+                    self.assertTrue(report["cleanup"]["container_retained"])
+                    self.assertFalse(report["cleanup"]["container_removed"])
+                else:
+                    self.assertTrue(report["cleanup"]["container_removed"])
+                    self.assertEqual(result.returncode == 0, case == "success")
+
     def test_connection_defaults_cannot_escape_owned_cluster(self):
         allowed={"PATH":"/tools", "PG_CONFIG":"/explicit/pg_config", "PGRX_HOME":"/private/pgrx", "PGCB_RUN_ID":"owned"}
         client_keys=("PGSERVICE","PGSERVICEFILE","PGHOSTADDR","PGHOST","PGPORT","PGDATABASE","PGUSER","PGPASSWORD","PGPASSFILE","PGOPTIONS","PGCLIENTENCODING","PGTARGETSESSIONATTRS","PGSSLMODE","PGAPPNAME","PGCONNECT_TIMEOUT")

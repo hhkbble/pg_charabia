@@ -722,6 +722,53 @@ mod tests {
     }
 
     #[test]
+    fn language_completion_preserves_overlap_boundaries_without_extra_detection() {
+        // Charabia 0.10.0 Script::from tests Latin before Cyrillic. Both
+        // predicates include U+1D2B/U+1D78, so these form Latin/Cyrillic/Latin
+        // raw groups. Do not merge the two Latin groups across the Cyrillic one.
+        let input = "a\u{1D2B}Бb\u{1D78}";
+        let (spans, calls) = segment_counted(input).unwrap();
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| &input[span.start..span.end])
+                .collect::<Vec<_>>(),
+            ["a\u{1D2B}", "Б", "b\u{1D78}"]
+        );
+        assert_eq!(
+            spans.iter().map(|span| span.script).collect::<Vec<_>>(),
+            [Script::Latin, Script::Cyrillic, Script::Latin]
+        );
+        assert_eq!(calls, 3);
+        assert!(spans.iter().all(|span| {
+            span.charabia_language.is_none()
+                && span.language_source == LanguageSource::Supplement
+                && span.route.script() == span.script
+        }));
+
+        // Armenian is Other in Charabia's character grouping but is counted by
+        // whatlang's whole-group script detector. It dominates each group here.
+        // Adjacent Armenian detections may merge for singleton completion; no
+        // statistical detection or exact natural-language prediction is needed.
+        let input = "aաաաБաաա";
+        let (spans, calls) = segment_counted(input).unwrap();
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| &input[span.start..span.end])
+                .collect::<Vec<_>>(),
+            ["aաաա", "Бաաա"]
+        );
+        assert_eq!(calls, 0);
+        assert!(spans.iter().all(|span| {
+            span.script == Script::Armenian
+                && span.charabia_language.is_none()
+                && span.route.language() == Some(Language::Hye)
+                && span.language_source == LanguageSource::Script
+        }));
+    }
+
+    #[test]
     fn parser_prefix_classification_keeps_external_dictionaries_off_blank() {
         let input = "alpha, beta\t\u{1} CAFÉ";
         let spans = segment(input).unwrap();

@@ -125,6 +125,8 @@ Performance observations separate detection, preparation, FST cold/warm cost, fi
 5. Validate ownership markers before deleting owned PGDATA, sockets, temporary files, recovery directories, containers, and anonymous volumes.
 6. If stopping fails, retain PGDATA and report cleanup failure. Outer container removal does not establish inner cleanup. Preserve user data/services, existing packages, raw failures, and declared caches.
 
+The Docker wrapper removes its container only after a final matching inner report proves ownership and cleanup, including recovery children. If proof is absent or invalid, it keeps the stopped container and volumes, records `container_retained` and `retention_reason`, and exits with `cleanup-failed`. Preserve that evidence and recover the owned data before manually completing cleanup. A stopped container alone does not prove that its inner cleanup procedure finished.
+
 A targeted pass is not full release acceptance. Report what ran and what remains untested. Do not overwrite expected values, broaden known-failure rules, or reinterpret cleanup failure as success.
 
 [check-runner-cleanup](../scripts/check-runner-cleanup) exercises owned success/failure/interruption paths when runner cleanup changes. Read its supported platform/probe behavior before use. It is not a replacement for an individual recovery child's cleanup record.
