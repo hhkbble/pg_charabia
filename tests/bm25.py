@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
-from support import Session, literal, record_quality_case
+from support import Session, literal, native_config_sql, record_quality_case
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = json.loads((ROOT / "tests/fixtures/bm25/corpus.json").read_text())
@@ -104,14 +104,15 @@ class Suite:
 
     def populate(self):
         rows = ",".join(f"({number},{literal(body)})" for number, body in FIXTURE["documents"])
-        self.run(f"INSERT INTO bm25_test.docs VALUES {rows};\n"
+        self.run(native_config_sql("bm25_test.no_stop", stem=True, discard=False) +
+                 native_config_sql("bm25_test.no_stem", stem=False, discard=False) +
+                 f"INSERT INTO bm25_test.docs VALUES {rows};\n"
                  "INSERT INTO bm25_test.docs SELECT g,'cobaltxylophone' FROM generate_series(100,180)g;\n"
                  "INSERT INTO bm25_test.no_stop_docs SELECT * FROM bm25_test.docs;\n"
-                 "INSERT INTO bm25_test.keep_docs SELECT * FROM bm25_test.docs;\n"
                  "CREATE INDEX docs_bm25 ON bm25_test.docs USING bm25(body)WITH(text_config='public.charabia');\n"
                  "CREATE INDEX no_stop_bm25 ON bm25_test.no_stop_docs USING bm25(body)WITH(text_config='bm25_test.no_stop');\n"
-                 "CREATE INDEX keep_bm25 ON bm25_test.keep_docs USING bm25(body)WITH(text_config='bm25_test.keep');\n"
-                 "ANALYZE bm25_test.docs; ANALYZE bm25_test.no_stop_docs; ANALYZE bm25_test.keep_docs;", "bulk-build")
+                 "CREATE INDEX ranking_bm25 ON bm25_test.ranking_docs USING bm25(body)WITH(text_config='bm25_test.no_stem');\n"
+                 "ANALYZE bm25_test.docs; ANALYZE bm25_test.no_stop_docs;", "bulk-build")
 
     def queries(self, full):
         for item in FIXTURE["queries"]:
@@ -216,18 +217,25 @@ class Suite:
             observation = self.run(
                 f"SELECT jsonb_build_object('query_analysis',(SELECT jsonb_agg(to_jsonb(a)) FROM charabia.analyze({q})a),"
                 f"'document_analysis',(SELECT jsonb_agg(to_jsonb(a)) FROM charabia.analyze({body})a),"
-                f"'document_vector',to_tsvector('public.charabia',{body})::text,'query',{query_expression}::text,"
+                f"'document_vector',to_tsvector('public.charabia',{body})::text,"
+                f"'document_lexemes',tsvector_to_array(to_tsvector('public.charabia',{body})),"
+                f"'query_lexemes',tsvector_to_array(to_tsvector('public.charabia',{q})),"
+                f"'dictionary_decisions',(SELECT jsonb_agg(jsonb_build_object('raw',a.raw,'language',a.language,"
+                f"'lexemes',ts_lexize(('charabia.'||a.language)::regdictionary,a.raw)))FROM charabia.analyze({q})a WHERE a.kind='word'),"
+                f"'query',{query_expression}::text,"
                 f"'actual',to_tsvector('public.charabia',{body}) @@ {query_expression});", "known-" + case_id)[0]
             self.result["known_quality"].append(dict(id=case_id, frozen=case, observation=observation,
                 note="Unresolved domain failure, never counted as passing default retrieval"))
-            analysis = [a for a in observation["query_analysis"] if a["kind"] in ("word", "stop")]
+            analysis = [a for a in observation["query_analysis"] if a["kind"] == "word"]
             language = "nob" if phrase else "dan" if case_id == "english-den" else "swe"
             self.require(analysis and all(a["language"] == language for a in analysis), case_id + ": failure changed selected language")
             self.require(observation["actual"] is False, case_id + ": unexpected improvement requires review")
             if not phrase:
-                self.require(len(analysis) == 1 and analysis[0]["kind"] == "stop" and analysis[0]["terms"] == [],
+                self.require(len(analysis) == 1 and observation["query_lexemes"] == [] and
+                             observation["dictionary_decisions"] == [{"raw": case["query"], "language": language, "lexemes": []}],
                              case_id + ": not the frozen stop deletion mechanism")
-                self.require(any(a["raw"] == case["query"] and a["kind"] == "word" for a in observation["document_analysis"]),
+                self.require(case["query"] in observation["document_lexemes"] and
+                             any(a["raw"] == case["query"] and a["kind"] == "word" for a in observation["document_analysis"]),
                              case_id + ": document no longer retains the domain word")
             if phrase:
                 # The bag path still retrieves the original document; it does
@@ -243,27 +251,23 @@ class Suite:
                 self.require(guarded_ids==[],case_id+": explicit empty-query guard changed result shape")
             signature = dict(case)
             self.result["domain_quality"].append(record_quality_case(case_id, **dict(signature, actual=observation["actual"]), known_signature=signature))
-            for config, table, index in (("bm25_test.no_stop","no_stop_docs","no_stop_bm25"),
-                                          ("bm25_test.keep","keep_docs","keep_bm25")):
-                cfg = literal(config)
-                restored = self.run(f"SELECT to_jsonb(to_tsvector({cfg},{body}) @@ " +
-                    (f"phraseto_tsquery({cfg},{q})" if phrase else f"charabia.query_any({q},{cfg})") + ");",
-                    "explicit-recovery-" + case_id + "-" + table)[0]
-                self.require(restored is True, f"{case_id}: explicit {config} did not restore domain match")
-                self.result["domain_quality"].append(record_quality_case(case_id + "-" + table,
-                    input=case["input"],query=case["query"],config=config,expected=True,actual=restored))
-                # For the phrase case the bag candidate is still document 1;
-                # phrase success above is the separate actual filtering check.
-                expected_ids = [1] if phrase else [11] if case_id == "english-den" else [12]
-                if case_id == "english-den" and table == "no_stop_docs":
-                    # Turning stop off also retains the actual Swedish den in
-                    # document 5; recovery is not a precision-neutral change.
-                    expected_ids = [5,11]
-                self.check_query(config, table, index, case["query"], expected_ids, "recovery-" + case_id + "-" + table)
-        # Keep preserves a stop key, not the unstemmed surface as the sole term.
-        keeps_stemming = self.run("SELECT to_jsonb(tsvector_to_array(to_tsvector('bm25_test.keep'," +
-            literal(frozen["english-short-phrase"]["input"]) + ")) @> ARRAY['run','running','were']::text[]);", "keep-does-not-disable-stem")[0]
-        self.require(keeps_stemming is True, "targeted keep accidentally disabled stemming")
+            config, table, index = "bm25_test.no_stop", "no_stop_docs", "no_stop_bm25"
+            cfg = literal(config)
+            restored = self.run(f"SELECT to_jsonb(to_tsvector({cfg},{body}) @@ " +
+                (f"phraseto_tsquery({cfg},{q})" if phrase else f"charabia.query_any({q},{cfg})") + ");",
+                "explicit-recovery-" + case_id + "-" + table)[0]
+            self.require(restored is True, f"{case_id}: explicit {config} did not restore domain match")
+            self.result["domain_quality"].append(record_quality_case(case_id + "-" + table,
+                input=case["input"],query=case["query"],config=config,expected=True,actual=restored))
+            # No-stop is an explicit different policy. It is not a repair of the
+            # default language error, and also retains Swedish den in document 5.
+            expected_ids = [1] if phrase else [5,11] if case_id == "english-den" else [12]
+            self.check_query(config, table, index, case["query"], expected_ids,
+                             "recovery-" + case_id + "-" + table)
+        retains_stemming = self.run("SELECT to_jsonb(tsvector_to_array(to_tsvector('bm25_test.no_stop'," +
+            literal(frozen["english-short-phrase"]["input"]) + ")) @> ARRAY['run','running','were']::text[]);",
+            "no-stop-retains-stemming")[0]
+        self.require(retains_stemming is True, "Discard=false accidentally disabled stemming")
 
     def check_query(self, config, table, index, query, expected, label):
         expression = (f"SELECT id,body <@> to_bm25query({literal(query)},'bm25_test.{index}') AS score "
@@ -384,8 +388,8 @@ class Suite:
 
     def configuration_lifecycle(self):
         body = literal(FIXTURE["documents"][0][1])
-        self.run("DO $$BEGIN PERFORM charabia.create_config('bm25_test.control','{\"builtin_stopwords\":false}'); "
-            "PERFORM charabia.create_config('bm25_test.control_new','{\"builtin_stopwords\":false}');END$$;"
+        self.run(native_config_sql("bm25_test.control", stem=True, discard=False) +
+            native_config_sql("bm25_test.control_new", stem=True, discard=False) +
             "CREATE TABLE bm25_test.control_a_docs(id integer PRIMARY KEY,body text NOT NULL);"
             "CREATE TABLE bm25_test.control_b_docs(LIKE bm25_test.control_a_docs INCLUDING ALL);"
             f"INSERT INTO bm25_test.control_a_docs VALUES(1,{body}),(9,'run');"
@@ -439,9 +443,21 @@ class Suite:
                 self.checkpoint()
 
             state("two-independent-configs",[1,9],[1,9],"bm25_test.control")
-            self.run("DO $$BEGIN PERFORM charabia.alter_config('bm25_test.control','{\"stemming\":false,\"builtin_stopwords\":false}');END$$;", "alter-same-oid")
+            alter_control = """DO $fixture$ DECLARE l jsonb; BEGIN
+ FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
+  EXECUTE format('ALTER TEXT SEARCH DICTIONARY %I.%I(Stem=false)',
+    'bm25_test','control_'||(l->>'language'));
+ END LOOP;
+END$fixture$;"""
+            rolled_back = self.run("BEGIN;" + alter_control +
+                "SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM bm25_test.control_a_docs "
+                "WHERE to_tsvector('bm25_test.control',body) @@ 'run'::tsquery;ROLLBACK;",
+                "alter-rollback")
+            self.require(rolled_back == [[9]], "native ALTER did not change analysis inside transaction")
+            state("after-dictionary-rollback",[1,9],[1,9],"bm25_test.control")
+            self.run(alter_control, "alter-same-oid")
             after_oid = self.session_value(session,"SELECT to_jsonb('bm25_test.control'::regconfig::oid)","config-oid-after")
-            self.require(after_oid==original_oid,"alter_config replaced the configuration OID")
+            self.require(after_oid==original_oid,"native Dictionary ALTER replaced the configuration OID")
             state("same-oid-stale-postings",[1,9],[9],"bm25_test.control")
             self.run("REINDEX INDEX bm25_test.control_a_bm25;","same-oid-reindex")
             state("same-oid-rebuilt",[9],[9],"bm25_test.control")
@@ -453,12 +469,33 @@ class Suite:
             state("reloption-only-old-metapage",[9],[9],"bm25_test.control")
             self.run("REINDEX INDEX bm25_test.control_a_bm25;","new-oid-reindex")
             state("new-oid-rebuilt",[1,9],[1,9],"bm25_test.control_new")
-            self.result["configuration_oids"] = dict(original=original_oid,replacement=new_oid,
+            self.run("ALTER TEXT SEARCH CONFIGURATION bm25_test.control_new RENAME TO control_renamed;",
+                     "rename-config")
+            state("renamed-config-metapage-still-valid",[1,9],[1,9],"bm25_test.control_renamed")
+            negative_sql = "REINDEX INDEX bm25_test.control_a_bm25"
+            output = session.query(negative_sql)
+            self.sequence += 1
+            stem = f"bm25-{self.sequence:03d}-rename-stale-reloption"
+            (self.evidence / (stem + ".sql")).write_text(negative_sql + ";\n")
+            (self.evidence / (stem + ".stdout")).write_text(output + "\n")
+            self.result["configuration_rename"] = dict(sql=negative_sql,output=output,
+                expected_sqlstate="42704",evidence=stem,
+                source="pg_textsearch 1.5.1 build resolves text_config spelling; running queries use metapage OID")
+            self.require("ERROR:" in output and "42704" in output and "control_new" in output,
+                         "REINDEX did not reject the renamed configuration's stale reloption spelling")
+            self.require(session.value("SELECT 1") == "1", "backend did not recover after expected REINDEX error")
+            self.run("ALTER INDEX bm25_test.control_a_bm25 SET(text_config='bm25_test.control_renamed');"
+                     "REINDEX INDEX bm25_test.control_a_bm25;", "rename-repair-reindex")
+            state("renamed-config-spelling-repaired",[1,9],[1,9],"bm25_test.control_renamed")
+            renamed_oid = self.session_value(session,"SELECT to_jsonb('bm25_test.control_renamed'::regconfig::oid)",
+                                             "renamed-config-oid")
+            self.require(renamed_oid == new_oid, "configuration rename changed its OID")
+            self.result["configuration_oids"] = dict(original=original_oid,replacement=new_oid,renamed=renamed_oid,
                 reloptions=self.session_value(session,"SELECT to_jsonb(reloptions)FROM pg_class WHERE oid='bm25_test.control_a_bm25'::regclass","new-oid-reloptions"))
 
     def spill(self):
         self.run("INSERT INTO bm25_test.docs VALUES(30,'spillcontrolcanary');","spill-live-canary")
-        names = ("docs_bm25","no_stop_bm25","keep_bm25","frequency_bm25","ranking_bm25")
+        names = ("docs_bm25","no_stop_bm25","frequency_bm25","ranking_bm25")
         self.result["spill"] = self.run("\n".join(
             f"SELECT jsonb_build_object('index',{literal(index)},'segment_root',bm25_spill_index('bm25_test.{index}'));"
             for index in names),"spill-indices")

@@ -1,3 +1,13 @@
+DO $schema$
+BEGIN
+ IF EXISTS(SELECT FROM pg_catalog.pg_namespace n WHERE n.nspname='charabia'
+   AND (n.nspowner<>current_user::regrole OR EXISTS(
+     SELECT FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a
+     WHERE a.privilege_type='CREATE' AND a.grantee<>n.nspowner
+       AND (a.grantee=0 OR NOT EXISTS(SELECT FROM pg_catalog.pg_roles r WHERE r.oid=a.grantee AND r.rolsuper)))))
+ THEN RAISE EXCEPTION 'charabia schema must be owned by the installer and deny untrusted CREATE' USING ERRCODE='42501'; END IF;
+END
+$schema$;
 GRANT USAGE ON SCHEMA charabia TO PUBLIC;
 REVOKE CREATE ON SCHEMA charabia FROM PUBLIC;
 
@@ -20,28 +30,23 @@ REVOKE ALL ON FUNCTION charabia.parser_start(internal,integer),charabia.parser_g
 CREATE TEXT SEARCH PARSER charabia.parser(START=charabia.parser_start,GETTOKEN=charabia.parser_gettoken,END=charabia.parser_end,LEXTYPES=charabia.parser_lextypes,HEADLINE=charabia.parser_headline);
 CREATE TEXT SEARCH TEMPLATE charabia.template(INIT=charabia.dictionary_init,LEXIZE=charabia.dictionary_lexize);
 
+CREATE FUNCTION charabia.analysis_info() RETURNS jsonb
+AS 'MODULE_PATHNAME','analysis_info_wrapper' LANGUAGE c STABLE SECURITY INVOKER PARALLEL RESTRICTED SET search_path=pg_catalog;
+
 CREATE TEXT SEARCH CONFIGURATION public.charabia(PARSER=charabia.parser);
 DO $install$
-DECLARE t record;
-        fp text := pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to('{"builtin_stopwords":true,"stemming":true,"stopwords_add":{},"stopwords_keep":{}}','UTF8')),'hex');
+DECLARE l jsonb; d jsonb;
 BEGIN
-    FOR t IN SELECT alias FROM pg_catalog.ts_token_type('charabia.parser') WHERE alias<>'display_only' LOOP
-        EXECUTE pg_catalog.format('CREATE TEXT SEARCH DICTIONARY charabia.%I (TEMPLATE=charabia.template,Route=%L,SettingsFingerprint=%L)','norm_'||t.alias,t.alias,fp);
-        EXECUTE pg_catalog.format('ALTER TEXT SEARCH CONFIGURATION public.charabia ADD MAPPING FOR %I WITH charabia.%I',t.alias,'norm_'||t.alias);
-    END LOOP;
+ FOR l IN SELECT value FROM pg_catalog.jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
+  d := l->'defaults';
+  EXECUTE pg_catalog.format('CREATE TEXT SEARCH DICTIONARY charabia.%I (TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize=true,Filter=false)',l->>'language',l->>'language',d->>'discard',d->>'stem');
+  EXECUTE pg_catalog.format('ALTER TEXT SEARCH CONFIGURATION public.charabia ADD MAPPING FOR %I WITH charabia.%I',l->>'language',l->>'language');
+ END LOOP;
 END
 $install$;
 
-CREATE FUNCTION charabia.create_config(name text,options jsonb DEFAULT '{}') RETURNS regconfig
-AS 'MODULE_PATHNAME','create_config_wrapper' LANGUAGE c STRICT VOLATILE SECURITY INVOKER PARALLEL UNSAFE SET search_path=pg_catalog;
-CREATE FUNCTION charabia.alter_config(config regconfig,options jsonb) RETURNS jsonb
-AS 'MODULE_PATHNAME','alter_config_wrapper' LANGUAGE c STRICT VOLATILE SECURITY INVOKER PARALLEL UNSAFE SET search_path=pg_catalog;
-CREATE FUNCTION charabia.drop_config(config regconfig) RETURNS void
-AS 'MODULE_PATHNAME','drop_config_wrapper' LANGUAGE c STRICT VOLATILE SECURITY INVOKER PARALLEL UNSAFE SET search_path=pg_catalog;
-CREATE FUNCTION charabia.analysis_info(config regconfig DEFAULT 'public.charabia') RETURNS jsonb
-AS 'MODULE_PATHNAME','analysis_info_wrapper' LANGUAGE c STRICT STABLE PARALLEL RESTRICTED SET search_path=pg_catalog;
-CREATE FUNCTION charabia.analyze(text,config regconfig DEFAULT 'public.charabia')
-RETURNS TABLE(raw text,prepared text,terms text[],kind text,script text,charabia_language text,language text,language_source text,byte_start bigint,byte_end bigint,char_start bigint,char_end bigint,route text,stemmer text)
-AS 'MODULE_PATHNAME','analyze_wrapper' LANGUAGE c STRICT STABLE PARALLEL RESTRICTED SET search_path=pg_catalog;
+CREATE FUNCTION charabia.analyze(text)
+RETURNS TABLE(raw text,kind text,script text,charabia_language text,language text,language_source text,byte_start bigint,byte_end bigint,char_start bigint,char_end bigint,token_type text)
+AS 'MODULE_PATHNAME','analyze_wrapper' LANGUAGE c STRICT STABLE SECURITY INVOKER PARALLEL RESTRICTED SET search_path=pg_catalog;
 CREATE FUNCTION charabia.query_any(text,config regconfig DEFAULT 'public.charabia') RETURNS tsquery
-AS 'MODULE_PATHNAME','query_any_wrapper' LANGUAGE c STRICT STABLE PARALLEL RESTRICTED SET search_path=pg_catalog;
+AS 'MODULE_PATHNAME','query_any_wrapper' LANGUAGE c STRICT STABLE SECURITY INVOKER PARALLEL RESTRICTED SET search_path=pg_catalog;

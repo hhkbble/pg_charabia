@@ -49,7 +49,7 @@ fn parser_gettoken(mut state: Internal, token: Internal, length: Internal) -> In
         let slot = unsafe { pg_ffi::state_mut::<Option<ParserState>>(&mut state) };
         slot.as_mut().map(|state| {
             state.spans.get(state.cursor).map(|span| {
-                let next = (state.input, span.start, span.end, span.route);
+                let next = (state.input, span.start, span.end, span.token_type);
                 state.cursor += 1;
                 next
             })

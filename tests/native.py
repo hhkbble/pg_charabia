@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from support import literal, run
+from support import literal, native_config_sql, run
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -85,10 +85,10 @@ $capture$;
     try:
         sql(f"CREATE DATABASE {install_database} TEMPLATE template0;", "install-create-database", False)
         sql("CREATE EXTENSION pg_charabia;", "install-create-extension", False, install_database)
-        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.parser'))=72 AND "
+        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.parser'))=73 AND "
                   "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=71);",
                   "install-catalog", database=install_database) is True,
-              "clean CREATE EXTENSION installs 72 types and 71 public default mappings")
+              "clean CREATE EXTENSION installs 73 types and 71 public default mappings")
         sql("DROP EXTENSION pg_charabia;", "install-drop-extension", False, install_database)
         uninstalled = sql("SELECT jsonb_build_object('extension_gone',NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_charabia'),"
             "'default_gone',NOT EXISTS(SELECT 1 FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname='public' AND c.cfgname='charabia'),"
@@ -110,7 +110,7 @@ $capture$;
         fixture = json.loads((ROOT / "tests/fixtures/analysis/general/direct-lexize.json").read_text())
         report["algorithm_sources"] = fixture["sources"]
         for ordinal, case in enumerate(fixture["cases"]):
-            actual = sql(f"SELECT coalesce(to_jsonb(ts_lexize('charabia.norm_{case['route']}',{literal(case['raw'])})),'null'::jsonb);",
+            actual = sql(f"SELECT coalesce(to_jsonb(ts_lexize('charabia.{case['route']}',{literal(case['raw'])})),'null'::jsonb);",
                          f"independent-lexize-{ordinal}")
             if "contains" in case:
                 check(isinstance(actual, list) and case["contains"] in actual,
@@ -128,8 +128,8 @@ $capture$;
         actual = sql(f"""
 WITH inputs(id,body) AS(VALUES {values}) SELECT jsonb_agg(jsonb_build_object(
  'id',id,'analysis',(SELECT coalesce(jsonb_agg(to_jsonb(a)-'ord' ORDER BY ord),'[]')
-   FROM charabia.analyze(body) WITH ORDINALITY a(raw,prepared,terms,kind,script,charabia_language,language,language_source,
-       byte_start,byte_end,char_start,char_end,route,stemmer,ord)),
+   FROM charabia.analyze(body) WITH ORDINALITY a(raw,kind,script,charabia_language,language,language_source,
+       byte_start,byte_end,char_start,char_end,token_type,ord)),
  'parse',(SELECT coalesce(jsonb_agg(jsonb_build_array(tokid,token) ORDER BY ord),'[]')
    FROM ts_parse('charabia.parser',body) WITH ORDINALITY p(tokid,token,ord)),
  'debug',(SELECT coalesce(jsonb_agg(jsonb_build_object('alias',alias,'token',token,'dictionary',dictionary::text,
@@ -154,18 +154,22 @@ WITH inputs(id,body) AS(VALUES {values}) SELECT jsonb_agg(jsonb_build_object(
                       token["byte_end"] == previous_byte + len(raw.encode()) and
                       token["char_end"] == previous_char + len(raw),
                       f"input {item['id']} offsets reference raw bytes and Unicode scalars")
-                check(parsed[1] == raw == debug["token"] and aliases[str(parsed[0])] == token["route"] == debug["alias"],
+                check(parsed[1] == raw == debug["token"] and aliases[str(parsed[0])] == token["token_type"] == debug["alias"],
                       f"input {item['id']} explicit route and original span reach PG Dictionary")
-                expected_lexemes = token["terms"] if token["kind"] in ("word", "stop") else None
-                check(debug["lexemes"] == expected_lexemes,
-                      f"input {item['id']} PG Dictionary agrees with diagnostic Word/Stop/Ignore conversion")
-                check(debug["dictionaries"] == ["charabia.norm_" + token["route"]] and
-                      debug["dictionary"] == "charabia.norm_" + token["route"],
-                      f"input {item['id']} exactly one terminal route dictionary")
-                if token["kind"] in ("word", "stop"):
+                if token["kind"] == "word":
+                    check(debug["dictionaries"] == ["charabia." + token["token_type"]],
+                          f"input {item['id']} language mapping selects its default dictionary")
+                    check(token["language"] == token["token_type"],
+                          f"input {item['id']} selected Parser language matches lexical type")
+                else:
+                    check(debug["dictionaries"] == [] and debug["lexemes"] is None and token["language"] is None,
+                          f"input {item['id']} blank/display remains unmapped and has no selected Dictionary language")
+                # This checks adapter position accounting only. These dictionary
+                # results are not accepted as independent algorithm goldens.
+                if debug["lexemes"] is not None:
                     positions += 1
-                for term in token["terms"]:
-                    expected_vector.setdefault(term, []).append(positions)
+                    for term in debug["lexemes"]:
+                        expected_vector.setdefault(term, []).append(positions)
                 previous_byte, previous_char = token["byte_end"], token["char_end"]
             check(previous_byte == len(byte_text) and previous_char == len(text),
                   f"input {item['id']} complete raw range coverage")
@@ -175,7 +179,7 @@ WITH inputs(id,body) AS(VALUES {values}) SELECT jsonb_agg(jsonb_build_object(
         stable = f"{schema}.stable"
         sql(f"""
 CREATE SCHEMA {schema};
-SELECT charabia.create_config({literal(stable)},'{{"stemming":false,"builtin_stopwords":false}}');
+{native_config_sql(stable)}
 CREATE TABLE {schema}.docs(id integer PRIMARY KEY,body text NOT NULL,manual tsvector NOT NULL,
  generated tsvector GENERATED ALWAYS AS(to_tsvector('{stable}',body)) STORED);
 INSERT INTO {schema}.docs(id,body,manual) SELECT id,body,to_tsvector('{stable}',body) FROM
@@ -251,32 +255,39 @@ ANALYZE {schema}.default_docs;
 
         changing = f"{schema}.changing"
         sql(f"""
-SELECT charabia.create_config('{changing}','{{"stemming":false,"builtin_stopwords":false}}');
+CREATE TEXT SEARCH DICTIONARY {schema}.changing_eng(TEMPLATE=charabia.template,
+ Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
+CREATE TEXT SEARCH CONFIGURATION {changing}(PARSER=charabia.parser);
+DO $map$
+DECLARE types text;
+BEGIN
+ SELECT string_agg(quote_ident(alias),',') INTO types FROM ts_token_type('charabia.parser') WHERE tokid<=71;
+ EXECUTE 'ALTER TEXT SEARCH CONFIGURATION {changing} ADD MAPPING FOR '||types||' WITH {schema}.changing_eng';
+END $map$;
 CREATE TABLE {schema}.migration(id integer PRIMARY KEY,body text,manual tsvector,
  generated tsvector GENERATED ALWAYS AS(to_tsvector('{changing}',body)) STORED);
-INSERT INTO {schema}.migration(id,body,manual) VALUES(1,'alpha beta',to_tsvector('{changing}','alpha beta'));
+INSERT INTO {schema}.migration(id,body,manual) VALUES(1,'alpha the beta',to_tsvector('{changing}','alpha the beta'));
 CREATE INDEX migration_expression_gin ON {schema}.migration USING gin(to_tsvector('{changing}',body));
 CREATE INDEX migration_manual_gin ON {schema}.migration USING gin(manual);
 CREATE INDEX migration_generated_gin ON {schema}.migration USING gin(generated);
-SELECT charabia.alter_config('{changing}',jsonb_build_object('stemming',false,'builtin_stopwords',false,
- 'stopwords_add',(SELECT jsonb_object_agg(alias,jsonb_build_array('alpha')) FROM ts_token_type('charabia.parser') WHERE alias<>'display_only')));
+ALTER TEXT SEARCH DICTIONARY {schema}.changing_eng(Discard=true);
 """, "change-config", False)
         state_query = f"SELECT jsonb_build_object('fresh',to_tsvector('{changing}',body)::text,'manual',manual::text,'generated',generated::text) FROM {schema}.migration;"
         state = sql(state_query, "migration-before-reindex")
-        check(state == {"fresh": "'beta':2", "manual": "'alpha':1 'beta':2", "generated": "'alpha':1 'beta':2"},
-              "ALTER changes fresh analysis while stored vectors retain old terms")
+        check(state == {"fresh": "'alpha':1 'beta':3", "manual": "'alpha':1 'beta':3 'the':2", "generated": "'alpha':1 'beta':3 'the':2"},
+              "native ALTER changes fresh analysis while stored vectors retain old terms")
         sql(f"REINDEX TABLE {schema}.migration;", "migration-reindex-only", False)
         check(sql(state_query, "migration-after-reindex") == state,
               "REINDEX rebuilds stored indexes without reanalyzing stored vectors")
-        gin_check("expression-rebuilt", f"to_tsvector('{changing}',body)", "migration_expression_gin", "'alpha'::tsquery", [], "migration")
-        gin_check("stored-stale", "manual", "migration_manual_gin", "'alpha'::tsquery", [1], "migration")
-        gin_check("generated-stale", "generated", "migration_generated_gin", "'alpha'::tsquery", [1], "migration")
+        gin_check("expression-rebuilt", f"to_tsvector('{changing}',body)", "migration_expression_gin", "'the'::tsquery", [], "migration")
+        gin_check("stored-stale", "manual", "migration_manual_gin", "'the'::tsquery", [1], "migration")
+        gin_check("generated-stale", "generated", "migration_generated_gin", "'the'::tsquery", [1], "migration")
         sql(f"UPDATE {schema}.migration SET body=body,manual=to_tsvector('{changing}',body); REINDEX TABLE {schema}.migration;",
             "migration-recompute", False)
-        check(sql(state_query, "migration-complete") == {"fresh": "'beta':2", "manual": "'beta':2", "generated": "'beta':2"},
+        check(sql(state_query, "migration-complete") == {"fresh": "'alpha':1 'beta':3", "manual": "'alpha':1 'beta':3", "generated": "'alpha':1 'beta':3"},
               "raw-text recomputation before REINDEX repairs both stored paths")
         for column in ("manual", "generated"):
-            gin_check("stored-recomputed", column, f"migration_{column}_gin", "'alpha'::tsquery", [], "migration")
+            gin_check("stored-recomputed", column, f"migration_{column}_gin", "'the'::tsquery", [], "migration")
         report["status"] = "passed"
     except BaseException as error:
         report["status"] = "failed"

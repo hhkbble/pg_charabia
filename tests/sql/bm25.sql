@@ -14,10 +14,6 @@ LANGUAGE plpgsql IMMUTABLE STRICT AS $$ BEGIN
 END $$;
 CREATE TABLE bm25_test.docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));
 CREATE TABLE bm25_test.no_stop_docs(LIKE bm25_test.docs INCLUDING ALL);
-CREATE TABLE bm25_test.keep_docs(LIKE bm25_test.docs INCLUDING ALL);
-SELECT charabia.create_config('bm25_test.no_stop','{"builtin_stopwords":false}');
-SELECT charabia.create_config('bm25_test.no_stem','{"stemming":false,"builtin_stopwords":false}');
-SELECT charabia.create_config('bm25_test.keep','{"stopwords_keep":{"dan":["den"],"swe":["var"],"eng":["were"]}}');
 
 -- Guard the flattened indexed expression, not each individually valid part.
 CREATE TABLE bm25_test.expression_docs(id integer PRIMARY KEY,title text NOT NULL,body text NOT NULL,
@@ -74,7 +70,7 @@ SELECT bm25_test.assert_true((SELECT positions=ARRAY[16383]::smallint[] FROM bm2
   'PG18 clamps positions above 16383');
 CREATE TABLE bm25_test.ranking_docs(id integer PRIMARY KEY,body text NOT NULL);
 INSERT INTO bm25_test.ranking_docs VALUES(1,'rankcanary filler'),(2,'rankcanary rankcanary'),(3,'unrelated filler');
-CREATE INDEX ranking_bm25 ON bm25_test.ranking_docs USING bm25(body) WITH(text_config='bm25_test.no_stem');
+-- Python creates the native no_stem fixture and its ranking index before queries.
 -- The actual adapter cannot see the caller's pre-chunked full input. Prove
 -- rejection at native ingress and record bypassed BM25 behavior separately.
 CREATE TABLE bm25_test.bypass_docs(id integer PRIMARY KEY,body text NOT NULL);

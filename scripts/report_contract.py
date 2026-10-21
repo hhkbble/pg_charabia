@@ -4,8 +4,11 @@ import json
 from pathlib import Path
 
 FORMAT = 2
-SUITES = ("unit", "smoke", "native", "bm25", "headline", "config", "lifecycle", "errors", "stress", "benchmark")
-MAC_DEFAULT = ("unit", "native", "headline", "config", "lifecycle", "errors")
+RELEASE_VERSION = "0.3.0"
+SUITES = ("unit", "smoke", "native", "chain", "bm25", "headline", "config", "lifecycle", "errors", "stress", "recovery", "benchmark")
+MAC_DEFAULT = ("unit", "native", "chain", "headline", "config", "lifecycle", "errors")
+ARCHIVE_SUITES = ("smoke", "chain", "headline", "config", "recovery")
+STATIC_INFO_FIELDS = frozenset(("extension", "pgrx", "charabia", "target", "cargo_lock_sha256", "resource_manifest_sha256", "analysis_revision", "resource_fingerprint", "language_count", "languages", "resources"))
 VERIFIED = ("verified", "verified-with-known-quality-failures")
 QUALITY_FIELDS = ("input", "query", "config", "expected", "actual")
 REQUIRED_QUALITY_CASES = frozenset(("english-den", "code-var", "english-short-phrase"))
@@ -40,12 +43,61 @@ def select_suites(groups, platform, root):
         raise ValueError("build must be selected alone")
     if len(selected) != len(set(selected)):
         raise ValueError("Duplicate suite selection")
-    if platform == "macos-arm64" and any(s in selected for s in ("smoke", "bm25", "stress", "benchmark")):
+    if platform == "macos-arm64" and any(s in selected for s in ("smoke", "bm25", "stress", "recovery", "benchmark")):
         raise ValueError("These suites require the Linux verifier; no local BM25 environment is staged")
     for suite in selected:
         if suite not in ("unit", "build") and not any((Path(root) / relative).is_file() for relative in (f"tests/{suite}.py", f"tests/sql/{suite}.sql")):
             raise ValueError(f"Suite {suite!r} is not implemented")
     return selected
+
+
+def require_static_info(info, expected):
+    """Check static identity independently of user configuration or live FSTs."""
+    if not isinstance(info, dict) or set(info) != STATIC_INFO_FIELDS:
+        raise ValueError("analysis_info must expose exactly the static 0.3.0 identity fields")
+    mismatches = {key: {"expected": value, "actual": info.get(key)} for key, value in expected.items() if not same_json(info.get(key), value)}
+    if mismatches:
+        raise ValueError(f"analysis_info static identity differs from the build inputs: {mismatches}")
+    if info["extension"] != RELEASE_VERSION or info["language_count"] != 71:
+        raise ValueError("analysis_info requires release 0.3.0 and 71 language dictionaries")
+    if not isinstance(info["analysis_revision"], str) or not info["analysis_revision"]:
+        raise ValueError("analysis_info requires a nonempty analysis_revision")
+    for field in ("cargo_lock_sha256", "resource_manifest_sha256", "resource_fingerprint"):
+        value = info[field]
+        if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError(f"analysis_info contains an invalid {field}")
+    languages = info["languages"]
+    if not isinstance(languages, list) or len(languages) != 71:
+        raise ValueError("analysis_info requires exactly 71 language capability rows")
+    aliases = set()
+    for row in languages:
+        if not isinstance(row, dict) or set(row) != {"language", "script", "has_stopwords", "stemmer", "defaults"}:
+            raise ValueError("Invalid language capability row")
+        alias = row["language"]
+        if not isinstance(alias, str) or len(alias) != 3 or not alias.isascii() or not alias.islower() or not alias.isalpha() or alias in aliases:
+            raise ValueError("Language aliases must be unique three-letter lowercase codes")
+        aliases.add(alias)
+        if type(row["has_stopwords"]) is not bool or not isinstance(row["script"], str) or not row["script"]:
+            raise ValueError("Invalid language script or stopword capability")
+        stemmer = row["stemmer"]
+        if stemmer is not None and (not isinstance(stemmer, str) or not stemmer):
+            raise ValueError("Invalid stemmer capability")
+        defaults = row["defaults"]
+        wanted = {"discard": row["has_stopwords"], "stem": stemmer is not None, "normalize": True, "filter": False}
+        if not same_json(defaults, wanted):
+            raise ValueError(f"Invalid defaults for {alias}")
+    if "und" not in aliases or sum(row["has_stopwords"] for row in languages) != 52 or sum(row["stemmer"] is not None for row in languages) != 19:
+        raise ValueError("Language capability coverage differs from the fixed 71/52/19 contract")
+
+
+def require_recovery_report(recovery, library_hash):
+    """A successful SQL child cannot hide failed cleanup or use an old library."""
+    if not isinstance(recovery, dict) or recovery.get("format") != FORMAT or recovery.get("status") != "passed":
+        raise ValueError("Missing successful format-2 recovery evidence")
+    if not all(recovery.get("cleanup", {}).get(key) is True for key in ("marker_matches", "clusters_stopped", "directory_removed")):
+        raise ValueError("Recovery child cleanup did not pass")
+    if not isinstance(library_hash, str) or len(library_hash) != 64 or any(c not in "0123456789abcdef" for c in library_hash) or recovery.get("loaded_library_sha256") != library_hash:
+        raise ValueError("Recovery did not load the currently verified extension library")
 
 
 def frozen_quality_cases():
@@ -157,7 +209,7 @@ def require_release_report(report):
     if report.get("build_profile") != "release" or report.get("test_hooks") is not False:
         raise ValueError("Debug or test-hook builds cannot be packaged for delivery")
     if set(report.get("suites", [])) != set(SUITES) or len(report["suites"]) != len(SUITES):
-        raise ValueError("All ten required release suites must pass in the same run")
+        raise ValueError("All required release suites must pass in the same run")
     suite_results = report.get("suite_results", {})
     if set(suite_results) != set(SUITES) or any(v.get("status") != "passed" for v in suite_results.values()):
         raise ValueError("Missing successful mechanism suite evidence")
@@ -169,10 +221,14 @@ def require_release_report(report):
         raise ValueError("Quality failures and report status disagree")
     if not report.get("analysis_info_verified") or not report.get("fts_callback_abi_verified"):
         raise ValueError("Runtime identity and FTS ABI were not verified")
+    require_static_info(report.get("analysis_info"), {"extension": RELEASE_VERSION})
+    if not report.get("public_api_abi_verified") or not report.get("default_objects_verified"):
+        raise ValueError("Public diagnostic ABI and default text search objects were not verified")
+    require_recovery_report(report.get("recovery"), report.get("loaded_library_sha256"))
     if not report.get("pg_textsearch", {}).get("loaded_backend_verified"):
         raise ValueError("The actual pg_textsearch backend library was not verified")
     commands = {item["label"]: item for item in report.get("commands", [])}
-    for label in ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "analysis-info", "documentation-examples", "runner-contract"):
+    for label in ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract"):
         if commands.get(label, {}).get("exit_code") != 0:
             raise ValueError(f"Missing successful {label} evidence")
     for suite in set(SUITES) - {"unit"}:

@@ -158,3 +158,22 @@ def record_quality_case(case_id, *, input, query, config, expected, actual, know
     if case["status"] == "regression":
         raise AssertionError(f"Unreviewed quality result for {case_id}; see {path}")
     return case
+
+
+def native_config_sql(name, stem=False, discard=False, normalize=True):
+    """Explicit native DDL test fixture; each language owns a normal dictionary."""
+    import re
+    if not re.fullmatch(r'[a-z_][a-z_0-9]{0,35}\.[a-z_][a-z_0-9]{0,35}', name):
+        raise ValueError('Fixture name must be a short qualified SQL identifier')
+    schema, base = name.split('.')
+    boolean = lambda flag: 'true' if flag else 'false'
+    return f"""CREATE TEXT SEARCH CONFIGURATION {name}(PARSER=charabia.parser);
+DO $fixture$ DECLARE l jsonb; BEGIN
+ FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
+  EXECUTE format('CREATE TEXT SEARCH DICTIONARY %I.%I(TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize={boolean(normalize)},Filter=false)',
+   {literal(schema)},{literal(base)}||'_'||(l->>'language'),l->>'language',
+   ({boolean(discard)} AND (l->>'has_stopwords')::boolean)::text,
+   ({boolean(stem)} AND l->>'stemmer' IS NOT NULL)::text);
+  EXECUTE format('ALTER TEXT SEARCH CONFIGURATION {name} ADD MAPPING FOR %I WITH %I.%I',l->>'language',{literal(schema)},{literal(base)}||'_'||(l->>'language'));
+ END LOOP;
+END $fixture$;"""

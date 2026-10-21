@@ -1,6 +1,5 @@
 """Bounded real-backend concurrency, worker execution and memory observations."""
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import json
 import os
 import signal
@@ -151,31 +150,23 @@ def repeated_requests():
             results["test_counters"] = hooks(session)
 
 
-def stoplist(label, sentinel):
-    words = [sentinel] + [
-        "w" + hashlib.sha256(f"pgcb-stress-v1:{label}:{number}".encode()).hexdigest()[:20]
-        for number in range(32767)
-    ]
-    assert len(words) == len(set(words)) == 32768
-    encoded = json.dumps(words, ensure_ascii=False, separators=(",", ":"))
-    assert len(encoded.encode()) <= MIB
-    return encoded, {
-        "seed": f"pgcb-stress-v1:{label}", "sentinel": sentinel, "elements": len(words),
-        "json_bytes": len(encoded.encode()), "json_sha256": hashlib.sha256(encoded.encode()).hexdigest(),
-    }
-
-
 def cache_invalidation():
-    payloads, metadata = zip(stoplist("a", "alpha"), stoplist("b", "beta"))
-    # zip() above groups each generated (JSON, metadata) pair into two tuples.
     state = results["cache_invalidation"]
-    state.update({"stoplists": list(metadata), "warmup": [], "control": [], "measurement": []})
-    options = [json.dumps({"stemming":False,"builtin_stopwords":False,"stopwords_add":{"eng":json.loads(payload)}},ensure_ascii=False,separators=(",",":")) for payload in payloads]
-    state["settings_json_sha256"] = [hashlib.sha256(value.encode()).hexdigest() for value in options]
-    run("SELECT charabia.create_config('stress.cache_config'," + literal(options[0]) + "::jsonb)")
-    document = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. alpha beta"
-    selected = json.loads(run("SELECT json_agg(DISTINCT language) FROM charabia.analyze(" + literal(document) + ",'stress.cache_config') WHERE kind IN ('word','stop')"))
-    assert selected == ["eng"], selected
+    state.update({"builtin_language": "eng", "sentinel": "the", "warmup": [], "control": [], "measurement": [],
+                  "basis": "Pinned NLTK English stoplist contains the; Discard=false owns no FST"})
+    # This test measures one real dictionary lifecycle, independent of automatic
+    # language quality. All lexical types deliberately map to the same English
+    # dictionary; blank/display types remain unmapped.
+    run("""CREATE TEXT SEARCH DICTIONARY stress.cache_words(
+ TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
+CREATE TEXT SEARCH CONFIGURATION stress.cache_config(PARSER=charabia.parser);
+DO $map$ DECLARE l jsonb; BEGIN
+ FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
+  EXECUTE format('ALTER TEXT SEARCH CONFIGURATION stress.cache_config ADD MAPPING FOR %I WITH stress.cache_words',l->>'language');
+ END LOOP;
+END $map$;""")
+    document = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. alpha beta the"
+    selected = json.loads(run("SELECT json_agg(DISTINCT language) FROM charabia.analyze(" + literal(document) + ") WHERE kind='word'"))
     state["probe_document"] = document
     state["selected_languages"] = selected
     with Session() as warm, Session() as updater:
@@ -187,7 +178,7 @@ def cache_invalidation():
         # Parameter binding prevents constant folding from hiding cache lookup.
         probe = "EXECUTE cache_probe(" + literal(document) + ")"
         first_value = warm.value(probe)
-        assert "'alpha':" not in first_value and "'beta':" in first_value, first_value
+        assert "'the':" in first_value and "'alpha':" in first_value and "'beta':" in first_value, first_value
         initial = observe(warm, "initial", 0)
         state["initial"] = initial
         state["shared_buffers"] = warm.value("SHOW shared_buffers")
@@ -198,6 +189,8 @@ def cache_invalidation():
         ))
         baseline = initial.get("hooks")
         if baseline is not None:
+            state["initial_active_dictionary_count"] = baseline["dictionary_created"] - baseline["dictionary_dropped"]
+            assert baseline["dictionary_last_created_fst_bytes"] == 0, baseline
             state["baseline_other_dictionary_live"] = (
                 baseline["dictionary_created"] - baseline["dictionary_dropped"] - 1
             )
@@ -229,12 +222,15 @@ def cache_invalidation():
         def cycle(phase, number, selection, replaced):
             before = hooks(warm)
             if replaced:
-                updater.value("SELECT charabia.alter_config('stress.cache_config'," + literal(options[selection]) + "::jsonb)")
+                updater.value("ALTER TEXT SEARCH DICTIONARY stress.cache_words(Discard=" + ("true" if selection else "false") + ")")
             value = warm.value(probe)
-            sample = dict(observe(warm, phase, number), stoplist=selection, vector=value)
+            sample = dict(observe(warm, phase, number), discard=bool(selection), vector=value)
             state[phase].append(sample)
             checkpoint()
-            assert (("'alpha':" in value) == (selection == 1)) and (("'beta':" in value) == (selection == 0)), sample
+            assert (("'the':" in value) == (selection == 0)) and "'alpha':" in value and "'beta':" in value, sample
+            if HAS_HOOKS:
+                fst_bytes = sample["hooks"]["dictionary_last_created_fst_bytes"]
+                assert (fst_bytes > 0) if selection else (fst_bytes == 0), sample
             check_state(sample, before, replaced)
 
         for number in range(8):
@@ -260,7 +256,7 @@ def cache_invalidation():
         state["raw_total_rss_gate_passed"] = last - first <= state["rss_growth_tolerance_bytes"]
         if LINUX:
             # Total backend RSS includes PG's shared-buffer residency. ALTER
-            # creates new catalog TOAST pages, which are not retained Rust heap.
+            # touches catalog pages, which are not retained Rust heap.
             # Preserve that total and its original gate outcome; apply the same
             # predeclared tolerance only to unexplained non-shared residency.
             nonshared_first = statistics.median(sample["rss_nonshared_bytes"] for sample in samples[:8])
@@ -294,7 +290,7 @@ def cache_invalidation():
         assert state["nonshared_rss_gate_passed"] if LINUX else state["raw_total_rss_gate_passed"], state
         assert state["prepared_plan_counts"]["generic"] == 73 and state["prepared_plan_counts"]["custom"] == 0, state
         final_value = warm.value(probe)
-        assert "'alpha':" in final_value and "'beta':" not in final_value, final_value
+        assert "'the':" not in final_value and "'alpha':" in final_value and "'beta':" in final_value, final_value
 
 
 def bm25_query(text):

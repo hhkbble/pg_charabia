@@ -4,7 +4,7 @@ import os
 import signal
 import sys
 import time
-from support import Session, json_query, literal, run, save
+from support import Session, json_query, literal, native_config_sql, run, save
 
 def interrupted(signum, _frame):
     raise InterruptedError(f"Received signal {signum}")
@@ -28,19 +28,19 @@ CREATE FUNCTION public.raw_gettoken(internal,internal,internal) RETURNS internal
 CREATE FUNCTION public.raw_end(internal) RETURNS void AS 'pg_charabia','parser_end_wrapper' LANGUAGE c STRICT;
 CREATE FUNCTION public.raw_lextypes(internal) RETURNS internal AS 'pg_charabia','parser_lextypes_wrapper' LANGUAGE c STRICT;
 CREATE TEXT SEARCH PARSER public.raw_parser(START=public.raw_start,GETTOKEN=public.raw_gettoken,END=public.raw_end,LEXTYPES=public.raw_lextypes);
-CREATE FUNCTION public.raw_analyze(text,oid) RETURNS TABLE(raw text,prepared text,terms text[],kind text,script text,charabia_language text,language text,language_source text,byte_start bigint,byte_end bigint,char_start bigint,char_end bigint,route text,stemmer text) AS 'pg_charabia','analyze_wrapper' LANGUAGE c STRICT;
+CREATE FUNCTION public.raw_analyze(text) RETURNS TABLE(raw text,kind text,script text,charabia_language text,language text,language_source text,byte_start bigint,byte_end bigint,char_start bigint,char_end bigint,token_type text) AS 'pg_charabia','analyze_wrapper' LANGUAGE c STRICT;
 CREATE FUNCTION public.raw_query_any(text,oid) RETURNS tsquery AS 'pg_charabia','query_any_wrapper' LANGUAGE c STRICT;
 """,database)
     for name, sql in {
         "start": "SELECT * FROM ts_parse('public.raw_parser','hello')",
-        "diagnostic": "SELECT * FROM public.raw_analyze('hello',0::oid)",
+        "diagnostic": "SELECT * FROM public.raw_analyze('hello')",
         "query_any": "SELECT public.raw_query_any('hello',0::oid)",
     }.items():
         result = run("\\set VERBOSITY verbose\n"+sql, database, check=False)
         assert result.returncode != 0 and "0A000" in result.stderr, result.stderr
         results["encoding"][name] = result.stderr.strip()
     with Session(database) as session:
-        output=session.query("SELECT * FROM public.raw_analyze(convert_from(decode('ff','hex'),'SQL_ASCII'),0::oid)")
+        output=session.query("SELECT * FROM public.raw_analyze(convert_from(decode('ff','hex'),'SQL_ASCII'))")
         results["encoding"]["diagnostic_invalid_utf8"]=output
         save("errors-results.json",results)
         assert "0A000" in output,output
@@ -51,12 +51,30 @@ finally:
 has_hooks = os.environ.get("PGCB_TEST_HOOKS") == "1"
 registered = int(run("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='charabia' AND p.proname LIKE 'test_%'"))
 assert registered == (2 if has_hooks else 0), registered
-assert json_query("SELECT charabia.analysis_info('public.charabia')") ["test_hooks"] == has_hooks
+assert json_query("SELECT charabia.analysis_info()") ["extension"] == "0.3.0"
 
 DOCUMENT = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running."
-run("CREATE SCHEMA errors_runtime; SELECT charabia.create_config('errors_runtime.healthy','{\"stemming\":false,\"builtin_stopwords\":false}')")
+run("CREATE SCHEMA errors_runtime")
+run(native_config_sql("errors_runtime.healthy", stem=False, discard=False))
 HEALTHY = "SELECT to_tsvector('errors_runtime.healthy'," + literal(DOCUMENT) + ")"
 HEADLINE = "SELECT ts_headline('errors_runtime.healthy'," + literal(DOCUMENT) + ",'running'::tsquery,'HighlightAll=true')"
+
+# Exercise the direct dictionary entry, independently of START and analyze.
+# Oversized ASCII cannot fail UTF8 conversion in core before reaching LEXIZE.
+with Session() as direct:
+    assert direct.value("SELECT ts_lexize('errors_runtime.healthy_eng','running')") == "{running}"
+    oversized = direct.query("SELECT ts_lexize('errors_runtime.healthy_eng',repeat('x',262145))")
+    results["direct_lexize"] = {"oversized": oversized}
+    save("errors-results.json", results)
+    assert "54000" in oversized and "pg_charabia input exceeds 262144 bytes" in oversized, oversized
+    malformed = direct.query("SELECT ts_lexize('errors_runtime.healthy_eng',convert_from(decode('ff','hex'),'SQL_ASCII'))")
+    results["direct_lexize"]["malformed_utf8"] = malformed
+    # PostgreSQL may reject conversion before it invokes LEXIZE. Preserve that
+    # attribution rather than claiming core validation exercised our callback.
+    results["direct_lexize"]["malformed_rejection"] = "extension" if "invalid UTF8 input" in malformed else "postgresql_conversion"
+    save("errors-results.json", results)
+    assert "22021" in malformed, malformed
+    assert direct.value("SELECT ts_lexize('errors_runtime.healthy_eng','running')") == "{running}"
 
 
 def stats(session):
@@ -70,12 +88,12 @@ def callback_live(value):
 def registration_failures(session):
     results["registration_faults"]=[]
     for role in ("parser", "dictionary"):
-        for point,modes in (("register_alloc",("error","panic","allocation_error")),("register_link",("error","panic"))):
+        for point,modes in (("register_alloc",("error","panic","allocation_error")),("register_link",("error","panic","allocation_error"))):
             for mode in modes:
                 before=stats(session)
                 session.value(f"SELECT charabia.test_set_fault({literal(point)},{literal(mode)})")
                 sql=(HEALTHY if role=="parser" else
-                     "CREATE TEXT SEARCH DICTIONARY public.registration_fault(TEMPLATE=charabia.template,Route='eng',Stemming=false,BuiltinStopWords=false,AddStopWords='[\"registrationcanary\"]',SettingsFingerprint='" + "0"*64 + "')")
+                     "CREATE TEXT SEARCH DICTIONARY public.registration_fault(TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=false,Normalize=true,Filter=false)")
                 output=session.query(sql)
                 after=stats(session)
                 record={"role":role,"point":point,"mode":mode,"output":output,"before":before,"after":after}
@@ -253,7 +271,7 @@ try:
                 for mode in ("error", "panic"):
                     before=stats(session)
                     session.value(f"SELECT charabia.test_set_fault({literal(point)},{literal(mode)})")
-                    query=("CREATE TEXT SEARCH DICTIONARY public.fault_dict(TEMPLATE=charabia.template,Route='eng',SettingsFingerprint='" + "0"*64 + "')") if point=="init" else HEADLINE if point.startswith("headline_") else HEALTHY
+                    query=("CREATE TEXT SEARCH DICTIONARY public.fault_dict(TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=true,Normalize=true,Filter=false)") if point=="init" else HEADLINE if point.startswith("headline_") else HEALTHY
                     output=session.query(query)
                     after=stats(session)
                     record={"point":point,"mode":mode,"output":output,"before":before,"after":after}

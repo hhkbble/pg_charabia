@@ -15,7 +15,7 @@ import tempfile
 import time
 import tomllib
 
-from report_contract import FORMAT, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_known_quality_cases, select_suites, verified_status
+from report_contract import FORMAT, RELEASE_VERSION, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_known_quality_cases, require_recovery_report, require_static_info, select_suites, verified_status
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -58,6 +58,7 @@ def main():
     result["inherited_libpq_environment_keys_removed"] = sorted(set(os.environ) - set(env))
     pg_bin = None
     cluster_started = False
+    recovery_attempted = False
     failure = None
 
     def checkpoint():
@@ -129,6 +130,9 @@ def main():
         cli_version = command(["cargo", "pgrx", "--version"], "pgrx-version", True)
         if "0.19.3" not in cli_version:
             raise RuntimeError("cargo-pgrx 0.19.3 is required")
+        crate_version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+        if crate_version != RELEASE_VERSION:
+            raise RuntimeError(f"Expected extension version {RELEASE_VERSION}, got {crate_version}")
         result.update({"postgres": version, "rust": rust_version, "cargo_lock_sha256": lock_hash, "resources_sha256": sha256(ROOT / "resources/manifest.json"), "target_triple": target_triple, "features": feature_string, "target_cache": env["CARGO_TARGET_DIR"], "git_commit": command(["git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD"], "git-commit", True).strip(), "git_status": command(["git", "-c", f"safe.directory={ROOT}", "status", "--porcelain=v1"], "git-status", True)})
         command([sys.executable, ROOT / "scripts/prepare-resources.py", "--cache", env["LINDERA_BUILD_DICTIONARY_CACHE_DIR"]], "resource-verification")
         command(["cargo", "tree", "--locked", "--no-default-features", "--features", feature_string], "cargo-tree")
@@ -235,7 +239,7 @@ def main():
         command([pg_bin / "initdb", "-D", test_dir / "data", "--encoding=UTF8", "--locale=C", "--auth=trust", "--no-instructions"], "initdb")
         config = test_dir / "data/postgresql.conf"
         config_lines = ["listen_addresses = ''", f"unix_socket_directories = '{test_dir}/socket'", "port = 55432", f"extension_control_path = '{test_dir}/stage:$system'", f"dynamic_library_path = '{stage}:$libdir'", "log_min_messages = notice", "max_connections = 24"]
-        needs_bm25 = any(s in selected for s in ("smoke", "bm25", "stress", "benchmark")) or (args.platform == "linux-amd64" and "lifecycle" in selected)
+        needs_bm25 = any(s in selected for s in ("smoke", "bm25", "stress", "recovery", "benchmark")) or (args.platform == "linux-amd64" and any(s in selected for s in ("lifecycle", "chain")))
         if needs_bm25:
             # Container-only pg_textsearch installation belongs to the pinned image.
             if args.platform != "linux-amd64":
@@ -245,7 +249,8 @@ def main():
             handle.write("\n" + "\n".join(config_lines) + "\n")
         cluster_started = True
         command([pg_bin / "pg_ctl", "-D", test_dir / "data", "-l", test_dir / "server.log", "-w", "-t", "60", "start"], "pg-start")
-        env.update({"PGHOST": str(test_dir / "socket"), "PGPORT": "55432", "PGDATABASE": "postgres", "PGUSER": command(["id", "-un"], "database-user", True).strip(), "PGCB_RUN_DIR": str(evidence), "PGCB_TEST_HOOKS": "1" if args.test_hooks else "0", "PGCB_TEMP_DIR": str(test_dir), "PGCB_PLATFORM": args.platform})
+        env.update({"PGHOST": str(test_dir / "socket"), "PGPORT": "55432", "PGDATABASE": "postgres", "PGUSER": command(["id", "-un"], "database-user", True).strip(), "PGCB_RUN_DIR": str(evidence), "PGCB_TEST_HOOKS": "1" if args.test_hooks else "0", "PGCB_TEMP_DIR": str(test_dir), "PGCB_PLATFORM": args.platform,
+                    "PGCB_EXTENSION_STAGE": str(stage), "PGCB_LIBRARY_PATH": str(library), "PGCB_LIBRARY_SHA256": sha256(library), "PGCB_PG_BIN": str(pg_bin)})
         psql = [pg_bin / "psql", "-X", "-v", "ON_ERROR_STOP=1"]
         command(psql + ["-c", "CREATE EXTENSION pg_charabia;"], "create-extension")
         if needs_bm25:
@@ -254,26 +259,37 @@ def main():
             upstream_version = command(psql + ["-Atq", "-c", "SELECT extversion FROM pg_extension WHERE extname='pg_textsearch';"], "pg-textsearch-version", True).strip()
             if upstream_version != result["pg_textsearch"]["version"]:
                 raise RuntimeError(f"Unexpected loaded pg_textsearch version: {upstream_version}")
-        analysis_info = json.loads(command(psql + ["-Atq", "-c", "SELECT charabia.analysis_info('public.charabia');"], "analysis-info", True))
+        analysis_info = json.loads(command(psql + ["-Atq", "-c", "SELECT charabia.analysis_info();"], "analysis-info", True))
         expected_info = {
             "extension": tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"],
             "charabia": resource_manifest["charabia"], "pgrx": "0.19.3",
             "target": target_triple,
             "cargo_lock_sha256": lock_hash, "resource_manifest_sha256": result["resources_sha256"],
-            "test_hooks": args.test_hooks, "resources": resource_manifest,
+            "resources": resource_manifest,
         }
-        mismatches = {key: {"expected": value, "actual": analysis_info.get(key)} for key, value in expected_info.items() if analysis_info.get(key) != value}
-        if mismatches:
-            (evidence / "analysis-info-mismatches.json").write_text(json.dumps(mismatches, indent=2) + "\n")
-            raise RuntimeError("Loaded analysis_info static identity does not match build inputs; see actual and expected evidence")
-        for key, value in {"route_count": 71, "token_type_count": 72, "languages": 70, "stopword_languages": 52, "stemmer_languages": 19}.items():
-            if analysis_info.get(key) != value:
-                raise RuntimeError(f"Unexpected analysis_info {key}: {analysis_info.get(key)!r}, expected {value}")
-        for key in ("settings", "settings_fingerprint", "analysis_fingerprint", "configuration_oid", "configuration_name"):
-            if key not in analysis_info:
-                raise RuntimeError(f"analysis_info omitted {key}")
+        try:
+            require_static_info(analysis_info, expected_info)
+        except ValueError as exc:
+            (evidence / "analysis-info-mismatches.json").write_text(json.dumps({"expected": expected_info, "actual": analysis_info, "error": str(exc)}, indent=2) + "\n")
+            raise RuntimeError("Loaded analysis_info static identity does not match build inputs; see actual and expected evidence") from exc
         result["analysis_info"] = analysis_info
         result["analysis_info_verified"] = True
+        default_query = """SELECT json_build_object(
+            'types',(SELECT json_agg(json_build_object('id',tokid,'alias',alias) ORDER BY tokid) FROM ts_token_type('charabia.parser')),
+            'dictionaries',(SELECT json_agg(d.dictname ORDER BY d.dictname) FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname='charabia'),
+            'mappings',(SELECT json_agg(json_build_object('type',m.maptokentype,'order',m.mapseqno,'dictionary',d.dictname) ORDER BY m.maptokentype,m.mapseqno) FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict WHERE m.mapcfg='public.charabia'::regconfig));"""
+        defaults = json.loads(command(psql + ["-Atq", "-c", default_query], "default-objects", True))
+        language_names = {item["language"] for item in analysis_info["languages"]}
+        types = defaults.get("types", [])
+        if len(types) != 73 or [row["id"] for row in types] != list(range(1, 74)) or {row["alias"] for row in types[:71]} != language_names or types[71:] != [{"id": 72, "alias": "blank"}, {"id": 73, "alias": "display_only"}]:
+            raise RuntimeError("Installed Parser types differ from the 71 language + blank + display_only contract")
+        if len(defaults.get("dictionaries", [])) != 71 or set(defaults["dictionaries"]) != language_names:
+            raise RuntimeError("Expected exactly the 71 default language dictionaries")
+        mappings = defaults.get("mappings", [])
+        if len(mappings) != 71 or any(row != {"type": token["id"], "order": 1, "dictionary": token["alias"]} for row, token in zip(mappings, types[:71])):
+            raise RuntimeError("Default mappings must use each language dictionary once, with blank/display_only unmapped")
+        result["default_objects_verified"] = True
+        result["default_objects"] = defaults
         abi_query = """SELECT json_agg(json_build_object('name',p.proname,
             'arguments',oidvectortypes(p.proargtypes),'returns',format_type(p.prorettype,NULL),
             'strict',p.proisstrict) ORDER BY p.proname)
@@ -295,6 +311,19 @@ def main():
         if actual_abi != expected_abi:
             raise RuntimeError(f"The installed FTS callback ABI differs from the design: {actual_abi}")
         result["fts_callback_abi_verified"] = True
+        public_query = """SELECT json_agg(json_build_object('name',p.proname,
+            'arguments',oidvectortypes(p.proargtypes),'returns',format_type(p.prorettype,NULL),
+            'security_definer',p.prosecdef,'volatility',p.provolatile,'parallel',p.proparallel,
+            'columns',(SELECT json_agg(json_build_object('name',p.proargnames[i],'type',format_type(p.proallargtypes[i],NULL)) ORDER BY i) FROM generate_subscripts(p.proallargtypes,1) i WHERE p.proargmodes[i]='t')) ORDER BY p.proname)
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname='charabia' AND p.proname IN ('analysis_info','analyze','query_any','create_config','alter_config','drop_config');"""
+        public_abi = json.loads(command(psql + ["-Atq", "-c", public_query], "public-api-abi", True))
+        analyze_columns = [{"name": name, "type": "bigint" if name in ("byte_start", "byte_end", "char_start", "char_end") else "text"} for name in ("raw", "kind", "script", "charabia_language", "language", "language_source", "byte_start", "byte_end", "char_start", "char_end", "token_type")]
+        expected_public = [{"name": name, "arguments": arguments, "returns": returns, "security_definer": False, "volatility": "s", "parallel": "r", "columns": columns} for name, arguments, returns, columns in (
+            ("analysis_info", "", "jsonb", None), ("analyze", "text", "record", analyze_columns), ("query_any", "text, regconfig", "tsquery", None))]
+        if public_abi != expected_public:
+            raise RuntimeError(f"Installed public diagnostic ABI differs from the 0.3.0 contract: {public_abi}")
+        result["public_api_abi_verified"] = True
         command(psql + ["-c", "SELECT version(); SELECT extname, extversion FROM pg_extension ORDER BY 1; SHOW dynamic_library_path; SHOW extension_control_path;"], "database-identity")
         # A persistent backend loads this exact staged library; its mappings prove identity.
         with (evidence / "loaded-backend.stderr").open("w") as error_log:
@@ -331,10 +360,19 @@ def main():
                 continue
             sql = ROOT / "tests/sql" / f"{suite}.sql"
             python = ROOT / "tests" / f"{suite}.py"
+            if suite == "recovery":
+                recovery_attempted = True
             if sql.is_file():
                 command(psql + ["-f", sql], f"suite-{suite}-sql")
             if python.is_file():
                 command([sys.executable, python], f"suite-{suite}-python")
+            if suite == "recovery":
+                recovery_path = evidence / "recovery/results.json"
+                if not recovery_path.is_file():
+                    raise RuntimeError("The recovery suite omitted its child lifecycle report")
+                recovery = json.loads(recovery_path.read_text())
+                require_recovery_report(recovery, result["loaded_library_sha256"])
+                result["recovery"] = recovery
             result["suite_results"][suite] = {"status": "passed", "commands": [item["label"] for item in result["commands"] if item["label"].startswith(f"suite-{suite}-")]}
             checkpoint()
         if args.platform == "linux-amd64" and selected == all_suites:
@@ -373,7 +411,15 @@ def main():
                     shutil.copy2(test_dir / "server.log", evidence / "server.log")
             except BaseException as exc:
                 cleanup["error"] = str(exc)
-        if cleanup["marker_matches"] and cleanup["cluster_stopped"]:
+        if recovery_attempted:
+            try:
+                child = json.loads((evidence / "recovery/results.json").read_text())
+                result["recovery"] = child
+                cleanup["recovery_children_cleaned"] = all(child.get("cleanup", {}).get(key) is True for key in ("marker_matches", "clusters_stopped", "directory_removed"))
+            except (OSError, ValueError, TypeError) as exc:
+                cleanup["recovery_children_cleaned"] = False
+                cleanup["recovery_error"] = str(exc)
+        if cleanup["marker_matches"] and cleanup["cluster_stopped"] and cleanup.get("recovery_children_cleaned", True):
             try:
                 shutil.rmtree(test_dir)
                 cleanup["directory_removed"] = not test_dir.exists()

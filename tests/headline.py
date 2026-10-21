@@ -39,15 +39,18 @@ def fragment_positions(session):
     config = schema + ".positions"
     session.value("CREATE SCHEMA " + schema)
     try:
-        # The hole must not depend on statistical language selection. All routes
-        # explicitly stop the same raw word; surface alpha/beta are unchanged.
+        # A fixed Dictionary Language makes the Stop hole independent of the
+        # Parser's statistical language choice; ordinary native mappings suffice.
+        session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".words ("
+                      "TEMPLATE=charabia.template,Language='eng',Discard=true,"
+                      "Stem=true,Normalize=true,Filter=false)")
+        session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
         routes = json.loads(session.value(
             "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
-            "WHERE alias <> 'display_only'"))
-        settings = {"builtin_stopwords": False,
-                    "stopwords_add": {route: ["the"] for route in routes}}
-        session.value("SELECT charabia.create_config(" + literal(config) + "," +
-                      literal(json.dumps(settings)) + "::jsonb)")
+            "WHERE alias NOT IN ('blank','display_only')"))
+        for route in routes:
+            session.value("ALTER TEXT SEARCH CONFIGURATION " + config +
+                          " ADD MAPPING FOR " + route + " WITH " + schema + ".words")
         raw = "one two three four five six seven eight nine ten alpha the beta tail final"
         options = "MinWords=2,MaxWords=3,MaxFragments=1"
         # Independent position contract: one Stop consumes exactly one position.
@@ -94,6 +97,66 @@ def fragment_positions(session):
             primary.add_note("headline fixture cleanup also failed: " + repr(cleanup_error))
 
 
+def external_dictionary_cases(session):
+    """Match PG-produced terms while rendering original bytes, without our dictionary."""
+    schema = "pgcb_headline_external_" + str(os.getpid())
+    session.value("CREATE SCHEMA " + schema)
+    try:
+        session.value("CREATE EXTENSION IF NOT EXISTS unaccent")
+        session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".synonyms("
+                      "TEMPLATE=pg_catalog.synonym,SYNONYMS='synonym_sample')")
+        session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".filter("
+                      "TEMPLATE=charabia.template,Language='eng',Discard=false,"
+                      "Stem=false,Normalize=true,Filter=true)")
+        session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".fra_plain("
+                      "TEMPLATE=charabia.template,Language='fra',Discard=false,"
+                      "Stem=false,Normalize=false,Filter=false)")
+        aliases = json.loads(session.value(
+            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
+            "WHERE alias NOT IN ('blank','display_only')"))
+        for name, chain in (("synonym", schema + ".synonyms,pg_catalog.simple"),
+                            ("filter_synonym", schema + ".filter," + schema + ".synonyms,pg_catalog.simple"),
+                            ("simple", "pg_catalog.simple"),
+                            ("unaccent", "public.unaccent," + schema + ".fra_plain")):
+            config = schema + "." + name
+            session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
+            for alias in aliases:
+                session.value("ALTER TEXT SEARCH CONFIGURATION " + config +
+                              " ADD MAPPING FOR " + alias + " WITH " + chain)
+        for name in ("synonym", "filter_synonym"):
+            config = schema + "." + name
+            check(session.value("SELECT to_tsvector(" + literal(config) + ",'PostgreSQL')::text") == "'pgsql':1",
+                  "PG synonym fixture changes the term before headline", {"config": config})
+            actual = headline(session, "PostgreSQL & <tag>", "plainto_tsquery(" +
+                              literal(config) + ",'PostgreSQL')", config=config)
+            check(actual == "<b>PostgreSQL</b> &amp; &lt;tag&gt;",
+                  "external synonym and optional filter highlight original spelling", actual)
+        config = schema + ".synonym"
+        check(headline(session, "indices", "'index:*'::tsquery", config=config) == "<b>indices</b>",
+              "external synonym prefix result matches the whole original span", "synonym_sample indices -> index*")
+        config = schema + ".unaccent"
+        check(headline(session, "HÔTEL & hôtel", "plainto_tsquery(" + literal(config) + ",'hotel')", config=config) ==
+              "<b>HÔTEL</b> &amp; <b>hôtel</b>",
+              "external filtering dictionary supplies actual terms to core matching", "unaccent.rules HÔTEL -> HOTEL")
+        config = schema + ".simple"
+        raw = "x" * 2047 + " CAFÉ"
+        actual = headline(session, raw, "plainto_tsquery(" + literal(config) + ",'CAFÉ')", config=config)
+        check(actual == "x" * 2047 + " <b>CAFÉ</b>",
+              "long display preserves source and external simple uses its own locale-correct query", actual)
+        check(session.value("SELECT charabia.query_any('PostgreSQL'," + literal(schema + ".synonym") + ")::text") == "'pgsql'",
+              "query_any accepts an ordinary external-dictionary configuration", schema + ".synonym")
+    finally:
+        primary = sys.exception()
+        try:
+            session.value("DROP SCHEMA " + schema + " CASCADE")
+        except BaseException as cleanup_error:
+            report.setdefault("cleanup_errors", []).append(repr(cleanup_error))
+            checkpoint()
+            if primary is None:
+                raise
+            primary.add_note("external headline cleanup also failed: " + repr(cleanup_error))
+
+
 try:
     with Session() as session:
         # No oracle is obtained from analyze()/lexize(): raw equality is a separate
@@ -127,6 +190,7 @@ try:
         check(fragments.count("<b>needle</b>") == 2 and "[cut]" in fragments and len(fragments) < len(text),
               "selector returns both separated covers in source order", fragments)
         fragment_positions(session)
+        external_dictionary_cases(session)
 
         # PG's deserialize_deflist owns CSV/quoting; the adapter receives parsed values.
         actual = headline(session, "CAFÉ", options='HighlightAll=YES,StartSel="[a,b]",StopSel="[/a,b]"')

@@ -1,8 +1,7 @@
-use crate::{analysis, pg_ffi, routes::Route};
+use crate::{analysis, pg_ffi};
 use pgrx::{Internal, pg_extern};
 
 pub(crate) struct DictionaryState {
-    pub(crate) route: Route,
     pub(crate) options: analysis::Options,
     #[cfg(feature = "test-hooks")]
     generation: u64,
@@ -24,16 +23,8 @@ fn fst_bytes(options: &analysis::Options) -> usize {
 fn dictionary_init(options: Internal) -> Internal {
     // SAFETY: Template INIT receives a live PG List<DefElem> in dictCtx or the
     // DDL validation context; owned_state attaches cleanup to that context.
-    let parameters = unsafe { pg_ffi::dictionary_options(options) };
-    let route = parameters.route;
     pgrx::check_for_interrupts!();
-    let options = pg_ffi::checked(analysis::Options::new(
-        route,
-        parameters.stemming,
-        parameters.builtin_stopwords,
-        &parameters.add,
-        &parameters.keep,
-    ));
+    let options = unsafe { pg_ffi::dictionary_options(options) };
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     let generation = crate::test_hooks::dictionary_created(fst_bytes(&options));
@@ -41,7 +32,6 @@ fn dictionary_init(options: Internal) -> Internal {
     // exact type only while PG keeps the owning dictCtx alive.
     let state = unsafe {
         pg_ffi::owned_state(DictionaryState {
-            route,
             options,
             #[cfg(feature = "test-hooks")]
             generation,
@@ -74,7 +64,7 @@ fn dictionary_lexize(
         // SAFETY: The paired INIT created exactly DictionaryState in a live
         // context. Only pure Rust analysis runs while this borrow is live.
         let state = unsafe { pg_ffi::state::<DictionaryState>(&state) };
-        analysis::normalize(text, state.route, &state.options)
+        analysis::normalize(text, state.options.language(), &state.options)
     };
     pgrx::check_for_interrupts!();
     pg_ffi::lexemes(pg_ffi::checked(outcome))

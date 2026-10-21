@@ -54,25 +54,13 @@ try:
         record["status"] = "passed"
         checkpoint()
     first_info = [item for item in json_lines(results["examples"][0]["output"]) if "extension" in item]
-    check(len(first_info) == 1 and first_info[0]["extension"] == "0.2.0" and first_info[0]["test_hooks"] is (os.environ.get("PGCB_TEST_HOOKS") == "1"),
-          "README loads the extension matching the selected build feature",first_info)
-    info = first_info[0]
-    check(info["route_count"] == 71 and info["token_type_count"] == 72 and info["settings"] == {"stemming":True,"builtin_stopwords":True,"stopwords_add":{},"stopwords_keep":{}},
-          "public default has the general routing and enabled defaults",{key:info[key] for key in ("route_count","token_type_count","settings")})
-    managed = json_lines(results["examples"][1]["output"])
-    original = [item for item in managed if item.get("configuration_name") == '"app"."search"']
-    # quote_qualified_identifier may omit quotes when identifiers are ordinary.
-    if not original:
-        original = [item for item in managed if item.get("configuration_name") == "app.search"]
-    check(len(original) == 2,"README inspected the custom instance before and after alter",[item.get("configuration_name") for item in managed])
-    check(original[0]["settings"] == {"stemming":False,"builtin_stopwords":True,"stopwords_add":{},"stopwords_keep":{"eng":["will"]}},
-          "create_config applies requested independent flags",original[0]["settings"])
-    replacement = {"stemming":True,"builtin_stopwords":False,"stopwords_add":{},"stopwords_keep":{}}
-    check(original[1]["settings"] == replacement,"alter_config is a full replacement",original[1]["settings"])
-    altered = [item for item in managed if item.get("maintenance_required") is True]
-    check(len(altered) == 1 and altered[0]["settings"] == replacement,"alter returns the new settings and maintenance requirement",altered)
-    check(run("SELECT count(*) FROM pg_ts_config WHERE cfgnamespace='app'::regnamespace AND cfgname='search'",database) == "0" and run("SELECT count(*) FROM pg_ts_dict WHERE dictnamespace='app'::regnamespace",database) == "0",
-          "drop_config removed the independent configuration and its dictionaries",{"schema":"app"})
+    check(len(first_info)==1 and first_info[0]["extension"]=="0.3.0" and first_info[0]["language_count"]==71,
+          "README loads this native interface release",first_info)
+    options=run("SELECT dictinitoption FROM pg_ts_dict WHERE oid='app.search_eng'::regdictionary",database)
+    check("stem = true" in options.replace("'","") and "discard = true" in options.replace("'",""),
+          "native ALTER keeps other stored options",options)
+    check(run("SELECT mapdict=(SELECT mapdict FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig AND maptokentype=9) FROM pg_ts_config_map WHERE mapcfg='app.search'::regconfig AND maptokentype=9",database)=="t",
+          "COPY shares unchanged French dictionary",options)
     ids = run("SELECT id FROM documents WHERE to_tsvector('public.charabia',body) @@ plainto_tsquery('public.charabia','POSTGRESQL') ORDER BY id",database)
     check(ids == "1","native case normalization finds the independent Chinese document",ids)
     stem_ids = run("SELECT id FROM documents WHERE to_tsvector('public.charabia',body) @@ plainto_tsquery('public.charabia','run') ORDER BY id",database)

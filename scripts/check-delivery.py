@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 
-from report_contract import FORMAT, VERIFIED, digest, isolated_pg_environment, read_quality, require_release_report, verified_status, verify_checksums
+from report_contract import ARCHIVE_SUITES, FORMAT, RELEASE_VERSION, STATIC_INFO_FIELDS, VERIFIED, digest, isolated_pg_environment, read_quality, require_recovery_report, require_release_report, require_static_info, verified_status, verify_checksums
 
 
 def unpack_archive(archive, destination):
@@ -54,12 +54,13 @@ def main():
     marker = temporary / ".pg-charabia-owner"
     marker.write_text(run_id)
     result = {"format": FORMAT, "run_id": run_id, "platform": "linux-amd64", "mode": "delivery-archive",
-              "archive_sha256": digest(args.archive), "temporary_directory": str(temporary), "commands": [], "status": "running"}
+              "archive_sha256": digest(args.archive), "temporary_directory": str(temporary), "commands": [], "suites": list(ARCHIVE_SUITES), "suite_results": {}, "status": "running"}
     env = dict(isolated_pg_environment(os.environ), PYTHONDONTWRITEBYTECODE="1")
     result["inherited_libpq_environment_keys_removed"] = sorted(set(os.environ) - set(env))
     pg_config = Path(env.get("PG_CONFIG", "/usr/lib/postgresql/18/bin/pg_config"))
     pg_bin = None
     started = False
+    recovery_attempted = False
     failure = None
 
     def checkpoint():
@@ -98,7 +99,7 @@ def main():
         manifest = json.loads((delivery / "delivery-manifest.json").read_text())
         original = json.loads((delivery / "verification/run.json").read_text())
         require_release_report(original)
-        if manifest.get("verification_format") != FORMAT or manifest.get("verification_status") != original["status"] or manifest.get("target") != "x86_64-unknown-linux-gnu" or manifest.get("test_hooks") is not False or manifest.get("source_dirty") is not False:
+        if manifest.get("verification_format") != FORMAT or manifest.get("verification_status") != original["status"] or manifest.get("target") != "x86_64-unknown-linux-gnu" or manifest.get("test_hooks") is not False or manifest.get("source_dirty") is not False or manifest.get("version") != RELEASE_VERSION:
             raise RuntimeError("Delivery manifest is not a verified Linux AMD64 release")
         if manifest.get("source_commit") != original.get("git_commit") or manifest.get("library_sha256") != original.get("loaded_library_sha256"):
             raise RuntimeError("Delivery manifest and original loaded library identity disagree")
@@ -128,7 +129,8 @@ def main():
             config.write("\n" + "\n".join(["listen_addresses = ''", f"unix_socket_directories = '{temporary}/socket'", "port = 55432", f"extension_control_path = '{temporary}/stage:$system'", f"dynamic_library_path = '{stage}:$libdir'", "shared_preload_libraries = 'pg_textsearch'"]) + "\n")
         started = True
         command([pg_bin / "pg_ctl", "-D", temporary / "data", "-l", temporary / "server.log", "-w", "-t", "60", "start"], "pg-start")
-        env.update(PGHOST=str(temporary / "socket"), PGPORT="55432", PGDATABASE="postgres", PGUSER=command(["id", "-un"], "database-user", True).strip(), PGCB_RUN_DIR=str(evidence), PGCB_TEST_HOOKS="0", PGCB_TEMP_DIR=str(temporary), PGCB_PLATFORM="linux-amd64", PG_CONFIG=str(pg_config))
+        env.update(PGHOST=str(temporary / "socket"), PGPORT="55432", PGDATABASE="postgres", PGUSER=command(["id", "-un"], "database-user", True).strip(), PGCB_RUN_DIR=str(evidence), PGCB_TEST_HOOKS="0", PGCB_TEMP_DIR=str(temporary), PGCB_PLATFORM="linux-amd64", PG_CONFIG=str(pg_config),
+                   PGCB_EXTENSION_STAGE=str(stage), PGCB_LIBRARY_PATH=str(library), PGCB_LIBRARY_SHA256=digest(library), PGCB_PG_BIN=str(pg_bin))
         psql = [pg_bin / "psql", "-X", "-v", "ON_ERROR_STOP=1"]
         command(psql + ["-c", "CREATE EXTENSION pg_charabia; CREATE EXTENSION pg_textsearch;"], "create-extensions")
         upstream_library = Path(command([pg_config, "--pkglibdir"], "pg-library-directory", True).strip()) / "pg_textsearch.so"
@@ -137,8 +139,9 @@ def main():
         upstream_version = command(psql + ["-Atq", "-c", "SELECT extversion FROM pg_extension WHERE extname='pg_textsearch';"], "pg-textsearch-version", True).strip()
         if upstream_version != original["pg_textsearch"]["version"]:
             raise RuntimeError("pg_textsearch extension version differs from the original verified runtime")
-        info = json.loads(command(psql + ["-Atq", "-c", "SELECT charabia.analysis_info('public.charabia');"], "analysis-info", True))
-        for field in ("extension", "charabia", "pgrx", "target", "cargo_lock_sha256", "resource_manifest_sha256", "test_hooks", "resources"):
+        info = json.loads(command(psql + ["-Atq", "-c", "SELECT charabia.analysis_info();"], "analysis-info", True))
+        require_static_info(info, original["analysis_info"])
+        for field in STATIC_INFO_FIELDS:
             if info.get(field) != original["analysis_info"].get(field):
                 raise RuntimeError(f"Extracted library analysis_info differs for {field}")
         with (evidence / "loaded-backend.stderr").open("w") as errors:
@@ -169,13 +172,20 @@ def main():
         if not examples.is_file():
             raise RuntimeError("Delivery archive lacks its executable documentation examples")
         command([sys.executable, examples], "documentation-examples")
-        for suite in ("smoke", "headline"):
+        for suite in ARCHIVE_SUITES:
             paths = [(delivery / "tests/sql" / f"{suite}.sql", psql + ["-f"]), (delivery / "tests" / f"{suite}.py", [sys.executable])]
             existing = [(path, argv) for path, argv in paths if path.is_file()]
             if not existing:
                 raise RuntimeError(f"Delivery archive lacks {suite} verification")
+            if suite == "recovery":
+                recovery_attempted = True
             for path, argv in existing:
                 command(argv + [path], f"suite-{suite}-{path.suffix[1:]}")
+            if suite == "recovery":
+                recovery = json.loads((evidence / "recovery/results.json").read_text())
+                require_recovery_report(recovery, result["loaded_library_sha256"])
+                result["recovery"] = recovery
+            result["suite_results"][suite] = {"status": "passed", "commands": [item["label"] for item in result["commands"] if item["label"].startswith(f"suite-{suite}-")]}
         result["archive_test_quality"] = read_quality(evidence / "quality-results.json")
         if result["archive_test_quality"]["regressions"]:
             raise RuntimeError("Extracted delivery examples introduced a quality regression")
@@ -201,7 +211,15 @@ def main():
                     shutil.copy2(temporary / "server.log", evidence / "server.log")
             except BaseException as exc:
                 cleanup["error"] = str(exc)
-        if cleanup["marker_matches"] and cleanup["cluster_stopped"]:
+        if recovery_attempted:
+            try:
+                child = json.loads((evidence / "recovery/results.json").read_text())
+                result["recovery"] = child
+                cleanup["recovery_children_cleaned"] = all(child.get("cleanup", {}).get(key) is True for key in ("marker_matches", "clusters_stopped", "directory_removed"))
+            except (OSError, ValueError, TypeError) as exc:
+                cleanup["recovery_children_cleaned"] = False
+                cleanup["recovery_error"] = str(exc)
+        if cleanup["marker_matches"] and cleanup["cluster_stopped"] and cleanup.get("recovery_children_cleaned", True):
             try:
                 shutil.rmtree(temporary)
                 cleanup["directory_removed"] = not temporary.exists()

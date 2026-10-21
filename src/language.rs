@@ -2,7 +2,7 @@
 use charabia::{Language, Script};
 
 use crate::analysis::{AnalysisError, ErrorKind, Span};
-use crate::routes::Route;
+use crate::routes::LanguageId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageSource {
@@ -46,8 +46,8 @@ fn singleton(script: Script) -> Option<Language> {
     })
 }
 
-fn route_for(script: Script, language: Option<Language>) -> Result<Route, AnalysisError> {
-    let route = Route::from_language(language).ok_or_else(|| {
+fn route_for(script: Script, language: Option<Language>) -> Result<LanguageId, AnalysisError> {
+    let route = LanguageId::from_language(language).ok_or_else(|| {
         AnalysisError::new(
             ErrorKind::Internal,
             "language is outside the fixed route table",
@@ -129,7 +129,7 @@ mod tests {
     fn singleton_mapping_is_exactly_the_model_unique_scripts() {
         let mut counts = std::collections::HashMap::new();
         for language in whatlang::Lang::all() {
-            let route = Route::from_language(Some(Language::from(*language))).unwrap();
+            let route = LanguageId::from_language(Some(Language::from(*language))).unwrap();
             *counts.entry(route.script()).or_insert(0) += 1;
         }
         // Counts come from the locked 70-language model, not detector quality.
@@ -175,7 +175,7 @@ mod tests {
             route_for(Script::Latin, None).unwrap_err().kind,
             ErrorKind::Internal
         );
-        assert_eq!(route_for(Script::Other, None).unwrap(), Route::UND);
-        assert!(Route::from_language(Some(Language::Zho)).is_none());
+        assert_eq!(route_for(Script::Other, None).unwrap(), LanguageId::UND);
+        assert!(LanguageId::from_language(Some(Language::Zho)).is_none());
     }
 }

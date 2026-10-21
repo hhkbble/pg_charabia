@@ -335,9 +335,9 @@
       "bytes": 2359
     }
   ],
-  "pipeline_revision": "general-1",
+  "pipeline_revision": "native-dictionary-0.3.0",
   "language_policy": "charabia-reuse-script17-missing4",
-  "lexeme_policy": "surface-and-single-stem",
+  "lexeme_policy": "terminal-surface-and-single-stem-or-single-filter",
   "historical_disabled_data": [
     {
       "crate": "charabia",

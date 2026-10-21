@@ -11,7 +11,7 @@ import statistics
 import subprocess
 import time
 
-from support import EVIDENCE, Session, literal, run, save
+from support import EVIDENCE, Session, literal, run, save, native_config_sql
 
 if os.environ["PGCB_PLATFORM"] != "linux-amd64":
     raise AssertionError("The delivery benchmark requires Linux AMD64")
@@ -33,7 +33,7 @@ results = {"status": "running", "environment": {
     "corpus": "six fixed representative paragraphs, repeated 1..3 times and suffixed with unique IDs; ordinary text below every PG cap",
     "domain": "literal PostgreSQL is in every document; only the frozen English paragraph contains running, with upstream English run stem",
     "ranking": "actual target BM25 scores/ranks are observations, not float goldens or independent relevance oracles",
-    "counterfactual": "last final lexeme per retained Word; logical TF/dl/candidates only, not a built stem-only index or measured stem-only CPU",
+    "counterfactual": "terminal-only ts_debug lexemes (not filtering-chain simulation); last final lexeme per retained Word; logical TF/dl/candidates only, not a built stem-only index or measured stem-only CPU",
 }}
 sequence = 0
 
@@ -183,8 +183,8 @@ def capture_plan(session, name, sql, index):
 def logical_ablation(session, table, config):
     rows = json.loads(statement(session, f"""
 SELECT jsonb_agg(jsonb_build_object('id',d.id,'family',d.family,'body',d.body,
- 'analysis',(SELECT jsonb_agg(jsonb_build_object('kind',kind,'terms',terms,'raw',raw,'language',language)ORDER BY byte_start)
-   FROM charabia.analyze(d.body,{literal(config)})),
+ 'analysis',(SELECT jsonb_agg(jsonb_build_object('kind',CASE WHEN lexemes IS NULL THEN 'ignore' WHEN cardinality(lexemes)=0 THEN 'stop' ELSE 'word' END,'terms',coalesce(lexemes,ARRAY[]::text[]),'raw',token) ORDER BY ord)
+   FROM ts_debug({literal(config)},d.body) WITH ORDINALITY x(alias,description,token,dictionaries,dictionary,lexemes,ord)),
  'native_tf',(SELECT jsonb_object_agg(lexeme,cardinality(positions))FROM unnest(to_tsvector({literal(config)},d.body))))ORDER BY d.id)
 FROM {table} d WHERE d.id<=60
 """, "logical-ablation-raw"))
@@ -212,7 +212,7 @@ FROM {table} d WHERE d.id<=60
     queries = {}
     for query in ("run", "running", "PostgreSQL"):
         tokens = json.loads(statement(session,
-            f"SELECT coalesce(jsonb_agg(jsonb_build_object('kind',kind,'terms',terms)ORDER BY byte_start),'[]')FROM charabia.analyze({literal(query)},{literal(config)})",
+            f"SELECT coalesce(jsonb_agg(jsonb_build_object('terms',coalesce(lexemes,ARRAY[]::text[]))ORDER BY ord),'[]')FROM ts_debug({literal(config)},{literal(query)}) WITH ORDINALITY x(alias,description,token,dictionaries,dictionary,lexemes,ord)",
             "logical-query-" + query.lower()))
         dual_query = {term for token in tokens for term in token["terms"]}
         single_query = {token["terms"][-1] for token in tokens if token["terms"]}
@@ -256,7 +256,7 @@ def main():
         setup = run(f"CREATE SCHEMA {SCHEMA}", check=False)
         check(setup.returncode == 0, "cannot create exclusively owned benchmark schema", setup.stderr)
         created_schema = True
-        run(f"SELECT charabia.create_config('{SCHEMA}.no_stem','{{\"stemming\":false}}')")
+        run(native_config_sql(f'{SCHEMA}.no_stem',stem=False,discard=True))
         run(f"CREATE TABLE {SCHEMA}.source(family_id integer PRIMARY KEY,family text,body text);INSERT INTO {SCHEMA}.source VALUES {values}")
         for label, config, stemming in (("default", "public.charabia", True), ("no_stem", f"{SCHEMA}.no_stem", False)):
             table = f"{SCHEMA}.docs_{label}"
@@ -265,9 +265,8 @@ def main():
             with Session() as session:
                 session.value("SET statement_timeout='180s';SET client_min_messages=warning")
                 verify_library(session)
-                info = json.loads(statement(session, f"SELECT charabia.analysis_info({literal(config)})", label + "-info"))
-                check(info["settings"] == {"stemming": stemming, "builtin_stopwords": True, "stopwords_add": {}, "stopwords_keep": {}},
-                      "true comparison differs in more than approved stemming flag", info["settings"])
+                info = json.loads(statement(session, "SELECT charabia.analysis_info()", label + "-info"))
+                check(info["extension"] == "0.3.0", "benchmark uses a different release", info)
                 memory(session, label + "-loaded-cold", config)
                 measure(session, label + "-insert-bulk", f"INSERT INTO {table} SELECT g,s.family,repeat(s.body,1+g%3)||' '||g "
                         f"FROM generate_series(1,1000)g JOIN {SCHEMA}.source s ON s.family_id=g%6")
@@ -275,7 +274,7 @@ def main():
                     f"SELECT jsonb_build_object('rows',count(*),'bytes',sum(octet_length(body)),'max_bytes',max(octet_length(body)))FROM {table}", label + "-corpus"))
                 measure(session, label + "-first-vector", f"SELECT length(to_tsvector({literal(config)},body))FROM {table} WHERE id=1")
                 memory(session, label + "-first-document", config)
-                measure(session, label + "-analyze-corpus", f"SELECT sum((SELECT count(*)FROM charabia.analyze(d.body,{literal(config)})))FROM {table} d", 3)
+                measure(session, label + "-analyze-corpus", f"SELECT sum((SELECT count(*)FROM charabia.analyze(d.body)))FROM {table} d", 3)
                 measure(session, label + "-vectorize-corpus", f"SELECT sum(length(to_tsvector({literal(config)},body)))FROM {table}", 3)
                 if label == "default":
                     logical_ablation(session, table, config)
@@ -345,7 +344,7 @@ def main():
                     measure(session, label + "-headline-render-" + suffix,
                         f"SELECT sum(octet_length(ts_headline({literal(config)},body,'postgresql'::tsquery,{literal(options)})))FROM {table}", 3)
                 coverage = json.loads(statement(session,
-                    f"SELECT jsonb_agg(DISTINCT a.language ORDER BY a.language)FROM {table} d CROSS JOIN LATERAL charabia.analyze(d.body,{literal(config)})a",
+                    f"SELECT jsonb_agg(DISTINCT a.language ORDER BY a.language)FROM {table} d CROSS JOIN LATERAL charabia.analyze(d.body)a",
                     label + "-touched-routes"))
                 results.setdefault("touched_routes", {})[label] = {"routes":coverage,
                     "meaning":"observed analysis routes; not an exact release PG live-state counter"}

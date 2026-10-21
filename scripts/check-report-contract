@@ -12,7 +12,7 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import FORMAT, REQUIRED_QUALITY_CASES, SUITES, digest, frozen_quality_cases, isolated_pg_environment, quality_case, require_release_identity, require_release_report, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import ARCHIVE_SUITES, FORMAT, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, SUITES, digest, frozen_quality_cases, isolated_pg_environment, quality_case, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -79,9 +79,22 @@ class ContractTests(unittest.TestCase):
         for selection in (["all,unit"], ["build,unit"], ["unit,unit"], [""]):
             with self.assertRaises(ValueError):
                 select_suites(selection, "linux-amd64", ROOT)
-        for selection in ("smoke", "bm25", "stress", "benchmark", "all"):
+        for selection in ("smoke", "bm25", "stress", "recovery", "benchmark", "all"):
             with self.assertRaisesRegex(ValueError, "Linux verifier"):
                 select_suites([selection], "macos-arm64", ROOT)
+        with tempfile.TemporaryDirectory() as directory:
+            tests = Path(directory) / "tests"
+            tests.mkdir()
+            for suite in SUITES:
+                if suite != "unit":
+                    (tests / (suite + ".py")).write_text("# Selection fixture only\n")
+            self.assertEqual(select_suites(None, "linux-amd64", directory), list(SUITES))
+            self.assertEqual(select_suites(None, "macos-arm64", directory), list(MAC_DEFAULT))
+            self.assertEqual(ARCHIVE_SUITES, ("smoke", "chain", "headline", "config", "recovery"))
+            for suite in ("chain", "recovery"):
+                (tests / (suite + ".py")).unlink()
+                with self.assertRaisesRegex(ValueError, "not implemented"):
+                    select_suites([suite], "linux-amd64", directory)
 
     def test_exact_quality_failures_are_separate(self):
         frozen = frozen_quality_cases()
@@ -115,18 +128,58 @@ class ContractTests(unittest.TestCase):
             require_known_quality_cases(validate_quality({"format": FORMAT, "cases": []}))
 
     def report(self):
-        labels = ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "analysis-info", "documentation-examples", "runner-contract")
+        labels = ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract")
         return {"format": FORMAT, "status": "verified-with-known-quality-failures", "platform": "linux-amd64", "build_profile": "release", "test_hooks": False,
                 "suites": list(SUITES), "suite_results": {suite: {"status": "passed"} for suite in SUITES},
                 "cleanup": {key: True for key in ("marker_matches", "cluster_stopped", "directory_removed")},
                 "quality": {"format": FORMAT, "cases": [quality_case(case_id, **values, known_signature=values) for case_id, values in frozen_quality_cases().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
+                "analysis_info": self.info(), "public_api_abi_verified": True, "default_objects_verified": True,
+                "loaded_library_sha256": "f" * 64,
+                "recovery": {"format": FORMAT, "status": "passed", "loaded_library_sha256": "f" * 64, "cleanup": {key: True for key in ("marker_matches", "clusters_stopped", "directory_removed")}},
                 "pg_textsearch": {"loaded_backend_verified": True},
                 "commands": [{"label": label, "exit_code": 0} for label in labels] + [{"label": f"suite-{suite}-python", "exit_code": 0} for suite in SUITES if suite != "unit"]}
+
+    def info(self):
+        languages = []
+        for index in range(71):
+            alias = "und" if index == 70 else "a" + chr(97 + index // 26) + chr(97 + index % 26)
+            languages.append({"language": alias, "script": "Latin", "has_stopwords": index < 52, "stemmer": "English" if index < 19 else None,
+                              "defaults": {"discard": index < 52, "stem": index < 19, "normalize": True, "filter": False}})
+        return {"extension": RELEASE_VERSION, "pgrx": "0.19.3", "charabia": "0.10.0", "target": "x86_64-unknown-linux-gnu", "cargo_lock_sha256": "a" * 64,
+                "resource_manifest_sha256": "b" * 64, "analysis_revision": "static-contract-test", "resource_fingerprint": "c" * 64,
+                "language_count": 71, "languages": languages, "resources": {}}
+
+    def test_static_info_rejects_old_configuration_state(self):
+        info = self.info()
+        require_static_info(info, {"extension": RELEASE_VERSION, "target": "x86_64-unknown-linux-gnu"})
+        for changed in (dict(info, extension="0.2.0"), dict(info, settings={}), dict(info, test_hooks=False), dict(info, language_count=70), dict(info, resource_fingerprint="invalid")):
+            with self.assertRaises(ValueError):
+                require_static_info(changed, {})
+        duplicate = copy.deepcopy(info)
+        duplicate["languages"][0]["language"] = duplicate["languages"][1]["language"]
+        with self.assertRaisesRegex(ValueError, "unique"):
+            require_static_info(duplicate, {})
+        wrong_default = copy.deepcopy(info)
+        wrong_default["languages"][0]["defaults"]["filter"] = True
+        with self.assertRaisesRegex(ValueError, "defaults"):
+            require_static_info(wrong_default, {})
+
+    def test_recovery_cleanup_and_loaded_library_are_required(self):
+        recovery = self.report()["recovery"]
+        require_recovery_report(recovery, "f" * 64)
+        for changed in (dict(recovery, status="failed"), dict(recovery, cleanup={}), dict(recovery, loaded_library_sha256="e" * 64), dict(recovery, format=1)):
+            with self.assertRaises(ValueError):
+                require_recovery_report(changed, "f" * 64)
+        for key in ("marker_matches", "clusters_stopped", "directory_removed"):
+            with self.assertRaisesRegex(ValueError, "cleanup"):
+                require_recovery_report(dict(recovery, cleanup=dict(recovery["cleanup"], **{key: False})), "f" * 64)
+        with self.assertRaises(ValueError):
+            require_recovery_report(dict(recovery, loaded_library_sha256=None), None)
 
     def test_release_refuses_incomplete_identity_or_checks(self):
         report = self.report()
         require_release_report(report)
-        for key, value in (("format", 1), ("status", "passed"), ("build_profile", "debug"), ("test_hooks", True), ("suites", list(SUITES[:-1])), ("suite_results", {}), ("commands", []), ("analysis_info_verified", False), ("cleanup", {})):
+        for key, value in (("format", 1), ("status", "passed"), ("build_profile", "debug"), ("test_hooks", True), ("suites", list(SUITES[:-1])), ("suite_results", {}), ("commands", []), ("analysis_info_verified", False), ("public_api_abi_verified", False), ("default_objects_verified", False), ("recovery", {}), ("cleanup", {})):
             invalid = dict(report, **{key: value})
             with self.assertRaises(ValueError, msg=key):
                 require_release_report(invalid)

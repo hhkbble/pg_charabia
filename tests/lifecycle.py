@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from support import EVIDENCE, PSQL, Session, json_query, literal, run, save
+from support import EVIDENCE, PSQL, Session, json_query, literal, native_config_sql, run, save
 
 linux = os.environ["PGCB_PLATFORM"] == "linux-amd64"
 if linux:
@@ -12,17 +12,21 @@ if linux:
 results = {"platform":os.environ["PGCB_PLATFORM"],"cache":[],"indexes":[],"prepared":[],"cached_init_faults":[],"drop_protection":{}}
 has_hooks = os.environ.get("PGCB_TEST_HOOKS") == "1"
 DOCUMENT = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. CAFÉ."
-CACHE_DOCUMENT = DOCUMENT + " alpha beta"
-BASE = {"builtin_stopwords": False, "stemming": True}
+CACHE_DOCUMENT = DOCUMENT + " alpha beta the"
 
 
-def options_sql(value):
-    return literal(json.dumps(value, ensure_ascii=False, separators=(",", ":"))) + "::jsonb"
+def alter_dictionary(name, value, session=None):
+    options = []
+    for key, flag in value.items():
+        if key not in ("language", "discard", "stem", "normalize", "filter"):
+            raise ValueError("Unexpected native dictionary option: " + key)
+        options.append(key + "=" + (literal(flag) if key == "language" else "true" if flag else "false"))
+    sql = "ALTER TEXT SEARCH DICTIONARY " + name + " (" + ",".join(options) + ")"
+    return session.value(sql) if session else run(sql)
 
 
 def alter(name, value, session=None):
-    sql = "SELECT charabia.alter_config(" + literal(name) + "," + options_sql(value) + ")"
-    return session.value(sql) if session else run(sql)
+    return alter_dictionary(dictionary(name), value, session)
 
 
 def dictionary(config, language="eng"):
@@ -32,12 +36,12 @@ def dictionary(config, language="eng"):
 
 
 run("CREATE SCHEMA lifecycle")
-run("SELECT charabia.create_config('lifecycle.cfg'," + options_sql(BASE) + ")")
-run("SELECT charabia.create_config('lifecycle.cache_cfg'," + options_sql({"builtin_stopwords":False,"stemming":False}) + ")")
+run(native_config_sql("lifecycle.cfg", stem=True, discard=False))
+run(native_config_sql("lifecycle.cache_cfg", stem=False, discard=False))
 run("CREATE TABLE lifecycle.docs(id integer PRIMARY KEY,body text NOT NULL); INSERT INTO lifecycle.docs VALUES(1," + literal(DOCUMENT) + "),(2,'unrelated'); CREATE INDEX lifecycle_gin ON lifecycle.docs USING gin(to_tsvector('lifecycle.cfg',body))")
 if linux:
     run("CREATE INDEX lifecycle_bm25 ON lifecycle.docs USING bm25(body) WITH(text_config='lifecycle.cfg')")
-selected_languages = json_query("SELECT json_agg(DISTINCT language) FROM charabia.analyze(" + literal(DOCUMENT) + ",'lifecycle.cfg') WHERE kind='word'")
+selected_languages = json_query("SELECT json_agg(DISTINCT language) FROM charabia.analyze(" + literal(DOCUMENT) + ") WHERE kind='word'")
 results["language_control"] = {"document":DOCUMENT,"languages":selected_languages,"basis":"Preserved English corpus plus upstream English running->run golden"}
 save("lifecycle-results.json",results)
 assert selected_languages == ["eng"], selected_languages
@@ -100,7 +104,7 @@ def prepare_queries(session):
 def prepared_state(session, label, prepared_at, stemming, expected_ids, default_config):
     record = {"state":label,"pid":session.pid,"stemming":stemming,"expected_index_ids":expected_ids,
               "config_oid":int(session.value("SELECT 'lifecycle.cfg'::regconfig::oid")),
-              "settings":json.loads(session.value("SELECT charabia.analysis_info('lifecycle.cfg')->'settings'")),"queries":[]}
+              "dictionary_options":session.value("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lifecycle.cfg_eng'::regdictionary"),"queries":[]}
     results["prepared"].append(record)
     save("lifecycle-results.json", results)
     session.value("SET default_text_search_config=" + literal(default_config))
@@ -153,14 +157,12 @@ def cached_init_faults():
                              ("register_link", ("error", "panic", "allocation_error"))):
             for mode in modes:
                 name = f"lifecycle.failure_{int(warmed)}_{point}_{mode}"
-                config_name = name
-                run("SELECT charabia.create_config(" + literal(config_name) + "," + options_sql({**BASE,"stopwords_add":{"eng":["canary"]}}) + ")")
-                name = dictionary(config_name)
+                run("CREATE TEXT SEARCH DICTIONARY " + name + " (TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=true,Normalize=true,Filter=false)")
                 with Session() as session:
                     sql = "SELECT ts_lexize(" + literal(name) + ",'running')"
                     if warmed:
                         assert session.value(sql) == "{running,run}"
-                        alter(config_name, {**BASE,"stemming":False,"stopwords_add":{"eng":["canary"]}})
+                        alter_dictionary(name, {"stem":False})
                     label = {"warmed":warmed,"point":point,"mode":mode,"pid":session.pid,"attempts":[]}
                     results["cached_init_faults"].append(label)
                     before = json.loads(session.value("SELECT charabia.test_stats()"))
@@ -205,7 +207,7 @@ def cached_init_faults():
                     label["recovered"] = recovered
                     # An external catalog change during A's transaction must
                     # recover through rollback-to-savepoint in the same backend.
-                    alter(config_name, {**BASE,"stemming":warmed,"stopwords_add":{"eng":["canary"]}})
+                    alter_dictionary(name, {"stem":warmed})
                     session.value("BEGIN; SAVEPOINT cached_init")
                     before_savepoint = json.loads(session.value("SELECT charabia.test_stats()"))
                     session.value("SELECT charabia.test_set_fault(" + literal(point) + "," + literal(mode) + ")")
@@ -232,21 +234,21 @@ def cached_init_faults():
                     assert session.value("SELECT 1") == "1"
                     label["savepoint"] = {"before":before_savepoint,"error":failed,"after_rollback":after_savepoint,"recovered":final}
                     save("lifecycle-results.json", results)
-                run("SELECT charabia.drop_config(" + literal(config_name) + ")")
+                run("DROP TEXT SEARCH DICTIONARY " + name)
 
 
 restore_db="pgcb_restore_"+str(os.getpid())
 drop_db="pgcb_drop_"+str(os.getpid())
 try:
     with Session() as warm:
-        cache_sql = "SELECT tsvector_to_array(to_tsvector('lifecycle.cache_cfg'," + literal(CACHE_DOCUMENT) + "))::text"
-        before_terms = warm.value(cache_sql)
-        assert "alpha" in before_terms and "beta" in before_terms
+        cache_sql = "SELECT to_json(tsvector_to_array(to_tsvector('lifecycle.cache_cfg'," + literal(CACHE_DOCUMENT) + ")))"
+        before_terms = json.loads(warm.value(cache_sql))
+        assert "alpha" in before_terms and "beta" in before_terms and "the" in before_terms
         before_cache = json.loads(warm.value("SELECT charabia.test_stats()")) if has_hooks else None
-        cache_options = {"builtin_stopwords":False,"stemming":False,"stopwords_add":{"eng":["alpha"]}}
+        cache_options = {"discard":True}
         alter("lifecycle.cache_cfg", cache_options)
-        current = warm.value(cache_sql)
-        assert "alpha" not in current and "beta" in current and run(cache_sql) == current
+        current = json.loads(warm.value(cache_sql))
+        assert "the" not in current and "alpha" in current and "beta" in current and json.loads(run(cache_sql)) == current
         results["cache"].append({"warm_backend":warm.pid,"new_value":current})
         if before_cache is not None:
             after_cache = json.loads(warm.value("SELECT charabia.test_stats()"))
@@ -256,14 +258,16 @@ try:
         prepared_at = prepare_queries(warm)
         config_oid = int(warm.value("SELECT 'lifecycle.cfg'::regconfig::oid"))
         prepared_state(warm,"warmed",prepared_at,True,[1],"lifecycle.cfg")
-        run("BEGIN; SELECT charabia.alter_config('lifecycle.cfg'," + options_sql({**BASE,"stemming":False}) + "); ROLLBACK")
+        run("BEGIN; ALTER TEXT SEARCH DICTIONARY lifecycle.cfg_eng (Stem=false); ROLLBACK")
         prepared_state(warm,"alter-rollback",prepared_at,True,[1],"lifecycle.cfg")
-        bad = run("SELECT charabia.alter_config('lifecycle.cfg','{\"stemming\":0}')",check=False)
-        assert bad.returncode
+        bad = run("\\set VERBOSITY verbose\nALTER TEXT SEARCH DICTIONARY lifecycle.cfg_eng (Stem='invalid')",check=False)
+        results["invalid_alter"] = {"exit_code":bad.returncode,"error":bad.stderr}
+        save("lifecycle-results.json",results)
+        assert bad.returncode and "42601" in bad.stderr, bad.stderr
         prepared_state(warm,"invalid-alter",prepared_at,True,[1],"lifecycle.cfg")
         prepared_state(warm,"default-simple",prepared_at,True,[1],"pg_catalog.simple")
         prepared_state(warm,"default-restored",prepared_at,True,[1],"lifecycle.cfg")
-        alter("lifecycle.cfg",{**BASE,"stemming":False})
+        alter("lifecycle.cfg",{"stem":False})
         # The old postings retain run from English stemming. Heap analysis no
         # longer has run; both index families remain stale until REINDEX.
         prepared_state(warm,"alter-stale-index",prepared_at,False,[1],"lifecycle.cfg")
@@ -276,7 +280,7 @@ try:
         if linux:
             run("REINDEX INDEX lifecycle.lifecycle_bm25")
         prepared_state(warm,"reindexed",prepared_at,False,[],"lifecycle.cfg")
-        run("BEGIN; SELECT charabia.alter_config('lifecycle.cfg'," + options_sql(BASE) + "); ROLLBACK")
+        run("BEGIN; ALTER TEXT SEARCH DICTIONARY lifecycle.cfg_eng (Stem=true); ROLLBACK")
         prepared_state(warm,"stem-alter-rollback",prepared_at,False,[],"pg_catalog.simple")
         assert all(item["config_oid"] == config_oid for item in results["prepared"])
         warm.value("DEALLOCATE lifecycle_literal; PREPARE lifecycle_literal AS SELECT plainto_tsquery('lifecycle.cfg'," + literal(DOCUMENT) + ")::text")
@@ -286,9 +290,9 @@ try:
     if has_hooks:
         cached_init_faults()
 
-    roundtrip_options = {"stemming":False,"builtin_stopwords":False,"stopwords_add":{"eng":["the","O'Reilly","C:\\code","e\u0301"],"cmn":["的"]},"stopwords_keep":{"eng":["will"]}}
-    run("SELECT charabia.create_config('lifecycle.roundtrip'," + options_sql(roundtrip_options) + ")")
-    original_info = json_query("SELECT charabia.analysis_info('lifecycle.roundtrip')")
+    run(native_config_sql("lifecycle.roundtrip", stem=False, discard=False, normalize=False))
+    original_oid = int(run("SELECT 'lifecycle.roundtrip'::regconfig::oid"))
+    original_options = run("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lifecycle.roundtrip_eng'::regdictionary")
     run(f"CREATE DATABASE {restore_db} TEMPLATE template0")
     try:
         run("CREATE EXTENSION pg_charabia",restore_db)
@@ -299,21 +303,22 @@ try:
             subprocess.run([str(Path(PSQL).with_name("pg_dump")),"--schema-only","--no-owner","--no-privileges","--schema=lifecycle"],stdout=output,check=True)
         restored = subprocess.run([PSQL,"-X","-v","ON_ERROR_STOP=1","-d",restore_db,"-f",str(dump)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         assert restored.returncode == 0, restored.stderr
-        restored_info = json.loads(run("SELECT charabia.analysis_info('lifecycle.roundtrip')",restore_db))
-        assert original_info["configuration_oid"] != restored_info["configuration_oid"], (original_info,restored_info)
-        for field in ("settings","settings_fingerprint","analysis_fingerprint"):
-            assert original_info[field] == restored_info[field], (field,original_info,restored_info)
-        for word in ("the","O'Reilly","C:\\code","e\u0301","的","will"):
+        restored_oid = int(run("SELECT 'lifecycle.roundtrip'::regconfig::oid",restore_db))
+        restored_options = run("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lifecycle.roundtrip_eng'::regdictionary",restore_db)
+        assert original_oid != restored_oid, (original_oid,restored_oid)
+        assert original_options == restored_options, (original_options,restored_options)
+        for word in ("the","O'Reilly",r"C:\code","e\u0301","的","will"):
             sql = "SELECT to_tsvector('lifecycle.roundtrip'," + literal(word) + ")"
             assert run(sql,restore_db) == run(sql), repr(word)
-        run("SELECT charabia.alter_config('lifecycle.roundtrip','{\"stemming\":false,\"builtin_stopwords\":false}'); SELECT charabia.drop_config('lifecycle.roundtrip')",restore_db)
+        run("ALTER TEXT SEARCH DICTIONARY lifecycle.roundtrip_eng(Stem=true,Normalize=true); DROP TEXT SEARCH CONFIGURATION lifecycle.roundtrip; DROP TEXT SEARCH DICTIONARY lifecycle.roundtrip_eng",restore_db)
         assert run("SELECT count(*) FROM pg_ts_config WHERE cfgnamespace='lifecycle'::regnamespace AND cfgname='roundtrip'",restore_db) == "0"
-        results["dump_restore"] = {"options":roundtrip_options,"fingerprint":original_info["settings_fingerprint"],"schema_sha256":hashlib.sha256(dump.read_bytes()).hexdigest(),"restored_alter_drop":True}
+        assert run("SELECT count(*) FROM pg_ts_dict WHERE dictnamespace='lifecycle'::regnamespace AND dictname='roundtrip_eng'",restore_db) == "0"
+        results["dump_restore"] = {"dictionary_options":original_options,"original_oid":original_oid,"restored_oid":restored_oid,"schema_sha256":hashlib.sha256(dump.read_bytes()).hexdigest(),"restored_alter_drop":True}
     finally:
         run(f"DROP DATABASE {restore_db}")
 
     if linux:
-        run("SELECT charabia.create_config('lifecycle.droppable'); CREATE TABLE lifecycle.dropdocs(body text); INSERT INTO lifecycle.dropdocs VALUES('hello'); CREATE INDEX droppable_bm25 ON lifecycle.dropdocs USING bm25(body) WITH(text_config='lifecycle.droppable')")
+        run("CREATE TEXT SEARCH CONFIGURATION lifecycle.droppable(COPY=public.charabia); CREATE TABLE lifecycle.dropdocs(body text); INSERT INTO lifecycle.dropdocs VALUES('hello'); CREATE INDEX droppable_bm25 ON lifecycle.dropdocs USING bm25(body) WITH(text_config='lifecycle.droppable')")
         dependency=run("SELECT count(*) FROM pg_depend WHERE classid='pg_class'::regclass AND objid='lifecycle.droppable_bm25'::regclass AND refobjid='lifecycle.droppable'::regconfig")
         with Session() as warm:
             assert warm.value("SELECT count(*) FROM (SELECT body FROM lifecycle.dropdocs ORDER BY body <@> to_bm25query('hello','lifecycle.droppable_bm25') LIMIT 10) q")=="1"

@@ -3,13 +3,10 @@ use std::{
     ptr, slice, str,
 };
 
-use pgrx::{
-    AnyElement, FromDatum, Internal, JsonB, PgLogLevel, PgSqlErrorCode, Spi, ereport, pg_sys,
-};
+use pgrx::{AnyElement, Internal, PgLogLevel, PgSqlErrorCode, ereport, pg_sys};
 
 use crate::analysis::{AnalysisError, ErrorKind, LexizeOutcome, MAX_INPUT_BYTES};
-use crate::routes::{Route, TYPE_COUNT};
-use crate::settings::DictionaryParameters;
+use crate::routes::{LanguageId, TYPE_COUNT, TokenType};
 
 pub fn fail(code: PgSqlErrorCode, message: impl AsRef<str>) -> ! {
     ereport!(PgLogLevel::ERROR, code, message.as_ref().to_owned());
@@ -232,10 +229,11 @@ fn pg_string(value: &str) -> *mut c_char {
 }
 
 pub fn lexemes(outcome: LexizeOutcome) -> Internal {
-    let (first, second) = match outcome {
+    let (first, second, filter) = match outcome {
         LexizeOutcome::Ignore => return datum(0),
-        LexizeOutcome::Stop => (None, None),
-        LexizeOutcome::Terms { first, second } => (Some(first), second),
+        LexizeOutcome::Stop => (None, None, false),
+        LexizeOutcome::Filter(term) => (Some(term), None, true),
+        LexizeOutcome::Terms { first, second } => (Some(first), second, false),
     };
     // SAFETY: PG owns the zero-terminated array and each separately allocated
     // string. Distinct nvariant values express alternatives at the same position.
@@ -244,6 +242,9 @@ pub fn lexemes(outcome: LexizeOutcome) -> Internal {
             pg_sys::palloc0(std::mem::size_of::<pg_sys::TSLexeme>() * 3).cast::<pg_sys::TSLexeme>();
         if let Some(term) = first {
             (*result).lexeme = pg_string(&term);
+            if filter {
+                (*result).flags = pg_sys::TSL_FILTER as u16;
+            }
         }
         if let Some(term) = second {
             (*result.add(1)).lexeme = pg_string(&term);
@@ -258,11 +259,12 @@ pub fn lextypes() -> Internal {
     unsafe {
         let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::LexDescr>() * (TYPE_COUNT + 1))
             .cast::<pg_sys::LexDescr>();
-        for (index, route) in Route::ALL.into_iter().enumerate() {
+        for index in 0..TYPE_COUNT {
+            let route = TokenType::from_id((index + 1) as i32).expect("fixed token type");
             let entry = result.add(index);
             (*entry).lexid = route.id();
             (*entry).alias = pg_string(route.alias());
-            (*entry).descr = pg_string(if route.is_display() {
+            (*entry).descr = pg_string(if !route.is_language() {
                 "Unindexed original text fragment"
             } else {
                 route.alias()
@@ -308,130 +310,70 @@ pub fn invalid(message: impl AsRef<str>) -> ! {
 }
 
 /// # Safety
-/// `options` is the PG-owned List<DefElem> from INIT or deserialize_deflist.
-pub unsafe fn option_strings(options: *mut pg_sys::List) -> Vec<(String, String)> {
+/// `options` is the INIT callback's live PG-owned List<DefElem>.
+pub unsafe fn dictionary_options(options: Internal) -> crate::analysis::Options {
+    require_utf8();
+    let mut language = None;
+    let mut discard = None;
+    let mut stem = None;
+    let mut normalize = true;
+    let mut filter = false;
+    let mut seen = std::collections::BTreeSet::new();
     pgrx::memcx::current_context(|cx| {
-        // SAFETY: Caller supplies the documented live List<DefElem> or NIL.
-        let list = unsafe { pgrx::list::List::<*mut c_void>::downcast_ptr_in_memcx(options, cx) }
-            .unwrap_or_else(|| invalid("invalid dictionary option list"));
-        let mut result = Vec::new();
+        // SAFETY: INIT receives a List<DefElem> or NIL, valid for this callback.
+        let list =
+            unsafe { pgrx::list::List::<*mut c_void>::downcast_ptr_in_memcx(raw(options), cx) }
+                .unwrap_or_else(|| invalid("invalid dictionary option list"));
         for pointer in list.iter() {
             let def = (*pointer).cast::<pg_sys::DefElem>();
-            // SAFETY: PG owns all option nodes/strings; defGetString is guarded.
+            // SAFETY: All nodes/strings are PG-owned; conversion bindings guard ERROR.
             let name = unsafe { CStr::from_ptr((*def).defname) }
                 .to_str()
                 .unwrap_or_else(|_| invalid("invalid option name UTF8"))
-                .to_owned();
-            let value = unsafe { CStr::from_ptr(pg_sys::defGetString(def)) }
-                .to_str()
-                .unwrap_or_else(|_| invalid("invalid option value UTF8"))
-                .to_owned();
-            result.push((name, value));
+                .to_ascii_lowercase();
+            if !seen.insert(name.clone()) {
+                invalid(format!("duplicate dictionary option: {name}"));
+            }
+            match name.as_str() {
+                "language" => {
+                    let value = unsafe { CStr::from_ptr(pg_sys::defGetString(def)) }
+                        .to_str()
+                        .unwrap_or_else(|_| invalid("invalid Language UTF8"));
+                    language = Some(LanguageId::from_alias(value).unwrap_or_else(|| {
+                        invalid("Language must be a supported lowercase ISO639-3 code or und")
+                    }));
+                }
+                "discard" => discard = Some(unsafe { pg_sys::defGetBoolean(def) }),
+                "stem" => stem = Some(unsafe { pg_sys::defGetBoolean(def) }),
+                "normalize" => normalize = unsafe { pg_sys::defGetBoolean(def) },
+                "filter" => filter = unsafe { pg_sys::defGetBoolean(def) },
+                _ => invalid(format!("unknown dictionary option: {name}")),
+            }
         }
-        result
-    })
-}
-
-/// # Safety
-/// `options` is the INIT callback's live List<DefElem>.
-pub unsafe fn dictionary_options(options: Internal) -> DictionaryParameters {
-    require_utf8();
-    // SAFETY: The paired SQL template supplies the option list.
-    crate::config::parameters_from_strings(unsafe { option_strings(raw(options)) })
-}
-
-pub fn options_from_catalog(options: &str) -> DictionaryParameters {
-    require_utf8();
-    // SAFETY: PG text/list are request-owned; deserialize_deflist is a guarded
-    // binding. Rust outputs own their values before the context can change.
-    unsafe {
-        let text = pg_sys::cstring_to_text(pg_string(options));
-        let list = pg_sys::deserialize_deflist(pg_sys::Datum::from(text));
-        crate::config::parameters_from_strings(option_strings(list))
-    }
-}
-
-pub fn require_owner(class: pg_sys::Oid, id: pg_sys::Oid) {
-    // SAFETY: IDs come from a verified catalog snapshot; this is a backend call.
-    if !unsafe { pg_sys::object_ownercheck(class, id, pg_sys::GetUserId()) } {
+    });
+    let language = language.unwrap_or_else(|| invalid("Language is required"));
+    let discard = discard.unwrap_or_else(|| language.has_stopwords());
+    let stem = stem.unwrap_or_else(|| language.algorithm().is_some());
+    if discard && !language.has_stopwords() {
         fail(
-            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
-            "must own the configuration and its dictionaries",
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "Discard=true requires a language with a builtin stoplist",
         );
     }
-}
-
-/// Read one owned JSONB value from current catalogs after a management lock.
-/// Ordinary SPI under REPEATABLE READ can retain a snapshot from before a
-/// concurrent COPY committed. Only management validation uses this fresh view.
-pub fn latest_catalog_json(sql: &str) -> Option<serde_json::Value> {
-    Spi::connect(|_| {
-        // SAFETY: The private caller provides a single catalog SELECT returning
-        // JSONB. SPI owns plan, snapshot stack and tuples until this connection
-        // finishes; JsonB conversion creates an independent Rust value.
-        unsafe {
-            let plan = pg_sys::SPI_prepare(pg_string(sql), 0, ptr::null_mut());
-            if plan.is_null() {
-                invalid("could not prepare configuration catalog query");
-            }
-            // Explicit read-only snapshots do not advance the command ID. This
-            // also makes the last DDL in this command visible to the reload.
-            pg_sys::CommandCounterIncrement();
-            let snapshot = pg_sys::GetLatestSnapshot();
-            let status = pg_sys::SPI_execute_snapshot(
-                plan,
-                ptr::null_mut(),
-                ptr::null(),
-                snapshot,
-                ptr::null_mut(),
-                true,
-                false,
-                1,
-            );
-            if status != pg_sys::SPI_OK_SELECT as i32 {
-                invalid("configuration catalog query was not a SELECT");
-            }
-            let table = pg_sys::SPI_tuptable;
-            if table.is_null() || (*table).numvals == 0 {
-                return None;
-            }
-            let mut is_null = false;
-            let datum = pg_sys::SPI_getbinval(*(*table).vals, (*table).tupdesc, 1, &mut is_null);
-            JsonB::from_datum(datum, is_null).map(|json| json.0)
-        }
-    })
-}
-
-pub fn lock_object(class: pg_sys::Oid, id: pg_sys::Oid) {
-    // SAFETY: Called inside a management statement. PG's resource owner holds
-    // the object lock through transaction end, including ERROR/savepoint paths.
-    unsafe { pg_sys::LockDatabaseObject(class, id, 0, pg_sys::AccessExclusiveLock as _) };
-}
-
-pub fn cached_inspect(id: pg_sys::Oid, text: &str, route: Route) -> crate::analysis::TokenAnalysis {
-    // SAFETY: Lookup returns a valid initialized dictionary entry. The Rust
-    // state borrow is confined to pure analysis; no PG call can reset dictCtx.
-    unsafe {
-        let entry = pg_sys::lookup_ts_dictionary_cache(id);
-        if entry.is_null() || !(*entry).isvalid || (*entry).dictData.is_null() {
-            invalid("invalid dictionary cache entry");
-        }
-        let outcome = {
-            let state = &*(*entry)
-                .dictData
-                .cast::<crate::dictionary::DictionaryState>();
-            if state.route != route {
-                Err(AnalysisError::new(
-                    ErrorKind::Internal,
-                    "cached dictionary route mismatch",
-                ))
-            } else {
-                crate::analysis::inspect(text, route, &state.options)
-            }
-        };
-        pgrx::check_for_interrupts!();
-        checked(outcome)
+    if stem && language.algorithm().is_none() {
+        fail(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "Stem=true requires a language with a supported stemmer",
+        );
     }
+    if filter && stem {
+        invalid(
+            "Filter=true requires Stem=false; filtering cannot preserve surface and stem alternatives",
+        );
+    }
+    checked(crate::analysis::Options::new(
+        language, discard, stem, normalize, filter,
+    ))
 }
 
 pub fn plain_query_any(config: pg_sys::Oid, text: pg_sys::Datum) -> Internal {
@@ -610,19 +552,13 @@ pub unsafe fn headline(
         pgrx::check_for_interrupts!();
         // SAFETY: Each entry and its len bytes belong to the core request.
         let entry = unsafe { *scratch_words.add(index) };
-        let route = crate::routes::Route::from_id(entry.type_() as i32).unwrap_or_else(|| {
+        let token_type = TokenType::from_id(entry.type_() as i32).unwrap_or_else(|| {
             fail(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                 "invalid headline token type",
             )
         });
-        let raw = unsafe { input(entry.word.cast(), entry.len() as i32) };
-        let word = if entry.repeated() != 0 || route.is_display() {
-            false
-        } else {
-            let prepared = checked(crate::analysis::prepare(raw, route));
-            matches!(prepared.kind, charabia::TokenKind::Word) && !prepared.key.is_empty()
-        };
+        let word = entry.repeated() == 0 && token_type.is_language();
         // SAFETY: Mutate only scratch type/flags. The original pos, item,
         // repeated, raw bytes and language route remain owned by PG core.
         unsafe {
