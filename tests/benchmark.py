@@ -257,6 +257,27 @@ def main():
         check(setup.returncode == 0, "cannot create exclusively owned benchmark schema", setup.stderr)
         created_schema = True
         run(native_config_sql(f'{SCHEMA}.no_stem',stem=False,discard=True))
+        # Same terminal dictionary, with zero/one/two real preparation filters.
+        # Output equality is required before timing; these are not public profiles.
+        run(f"""CREATE TEXT SEARCH CONFIGURATION {SCHEMA}.filter_one(COPY={SCHEMA}.no_stem);
+CREATE TEXT SEARCH CONFIGURATION {SCHEMA}.filter_two(COPY={SCHEMA}.no_stem);
+DO $bench$ DECLARE l jsonb; BEGIN
+ FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
+  EXECUTE format('CREATE TEXT SEARCH DICTIONARY {SCHEMA}.%I(TEMPLATE=charabia.template,Language=%L,Discard=false,Stem=false,Normalize=false,Filter=true)','pre_'||(l->>'language'),l->>'language');
+  EXECUTE format('CREATE TEXT SEARCH DICTIONARY {SCHEMA}.%I(TEMPLATE=charabia.template,Language=%L,Discard=false,Stem=false,Normalize=false,Filter=true)','pre2_'||(l->>'language'),l->>'language');
+  EXECUTE format('ALTER TEXT SEARCH CONFIGURATION {SCHEMA}.filter_one ALTER MAPPING FOR %I WITH {SCHEMA}.%I,{SCHEMA}.%I',l->>'language','pre_'||(l->>'language'),'no_stem_'||(l->>'language'));
+  EXECUTE format('ALTER TEXT SEARCH CONFIGURATION {SCHEMA}.filter_two ALTER MAPPING FOR %I WITH {SCHEMA}.%I,{SCHEMA}.%I,{SCHEMA}.%I',l->>'language','pre_'||(l->>'language'),'pre2_'||(l->>'language'),'no_stem_'||(l->>'language'));
+ END LOOP;
+END $bench$;""")
+        filter_payload = PARAGRAPHS[0][1] + ' Café PostgreSQL '
+        with Session() as filter_session:
+            verify_library(filter_session)
+            baseline = filter_session.value(f"SELECT to_tsvector('{SCHEMA}.no_stem',{literal(filter_payload)})::text")
+            for mode in ('no_stem','filter_one','filter_two'):
+                actual = filter_session.value(f"SELECT to_tsvector('{SCHEMA}.{mode}',{literal(filter_payload)})::text")
+                check(actual == baseline, 'filter cost control changed analysis semantics', mode)
+                measure(filter_session,'filter-chain-'+mode,
+                    f"SELECT sum(length(to_tsvector('{SCHEMA}.{mode}',{literal(filter_payload)}||g::text)))FROM generate_series(1,200)g",5)
         run(f"CREATE TABLE {SCHEMA}.source(family_id integer PRIMARY KEY,family text,body text);INSERT INTO {SCHEMA}.source VALUES {values}")
         for label, config, stemming in (("default", "public.charabia", True), ("no_stem", f"{SCHEMA}.no_stem", False)):
             table = f"{SCHEMA}.docs_{label}"
