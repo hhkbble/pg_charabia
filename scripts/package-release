@@ -17,6 +17,27 @@ def require(condition, message):
         raise SystemExit(message)
 
 
+def copy_committed_sources(delivery, commit):
+    """Copy the tested Git snapshot without ignored or local-only descendants."""
+    paths = ("LICENSE", "README.md", "scripts", "tests", "docs", "Cargo.toml",
+             "rust-toolchain.toml", "pg_charabia.control", "docker/environment.lock.json")
+    entries = subprocess.check_output(["git", "ls-tree", "-rz", "--full-tree", commit, "--", *paths], cwd=ROOT)
+    copied = set()
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        metadata, filename = entry.split(b"\t", 1)
+        mode, kind, object_id = metadata.decode("ascii").split()
+        relative = filename.decode("utf-8")
+        require(mode in ("100644", "100755") and kind == "blob", f"Refusing non-regular source input: {relative}")
+        target = delivery / ("environment.lock.json" if relative == "docker/environment.lock.json" else relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(subprocess.check_output(["git", "cat-file", "blob", object_id], cwd=ROOT))
+        target.chmod(0o755 if mode == "100755" else 0o644)
+        copied.add(relative)
+    require(set(paths) - {"scripts", "tests", "docs"} <= copied, "Required delivery source files are not committed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True, help="Successful outer Linux verifier evidence directory")
@@ -59,15 +80,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pgcb-package.") as temp:
         delivery = Path(temp) / name
         shutil.copytree(package, delivery, symlinks=True)
-        shutil.copy2(ROOT / "LICENSE", delivery / "LICENSE")
-        shutil.copy2(ROOT / "README.md", delivery / "README.md")
-        for directory in ("scripts", "tests"):
-            shutil.copytree(ROOT / directory, delivery / directory, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        for filename in ("Cargo.toml", "rust-toolchain.toml", "pg_charabia.control"):
-            shutil.copy2(ROOT / filename, delivery / filename)
-        if (ROOT / "docs").is_dir():
-            shutil.copytree(ROOT / "docs", delivery / "docs", symlinks=True)
-        shutil.copy2(ROOT / "docker/environment.lock.json", delivery / "environment.lock.json")
+        copy_committed_sources(delivery, current_commit)
         verification = delivery / "verification"
         verification.mkdir()
         shutil.copy2(evidence / "outer-run.json", verification / "outer-run.json")

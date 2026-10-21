@@ -323,6 +323,67 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 verify_checksums(ancestor / "package")
 
+    def test_package_source_copy_excludes_ignored_descendants(self):
+        # A synthetic report and library test assembly only. They are never
+        # accepted as PostgreSQL or release verification evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("scripts/package-release", "scripts/report_contract.py", "LICENSE", "README.md",
+                     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "pg_charabia.control",
+                     "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json")
+            for name in names:
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / name, target)
+            nested = root / "docs/nested/source.md"
+            nested.parent.mkdir(parents=True)
+            nested.write_bytes(b"Tracked nested documentation.\n")
+            (root / ".gitignore").write_text("docs/research/\n**/.DS_Store\n**/__pycache__/\nscripts/local-only/\nevidence/\ndist/\n")
+            def git(*args):
+                return subprocess.check_output(["git", "-c", "user.name=Package contract test",
+                    "-c", "user.email=package-test@example.invalid", "-c", "core.hooksPath=/dev/null",
+                    "-c", "commit.gpgsign=false", *args], cwd=root, stderr=subprocess.PIPE, text=True).strip()
+            git("init", "--quiet")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "Freeze package-copy fixture")
+            commit = git("rev-parse", "HEAD")
+            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data"):
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"Ignored local material must stay outside delivery.\n")
+            evidence = root / "evidence"
+            inner = evidence / "fixture-inner"
+            package = inner / "package"
+            (package / "extension").mkdir(parents=True)
+            library = package / "extension/pg_charabia.so"
+            library.write_bytes(b"Synthetic assembly fixture. Never load this file.\n")
+            library_hash = digest(library)
+            (package / "SHA256SUMS").write_text(f"{library_hash}  extension/pg_charabia.so\n")
+            report = self.report()
+            report["quality"] = validate_quality(report["quality"])
+            report.update(run_id="fixture-inner", git_commit=commit, git_status="",
+                          postgres="PostgreSQL 18.6", target_triple="x86_64-unknown-linux-gnu",
+                          library={"sha256": library_hash}, loaded_library_sha256=library_hash,
+                          cargo_lock_sha256=digest(root / "Cargo.lock"), resources_sha256=digest(root / "resources/manifest.json"))
+            report["recovery"]["loaded_library_sha256"] = library_hash
+            (inner / "run.json").write_text(json.dumps(report))
+            (evidence / "outer-run.json").write_text(json.dumps({"format": FORMAT, "run_id": "fixture",
+                "status": report["status"], "platform": "linux/amd64", "image_id": "assembly-only",
+                "cleanup": {"container_removed": True, "volumes_removed": True}}))
+            self.assertEqual(git("status", "--porcelain=v1"), "")
+            result = subprocess.run([sys.executable, str(root / "scripts/package-release"),
+                "--run", str(evidence)], cwd=root, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            archive = Path(json.loads(result.stdout)["archive"])
+            with tarfile.open(archive, "r:gz") as source:
+                prefix = archive.name.removesuffix(".tar.gz") + "/"
+                members = {item.name.removeprefix(prefix) for item in source.getmembers()}
+                self.assertEqual(source.extractfile(prefix + "docs/nested/source.md").read(), nested.read_bytes())
+                for name in ("docs/research", "docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data"):
+                    self.assertNotIn(name, members)
+            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data"):
+                self.assertEqual((root / name).read_bytes(), b"Ignored local material must stay outside delivery.\n")
+
     def test_checksums_cover_every_file_and_forbid_escape(self):
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory).resolve()

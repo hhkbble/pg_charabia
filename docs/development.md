@@ -157,6 +157,8 @@ Complete implementation, tests, and static documentation before freezing a clean
 
 The packager requires the complete successful release report, clean tested/current checkouts, the same commit, lock/manifest, and actual loaded-library hash. Partial suites, missing recovery evidence, old report formats, hooks/debug builds, and existing output names are rejected. No public upload or deployment occurs.
 
+Source documents, scripts, and tests come from the tested Git commit. Ignored and local-only source files stay outside the archive and remain untouched.
+
 Replace the uppercase placeholders with the completed outer run directory and resulting archive name:
 
 ```sh
