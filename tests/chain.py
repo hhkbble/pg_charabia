@@ -19,6 +19,7 @@ REPORT = {
         "synonym": "PG18 distributed synonym_sample.syn: postgresql -> pgsql; indices -> index*",
         "algorithm": "fixed Snowball running -> run and preserved interface research goldens",
         "positions": "independent literals alpha/beta and one explicit Stop hole",
+        "multi_position": "PG18 ts_parse.c TSL_ADDPOS; to_tsany.c pushval_morph/plain OP_AND, rewritten to OR by query_any",
         "integration": "real Parser/configuration/Dictionary/vector/index/headline calls",
     },
 }
@@ -38,6 +39,16 @@ Datum chain_dual(PG_FUNCTION_ARGS) {
 }
 PG_FUNCTION_INFO_V1(chain_reject);
 Datum chain_reject(PG_FUNCTION_ARGS) { PG_RETURN_POINTER(NULL); }
+PG_FUNCTION_INFO_V1(chain_multi);
+Datum chain_multi(PG_FUNCTION_ARGS) {
+    TSLexeme *r;
+    if (PG_GETARG_INT32(2) != 8 || memcmp(PG_GETARG_POINTER(1), "compound", 8))
+        PG_RETURN_POINTER(NULL);
+    r = palloc0(3 * sizeof(TSLexeme));
+    r[0].lexeme = pstrdup("alpha");
+    r[1].lexeme = pstrdup("beta"); r[1].flags = TSL_ADDPOS;
+    PG_RETURN_POINTER(r);
+}
 PG_FUNCTION_INFO_V1(chain_stop);
 Datum chain_stop(PG_FUNCTION_ARGS) {
     if (PG_GETARG_INT32(2) != 4 || memcmp(PG_GETARG_POINTER(1), "cafe", 4))
@@ -142,7 +153,7 @@ def main():
             sql(session, "CREATE SCHEMA " + schema, "schema")
             schema_created = True
             sql(session, "CREATE EXTENSION IF NOT EXISTS unaccent", "unaccent-extension")
-            for name in ("dual", "reject", "stop", "edges"):
+            for name in ("dual", "reject", "multi", "stop", "edges"):
                 sql(session, "CREATE FUNCTION " + schema + "." + name +
                     "(internal,internal,internal,internal)RETURNS internal AS " + literal(str(protocol_library)) +
                     "," + literal("chain_" + name) + " LANGUAGE c STRICT;"
@@ -185,6 +196,7 @@ def main():
                 "upstream_stop": schema + ".eng_stop_filter,pg_catalog.simple",
                 "unaccent": "public.unaccent," + schema + ".fra_plain",
                 "dual_filter": schema + ".dual,pg_catalog.simple",
+                "multi_position": schema + ".multi,pg_catalog.simple",
                 "simple": "pg_catalog.simple",
             }
             for name, chain in chains.items():
@@ -212,6 +224,7 @@ def main():
                 ("upstream_stop", "alpha the beta", "'alpha':1 'beta':3"),
                 ("unaccent", "Hôtel", "'hotel':1"),
                 ("dual_filter", "word", "'alpha':1"),
+                ("multi_position", "compound tail", "'alpha':1 'beta':2 'tail':3"),
                 ("simple", "alpha, beta", "'alpha':1 'beta':2"),
             ]
             for name, raw, expected in cases:
@@ -228,6 +241,22 @@ def main():
             check(sql(session, "SELECT charabia.query_any('PostgreSQL'," +
                       literal(schema + ".filter_syn") + ")::text", "external-query-any") == "'pgsql'",
                   "query_any accepts arbitrary valid native dictionary chains")
+            multi = literal(schema + ".multi_position")
+            # Plain analysis uses AND even for positions added by an external
+            # dictionary. Phrase analysis is a separate native operator path.
+            check(sql(session, "SELECT plainto_tsquery(" + multi + ",'compound')::text",
+                      "multi-position-plain") == "'alpha' & 'beta'",
+                  "external TSL_ADDPOS plain analysis keeps both terms")
+            check(sql(session, "SELECT charabia.query_any('compound'," + multi + ")::text",
+                      "multi-position-query-any") == "'alpha' | 'beta'",
+                  "query_any rewrites the fresh multi-position plain AND")
+            check(sql(session, "SELECT to_json(to_tsvector(" + multi + ",'compound') @@ phraseto_tsquery(" +
+                      multi + ",'compound'))", "multi-position-phrase", True) is True,
+                  "native phrase query matches the external dictionary positions")
+            actual = sql(session, "SELECT ts_headline(" + multi + ",'compound tail',charabia.query_any('compound'," +
+                         multi + "),'HighlightAll=true')", "multi-position-headline")
+            check(actual == "<b>compound</b> tail",
+                  "multi-position matching renders the original token exactly once", actual)
             # Both the parser's types and actual dictionaries take part in index build,
             # mutation and query analysis. Expected IDs are independent fixed literals.
             sql(session, "CREATE TABLE " + schema + ".docs(id integer PRIMARY KEY,body text NOT NULL);"

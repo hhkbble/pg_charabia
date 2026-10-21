@@ -82,6 +82,9 @@ def observe(label,expected):
     check("'run':" in snapshot['vector'] and snapshot['stored_consistent'],label+' analysis and stored vectors restored',snapshot)
     headline=sql("SELECT ts_headline('lab.cfg',body,'run'::tsquery,'HighlightAll=true')FROM lab.docs WHERE id=1",label+'-headline')
     check('<b>running</b>'in headline,label+' filter/stem headline retains original',headline)
+    chinese_headline=sql("SELECT ts_headline('lab.cfg',body,plainto_tsquery('lab.cfg','全文'),'HighlightAll=true')FROM lab.docs WHERE id=2",label+'-chinese-headline')
+    check('<b>全文</b>'in chinese_headline and chinese_headline.replace('<b>','').replace('</b>','')=='中文全文检索 PostgreSQL 18 支持 BM25',
+          label+' Chinese term highlights the original source',chinese_headline)
     REPORT.setdefault('observations',{})[label]={'heap':heap,'catalog':snapshot,'queries':[]};save()
     summary = sql("SELECT bm25_summarize_index('lab.docs_bm25')",label+'-bm25-durable-state')
     durable = {key:int(re.search(r"^  "+key+r": (\d+)$",summary,re.M).group(1)) for key in ('total_docs','total_len','docs_persisted','len_persisted')}
@@ -93,11 +96,15 @@ def observe(label,expected):
     queries=[('gin',"SELECT id FROM lab.docs WHERE to_tsvector('lab.cfg',body) @@ 'run'::tsquery",'docs_gin',[1,3,5]),
              ('gin_stored',"SELECT id FROM lab.docs WHERE v @@ 'run'::tsquery",'docs_stored_gin',[1,3,5]),
              ('bm25',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('run','lab.docs_bm25') LIMIT 20",'docs_bm25',[1,3,5]),
-             ('cjk',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('PostgreSQL','lab.docs_bm25') LIMIT 20",'docs_bm25',[2])]
+             ('mixed_latin',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('PostgreSQL','lab.docs_bm25') LIMIT 20",'docs_bm25',[2]),
+             ('gin_chinese',"SELECT id FROM lab.docs WHERE to_tsvector('lab.cfg',body) @@ plainto_tsquery('lab.cfg','全文')",'docs_gin',[2]),
+             ('gin_stored_chinese',"SELECT id FROM lab.docs WHERE v @@ plainto_tsquery('lab.cfg','全文')",'docs_stored_gin',[2]),
+             ('bm25_chinese',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('全文','lab.docs_bm25') LIMIT 20",'docs_bm25',[2])]
     for kind,query,index,want in queries:
         settings='SET enable_seqscan=off;SET enable_indexscan='+('off'if kind.startswith('gin')else'on')+';SET enable_bitmapscan=on;'
         plan=json.loads(sql(settings+'EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF) '+query,label+'-'+kind+'-plan'))
-        check(any(n.get('Index Name')==index and n.get('Actual Loops',0)>0 for n in nodes(plan)),label+' executed '+index,plan)
+        node_type='Bitmap Index Scan'if kind.startswith('gin')else'Index Scan'
+        check(any(n.get('Index Name')==index and n.get('Node Type')==node_type and n.get('Actual Loops',0)>0 for n in nodes(plan)),label+' executed '+index,plan)
         actual=json.loads(sql(settings+"SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM("+query+')q',label+'-'+kind+'-ids'))
         check(actual==want,label+' '+kind+' independent IDs',actual)
         REPORT['observations'][label]['queries'].append({'kind':kind,'plan':plan,'ids':actual});save()
