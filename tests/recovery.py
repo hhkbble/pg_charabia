@@ -124,6 +124,11 @@ try:
     settings=["listen_addresses=''",f"unix_socket_directories='{TMP}/socket'","port=55432",f"extension_control_path='{stage.parent}:$system'",f"dynamic_library_path='{stage}:$libdir'","shared_preload_libraries='pg_textsearch'","wal_level=replica","archive_mode=on",f"archive_command='test ! -f {archive}/%f && cp %p {archive}/%f'","max_wal_senders=4","fsync=on","full_page_writes=on","synchronous_commit=on","log_min_messages=notice"]
     with (source/'postgresql.conf').open('a')as h:h.write('\n'+'\n'.join(settings)+'\n')
     start(source,55432)
+    probe=os.environ.get('PGCB_CLEANUP_PROBE')
+    if probe in ('recovery-sql-error','recovery-sigterm'):
+        REPORT['cleanup_probe']={'mode':probe,'point':'owned source started before setup'};save()
+        if probe=='recovery-sql-error':sql('SELECT 1/0','controlled-source-sql-error')
+        else:os.kill(os.getpid(),signal.SIGTERM)
     durability=json.loads(sql("SELECT jsonb_build_object('fsync',current_setting('fsync'),'full_page_writes',current_setting('full_page_writes'),'synchronous_commit',current_setting('synchronous_commit'),'archive_mode',current_setting('archive_mode'),'wal_level',current_setting('wal_level'))",'durability'))
     check(all(durability[k]=='on' for k in ('fsync','full_page_writes','synchronous_commit','archive_mode')) and durability['wal_level']=='replica','durable archive settings',durability)
     sql("CREATE EXTENSION pg_charabia;CREATE EXTENSION pg_textsearch;CREATE SCHEMA lab;CREATE TEXT SEARCH CONFIGURATION lab.cfg(COPY=public.charabia);CREATE TEXT SEARCH DICTIONARY lab.eng_raw(TEMPLATE=charabia.template,Language='eng',Stem=false,Discard=false);CREATE TEXT SEARCH DICTIONARY lab.eng_stem(TEMPLATE=charabia.template,Language='eng',Stem=false,Discard=false);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_raw;CREATE TEXT SEARCH DICTIONARY lab.eng_filter(TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=false,Normalize=false,Filter=true);CREATE TABLE lab.docs(id int PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144),v tsvector);",'setup')

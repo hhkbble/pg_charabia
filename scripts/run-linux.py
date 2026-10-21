@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--no-build-image", action="store_true")
     parser.add_argument("--archive", type=Path, help="Load and verify an existing delivery archive without compiling")
-    parser.add_argument("--cleanup-probe", choices=("sql-error", "sigterm"), help=argparse.SUPPRESS)
+    parser.add_argument("--cleanup-probe", choices=("sql-error", "sigterm", "recovery-sql-error", "recovery-sigterm"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.archive:
         if args.suite or args.test_hooks or args.debug or args.cleanup_probe:

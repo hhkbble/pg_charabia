@@ -13,7 +13,8 @@ parser.add_argument("--platform", choices=("macos-arm64", "linux-amd64"), requir
 parser.add_argument("--debug", action="store_true", help="Use the cached debug library for cleanup probes")
 args = parser.parse_args()
 results = []
-for probe in (None, "sql-error", "sigterm"):
+probes = (None, "sql-error", "sigterm") + (("recovery-sql-error", "recovery-sigterm") if args.platform == "linux-amd64" else ())
+for probe in probes:
     env = dict(os.environ)
     if probe:
         env["PGCB_CLEANUP_PROBE"] = probe
@@ -22,7 +23,7 @@ for probe in (None, "sql-error", "sigterm"):
     if args.platform == "macos-arm64":
         argv = [str(root / "scripts/dev-test"), "--suite", "build"]
     else:
-        argv = [str(root / "scripts/verify-linux-amd64"), "--suite", "build", "--no-build-image"]
+        argv = [str(root / "scripts/verify-linux-amd64"), "--suite", "recovery" if probe and probe.startswith("recovery-") else "build", "--no-build-image"]
         if probe:
             argv += ["--cleanup-probe", probe]
     if args.debug:
@@ -47,6 +48,11 @@ for probe in (None, "sql-error", "sigterm"):
             raise SystemExit("Expected one inner cluster report")
         inner = json.loads(inner_reports[0].read_text())
         valid = valid and all(inner["cleanup"].get(k) for k in ("marker_matches", "cluster_stopped", "directory_removed"))
+        if probe and probe.startswith("recovery-"):
+            child = inner.get("recovery", {})
+            valid = valid and child.get("cleanup_probe", {}).get("mode") == probe
+            valid = valid and all(child.get("cleanup", {}).get(k) for k in ("marker_matches", "clusters_stopped", "directory_removed"))
+            valid = valid and child.get("status") == "failed"
     if not valid:
         raise SystemExit(f"Cleanup did not pass: {report}")
     results.append({"probe": probe or "success", "evidence": str(evidence), "exit_code": proc.returncode})
