@@ -11,6 +11,8 @@ import subprocess
 import tempfile
 import time
 
+from support import Session
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = Path(os.environ['PGCB_RUN_DIR']) / 'recovery'
 OUT.mkdir(exist_ok=True)
@@ -176,15 +178,11 @@ try:
     check(REPORT['restored_timeline']>REPORT['target']['timeline'],'promotion starts a new timeline',REPORT['restored_timeline'])
     sql("SELECT charabia.analysis_info();SELECT version();SHOW shared_preload_libraries",'restored-identity')
     # Persistent backend mapping proves which binary performs restored analysis.
-    with (OUT/'maps-client.stderr').open('w')as errors:
-        p=subprocess.Popen([BIN/'psql','-XAtq'],env=ENV,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=errors,text=True)
-        try:
-            p.stdin.write("LOAD 'pg_charabia';SELECT pg_backend_pid();\n");p.stdin.flush();pid=int(p.stdout.readline().strip())
-            maps=Path(f'/proc/{pid}/maps').read_text();(OUT/'restored-backend-maps.txt').write_text(maps)
-            check(str(lib)in maps,'restored backend maps exact staged release library',pid)
-            p.stdin.write('\\q\n');p.stdin.flush();p.communicate(timeout=10)
-        finally:
-            if p.poll()is None:p.kill();p.wait()
+    with Session(env=ENV) as backend:
+        backend.value("LOAD 'pg_charabia'")
+        maps=Path(f'/proc/{backend.pid}/maps').read_text()
+        (OUT/'restored-backend-maps.txt').write_text(maps)
+        check(str(lib)in maps,'restored backend maps exact staged release library',backend.pid)
     stop(recovered)
     REPORT['status']='passed'
 except BaseException as e:

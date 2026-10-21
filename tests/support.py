@@ -21,11 +21,11 @@ EVIDENCE = Path(os.environ["PGCB_RUN_DIR"])
 def literal(value):
     return "'" + value.replace("'", "''") + "'"
 
-def run(sql, database=None, check=True, timeout=120):
+def run(sql, database=None, check=True, timeout=120, env=None):
     argv = [PSQL, "-XAtq", "-v", "ON_ERROR_STOP=1"]
     if database:
         argv += ["-d", database]
-    result = subprocess.run(argv, input=sql, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    result = subprocess.run(argv, input=sql, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
     if check and result.returncode:
         raise AssertionError(f"psql failed ({result.returncode}): {result.stderr}\n{sql[:1000]}")
     return result if not check else result.stdout.strip()
@@ -35,11 +35,12 @@ def json_query(sql):
 
 class Session:
     """Keep one real backend alive across statements, errors and observations."""
-    def __init__(self, database=None):
+    def __init__(self, database=None, env=None):
         argv = [PSQL, "-XAtq", "-v", "ON_ERROR_STOP=0", "-v", "VERBOSITY=verbose"]
         if database:
             argv += ["-d",database]
-        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+        self.environment = env
+        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True, env=env)
         self.lines = queue.Queue()
         def read():
             for line in self.process.stdout:
@@ -84,7 +85,7 @@ class Session:
 
     def cancel(self):
         if self.process.poll() is None and self.pid is not None:
-            result = run(f"SELECT pg_cancel_backend({int(self.pid)})", database=self.database, check=False, timeout=10)
+            result = run(f"SELECT pg_cancel_backend({int(self.pid)})", database=self.database, check=False, timeout=10, env=self.environment)
             if result.returncode:
                 raise AssertionError(f"Failed to cancel backend {self.pid}: {result.stderr}")
 
