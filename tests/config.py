@@ -16,7 +16,7 @@ restored = schema + '_restore'
 conflict = schema + '_install'
 report = {
     'status': 'running', 'checks': [], 'errors': [], 'commands': [], 'dump_restore': {},
-    'source': 'PG18 SQL object ownership and transaction rules; configuration and cache lifecycle expectations; retained pinned-library observations',
+    'source': 'PG18 native object/ALTER/MVCC contracts; native configuration and shared Dictionary behavior; preserved pinned API observations',
 }
 
 

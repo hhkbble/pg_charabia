@@ -1,5 +1,5 @@
 {
-  "basis": "Independent domain retrieval expectations and original texts retained from direct pinned-library probes. Original-word recall, native term-overlap consistency, and ranking quality are separate checks. Mutable IDs 20 and 21 are explicit CRUD requirements. Raw scores are observations, never golden values.",
+  "basis": "Manually specified domain retrieval expectations and original texts carried forward from direct probes of the pinned analysis libraries. These cases test selected original-word recall. Native lexeme overlap is a separate index-consistency check, not an algorithm or quality oracle. Mutable IDs 20 and 21 are explicit CRUD requirements. Raw scores are observations, never golden values.",
   "documents": [
     [
       1,
@@ -164,7 +164,7 @@
         1,
         5
       ],
-      "candidate_basis": "Pinned reduced-profile probe: lossy Swedish gården stem/fold intersects English garden as well as the Swedish source; this is not a precision/relevance golden."
+      "candidate_basis": "Recorded pinned-library probe: lossy Swedish gården stem/fold intersects English garden as well as the Swedish source; this is not a precision/relevance golden."
     },
     {
       "name": "korean",

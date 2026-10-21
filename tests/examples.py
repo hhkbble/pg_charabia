@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 readme = ROOT / "README.md"
 examples = re.findall(r"```sql\n(.*?)```",readme.read_text(),re.S)
 assert len(examples) == 3, len(examples)
-assert os.environ["PGCB_PLATFORM"] == "linux-amd64", "The published BM25 examples require the Linux verifier and preloaded pg_textsearch"
+assert os.environ["PGCB_PLATFORM"] == "linux-amd64", "The README BM25 examples require the Linux verifier and preloaded pg_textsearch"
 database = "pgcb_examples_" + str(os.getpid())
 results = {"status":"running","readme_sha256":hashlib.sha256(readme.read_bytes()).hexdigest(),"examples":[],"checks":[],"source":"README SQL plus fixed PG/Charabia contracts and independent document IDs/source text"}
 created = False
@@ -65,6 +65,12 @@ try:
     check(ids == "1","native case normalization finds the independent Chinese document",ids)
     stem_ids = run("SELECT id FROM documents WHERE to_tsvector('public.charabia',body) @@ plainto_tsquery('public.charabia','run') ORDER BY id",database)
     check(stem_ids == "2","English upstream running->run golden is present in the long English document",stem_ids)
+    native_headline = run("SELECT ts_headline('public.charabia',body,plainto_tsquery('public.charabia','run'),'HighlightAll=true') FROM documents WHERE id=2",database)
+    check(native_headline.count("<b>running</b>") == 2,
+          "native headline marks both original running words from a run query",native_headline)
+    filtered = run("SELECT to_tsvector('app.filtered',body)::text FROM documents WHERE id=2",database)
+    check("'running':" in filtered and "'the':" in filtered and "'run':" not in filtered,
+          "filter followed by simple keeps surface and stopwords with Stem and Discard disabled",filtered)
     ranked = "SELECT id FROM documents ORDER BY body <@> to_bm25query('全文','public.documents_bm25') LIMIT 10"
     default_plan = json.loads(run("EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF) " + ranked,database))
     forced_plan = json.loads(run("SET enable_seqscan=off; EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF) " + ranked,database))

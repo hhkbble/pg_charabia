@@ -1,5 +1,5 @@
 {
-  "source": "Preserved stdout from a standalone Charabia 0.10.0 experiment on 2026-10-20, not generated from pg_charabia. Route labels describe that probe, not public SQL objects.",
+  "source": "Preserved stdout from a standalone Charabia 0.10.0 experiment on 2026-10-20, not generated from pg_charabia. Route labels describe that probe, not the current SQL interface.",
   "fixtures": [
     {
       "input": "中文全文检索 PostgreSQL 18 支持 BM25",

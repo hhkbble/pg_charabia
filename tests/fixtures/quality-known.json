@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "basis": "Frozen unresolved domain expectations and observed failures from direct pinned-library probes. Inputs and failure signatures are retained below. Diagnostic controls and new failures do not expand this list.",
+  "basis": "Frozen unresolved domain expectations and observed failures carried forward from direct probes of the pinned analysis libraries. The complete inputs and failure signatures are retained below. Diagnostic controls and new failures do not expand this list.",
   "cases": {
     "english-den": {
       "input": "A fox sleeps in its den after hunting through the woods with its family.",
