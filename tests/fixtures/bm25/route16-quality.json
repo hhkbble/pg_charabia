@@ -1,0 +1,17 @@
+{
+  "basis": "Independent domain requirements and diagnostic inputs for the 15-language candidate set. The German article die is an explicit precision requirement, not an eligible known failure. Automatic short-query language choices are observations, not a claim of universal language or inflection recall. Forced Italian Dictionary analysis checks the pinned Italian stemmer with ordinary Parser spans.",
+  "die": {
+    "input": "Die Datenbank speichert Dokumente und der Suchindex ermöglicht eine schnelle Suche nach gespeicherten Informationen.",
+    "query": "die",
+    "expected": false
+  },
+  "italian": {
+    "input": "I bambini giocano nel giardino con le loro famiglie.",
+    "query": "bambino",
+    "forced_language_expected": true
+  },
+  "german": {
+    "input": "Die Datenbank speichert Dokumente und der Suchindex ermöglicht eine schnelle Suche nach gespeicherten Informationen.",
+    "queries": ["Datenbank", "Suchindex", "Datenbank Suchindex"]
+  }
+}

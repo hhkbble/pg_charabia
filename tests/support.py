@@ -137,28 +137,34 @@ def rss(pid):
     return int(subprocess.check_output(["ps","-o","rss=","-p",str(pid)],text=True).strip())*1024
 
 
-def record_quality_case(case_id, *, input, query, config, expected, actual, known_signature=None):
-    """Save exact domain expectations separately from mechanism assertions.
-
-    Only the three reviewed source fixtures may be known failures. A caller
-    signature is redundant evidence and cannot redefine their fields. A changed
-    result (including an unexpected improvement) is a regression until reviewed
-    in the fixture. This helper never catches test failures.
-    """
+def record_quality_cases(cases):
+    """Persist the full quality batch before rejecting any regression."""
     path = EVIDENCE / "quality-results.json"
     document = json.loads(path.read_text()) if path.exists() else {"format": FORMAT, "cases": []}
     validate_quality(document)
-    if any(case["id"] == case_id for case in document["cases"]):
-        raise AssertionError(f"Quality case recorded twice: {case_id}")
-    case = quality_case(case_id, input=input, query=query, config=config, expected=expected, actual=actual, known_signature=known_signature)
-    document["cases"].append(case)
-    validate_quality(document)
+    seen={case["id"] for case in document["cases"]}
+    recorded=[]
+    for item in cases:
+        case_id=item["id"]
+        if case_id in seen:
+            raise AssertionError(f"Quality case recorded twice: {case_id}")
+        case=quality_case(case_id,**{key:value for key,value in item.items() if key!="id"})
+        seen.add(case_id)
+        document["cases"].append(case)
+        recorded.append(case)
+    checked=validate_quality(document)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
     temporary.replace(path)
-    if case["status"] == "regression":
-        raise AssertionError(f"Unreviewed quality result for {case_id}; see {path}")
-    return case
+    if checked["regressions"]:
+        raise AssertionError(f"Unreviewed quality result for {checked['regressions']}; see {path}")
+    return recorded
+
+
+def record_quality_case(case_id, *, input, query, config, expected, actual, known_signature=None):
+    """Preserve the exact signature; explicit closures never add exemptions."""
+    return record_quality_cases([dict(id=case_id,input=input,query=query,config=config,
+        expected=expected,actual=actual,known_signature=known_signature)])[0]
 
 
 def native_config_sql(name, stem=False, discard=False, normalize=True):
@@ -174,7 +180,7 @@ DO $fixture$ DECLARE l jsonb; BEGIN
   EXECUTE format('CREATE TEXT SEARCH DICTIONARY %I.%I(TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize={boolean(normalize)},Filter=false)',
    {literal(schema)},{literal(base)}||'_'||(l->>'language'),l->>'language',
    ({boolean(discard)} AND (l->>'has_stopwords')::boolean)::text,
-   ({boolean(stem)} AND l->>'stemmer' IS NOT NULL)::text);
+   ({boolean(stem)} AND (l->'defaults'->>'stem')::boolean)::text);
   EXECUTE format('ALTER TEXT SEARCH CONFIGURATION {name} ADD MAPPING FOR %I WITH %I.%I',l->>'language',{literal(schema)},{literal(base)}||'_'||(l->>'language'));
  END LOOP;
 END $fixture$;"""

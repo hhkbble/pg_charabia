@@ -105,7 +105,8 @@ def registration_failures(session):
                 assert after[role+"_dropped"]-before[role+"_dropped"]==1,record
                 assert after["state_registered"]==before["state_registered"],record
                 assert after["state_released"]==before["state_released"],record
-                assert after["dictionary_live_fst_bytes"]==before["dictionary_live_fst_bytes"],record
+                assert after["dictionary_live_fst_bytes"]==before["dictionary_live_fst_bytes"]==0,record
+                assert after["dictionary_live_referenced_fst_bytes"]==before["dictionary_live_referenced_fst_bytes"],record
                 assert "running" in session.value(HEALTHY)
                 final=stats(session)
                 assert final["parser_created"]==final["parser_dropped"],record

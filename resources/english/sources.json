@@ -1,0 +1,104 @@
+{
+  "format": 1,
+  "inputs": [
+    {
+      "file": "kaikki-English.jsonl.gz",
+      "kind": "kaikki",
+      "compression": "gzip",
+      "url": "https://kaikki.org/dictionary/English/kaikki.org-dictionary-English.jsonl.gz",
+      "bytes": 534135938,
+      "sha256": "cabb3a13b7179d5f8c5909e06b1dcd2e2ae6465d05f35de56509a5b4e2bf0a49",
+      "edition": "English Wiktionary dump 2026-10-01; Kaikki postprocessed extraction 2026-10-21",
+      "license": "CC-BY-SA-4.0 with upstream notices retained"
+    },
+    {
+      "file": "en_AU-large.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_AU-large.txt",
+      "bytes": 1641244,
+      "sha256": "16a868afb85faa109be217cae3cf506d7d4eafe128a3a5fbf335ef5ee6d6c73e",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_AU.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_AU.txt",
+      "bytes": 1026003,
+      "sha256": "13ed8e16092b15eebab0ef408f3fe109cdc6877bb27d4aeb3f4bb8633ed4c1f8",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_CA-large.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_CA-large.txt",
+      "bytes": 1640130,
+      "sha256": "ca1258552a81db34951374deafaa67bd676a02f0e1a026b14855f6042e46d47d",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_CA.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_CA.txt",
+      "bytes": 1021314,
+      "sha256": "97c814d4f06e31f1ac53a9fe7bc009242c03bdaaa0637408aef27cc0351012ee",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_GB-ise.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_GB-ise.txt",
+      "bytes": 1021473,
+      "sha256": "3febf4057b95dd654e8c9421197fd8c08cf8e7ae9c4a457228da9ec36af6083c",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_GB-ize.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_GB-ize.txt",
+      "bytes": 1021599,
+      "sha256": "dc8f5a35bd0afd61cd80b045d724b13c1491fe5440bf9cdd997882bf62096ec0",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_GB-large.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_GB-large.txt",
+      "bytes": 1674871,
+      "sha256": "e89e38c3685ba5830f76d804cd6998ba7048d734bd92a97f24855d96b6d26d20",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_US-large.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_US-large.txt",
+      "bytes": 1635915,
+      "sha256": "815abb6f1855304a6c3f358aa1e5ce85823140a547226ce4114386f9b796c30f",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    },
+    {
+      "file": "en_US.txt",
+      "kind": "esdb",
+      "compression": "none",
+      "url": "https://raw.githubusercontent.com/en-wl/wordlist-diff/7f2f4078354752045ee16a041605686561122185/en_US.txt",
+      "bytes": 1024440,
+      "sha256": "45a4dd29b86234fbabce26f33272466bb5572db6fdca1470c4f218e6b666a56d",
+      "license": "ESDB full Copyright, including AU and UKACD large-list terms"
+    }
+  ],
+  "expected_words": {
+    "entries": 1012224,
+    "bytes": 10821299,
+    "sha256": "8eb0b22f0110fac191ee0acc32382821755a7ad2674bd79c00b48a138ab4b9e5"
+  },
+  "copyright_url": "https://raw.githubusercontent.com/en-wl/wordlist/1e5b7d3a72f47a71da5d28686c1dd4b397178485/Copyright",
+  "copyright_sha256": "71bffd4b74ad47fff01c8b3c666e77da92737854e568850d8728024e0a53f304",
+  "attribution_rule": "Each original English parent headword page; forms cite that parent. Links permit access to page history and contributors."
+}

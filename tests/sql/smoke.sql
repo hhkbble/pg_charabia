@@ -1,8 +1,8 @@
 \set ON_ERROR_STOP on
 CREATE SCHEMA smoke;
 CREATE FUNCTION pg_temp.assert_true(ok boolean,message text) RETURNS void LANGUAGE plpgsql AS $$BEGIN IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION '%',message; END IF; END$$;
-SELECT pg_temp.assert_true((SELECT count(*)=73 FROM ts_token_type('charabia.parser')),'73 finite types');
-SELECT pg_temp.assert_true((SELECT count(*)=71 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),'71 dictionary mappings');
+SELECT pg_temp.assert_true((SELECT count(*)=18 FROM ts_token_type('charabia.parser')),'18 finite types');
+SELECT pg_temp.assert_true((SELECT count(*)=16 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),'16 dictionary mappings');
 SELECT pg_temp.assert_true((SELECT string_agg(token,'')='中文全文检索 PostgreSQL 18 支持 BM25' FROM ts_parse('charabia.parser','中文全文检索 PostgreSQL 18 支持 BM25')),'raw byte fidelity');
 SELECT * FROM ts_debug('public.charabia','中文全文检索 PostgreSQL 18 支持 BM25');
 SELECT charabia.analysis_info();
@@ -10,6 +10,20 @@ SELECT pg_temp.assert_true(ts_lexize('charabia.eng',' ' ) IS NULL,'separator Ign
 SELECT pg_temp.assert_true(ts_lexize('charabia.eng','The')=ARRAY[]::text[],'stop before stem with canonical case');
 SELECT pg_temp.assert_true(ts_lexize('charabia.eng','running')=ARRAY['running','run'],'same-position surface and stem');
 SELECT pg_temp.assert_true(ts_headline('public.charabia','<x> CAFÉ & cafe','cafe'::tsquery,'HighlightAll=true')='&lt;x&gt; <b>CAFÉ</b> &amp; <b>cafe</b>','standard original headline and escape');
+-- Four independent variants are same-position alternatives, not an AND group.
+CREATE TEXT SEARCH DICTIONARY smoke.tur4(TEMPLATE=charabia.template,Language='tur',English=true,Discard=false,Stem=true,Normalize=false,Filter=false);
+CREATE TEXT SEARCH CONFIGURATION smoke.four(PARSER=charabia.parser);
+DO $map$ DECLARE types text; BEGIN
+ SELECT string_agg(quote_ident(l->>'language'),',') INTO types FROM jsonb_array_elements(charabia.analysis_info()->'languages')l;
+ EXECUTE 'ALTER TEXT SEARCH CONFIGURATION smoke.four ADD MAPPING FOR '||types||' WITH smoke.tur4';
+END $map$;
+SELECT pg_temp.assert_true(ts_lexize('smoke.tur4','ABBREVIATE')=ARRAY['abbrevıate','abbrevıa','abbreviate','abbrevi'],'four independently prepared native and English terms');
+SELECT pg_temp.assert_true((SELECT bool_and(to_tsvector('smoke.four','ABBREVIATE') @@ to_tsquery('simple',quote_literal(term))) FROM unnest(ARRAY['abbrevıate','abbrevıa','abbreviate','abbrevi'])term),'each variant alone matches the four-term vector');
+SELECT pg_temp.assert_true((SELECT bool_and(positions=ARRAY[1]::smallint[]) FROM unnest(to_tsvector('smoke.four','ABBREVIATE'))),'all four terms have one original position');
+SELECT pg_temp.assert_true(ts_headline('smoke.four','ABBREVIATE','abbrevi'::tsquery,'HighlightAll=true')='<b>ABBREVIATE</b>','English branch highlights original Turkish-routed source');
+SELECT pg_temp.assert_true((SELECT count(*)=1 AND min(token)='PostgreSQL' FROM ts_parse('charabia.parser','PostgreSQL')),'whole-word recovery preserves one original ASCII word');
+SELECT pg_temp.assert_true((SELECT string_agg(token,'')='post greSQL' FROM ts_parse('charabia.parser','post greSQL')),'word recovery cannot remove whitespace');
+SELECT pg_temp.assert_true((SELECT string_agg(raw,'')='Ελληνικά বাংলা 123' FROM charabia.analyze('Ελληνικά বাংলা 123')),'valid outside and unknown text stays raw without an internal range error');
 CREATE TEXT SEARCH CONFIGURATION smoke.search(COPY=public.charabia);
 CREATE TEXT SEARCH DICTIONARY smoke.eng(TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=true,Normalize=true,Filter=false);
 ALTER TEXT SEARCH CONFIGURATION smoke.search ALTER MAPPING FOR eng WITH smoke.eng;

@@ -1,15 +1,15 @@
-//! Language completion for the fixed Charabia/whatlang model.
+//! Metadata completion for the fixed, closed 15-language candidate set.
 use charabia::{Language, Script};
 
-use crate::analysis::{AnalysisError, ErrorKind, Span};
+use crate::analysis::{AnalysisError, Span};
 use crate::routes::LanguageId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageSource {
     Charabia,
     Script,
-    Supplement,
     None,
+    EnglishMerge,
 }
 
 impl LanguageSource {
@@ -17,167 +17,170 @@ impl LanguageSource {
         match self {
             Self::Charabia => "charabia",
             Self::Script => "script",
-            Self::Supplement => "supplement",
             Self::None => "none",
+            Self::EnglishMerge => "english-merge",
         }
     }
 }
 
 fn singleton(script: Script) -> Option<Language> {
-    Some(match script {
-        Script::Bengali => Language::Ben,
-        Script::Hangul => Language::Kor,
-        Script::Georgian => Language::Kat,
-        Script::Greek => Language::Ell,
-        Script::Kannada => Language::Kan,
-        Script::Tamil => Language::Tam,
-        Script::Thai => Language::Tha,
-        Script::Gujarati => Language::Guj,
-        Script::Gurmukhi => Language::Pan,
-        Script::Telugu => Language::Tel,
-        Script::Malayalam => Language::Mal,
-        Script::Oriya => Language::Ori,
-        Script::Myanmar => Language::Mya,
-        Script::Sinhala => Language::Sin,
-        Script::Khmer => Language::Khm,
-        Script::Ethiopic => Language::Amh,
-        Script::Armenian => Language::Hye,
-        _ => return None,
-    })
-}
-
-fn route_for(script: Script, language: Option<Language>) -> Result<LanguageId, AnalysisError> {
-    let route = LanguageId::from_language(language).ok_or_else(|| {
-        AnalysisError::new(
-            ErrorKind::Internal,
-            "language is outside the fixed route table",
-        )
-    })?;
-    if route.script() != script {
-        return Err(AnalysisError::new(
-            ErrorKind::Internal,
-            "selected language does not belong to the raw token script",
-        ));
+    match script {
+        Script::Cyrillic => Some(Language::Rus),
+        Script::Hangul => Some(Language::Kor),
+        Script::Thai => Some(Language::Tha),
+        _ => None,
     }
-    Ok(route)
 }
 
-/// Complete metadata, returning the number of statistical detector calls.
+fn route_for(script: Script, language: Option<Language>) -> LanguageId {
+    language
+        .and_then(|language| LanguageId::from_language(Some(language)))
+        .filter(|route| route.script() == script)
+        .unwrap_or(LanguageId::UND)
+}
+
+/// Reuse compatible upstream metadata; only three missing paths need a map.
 ///
-/// Join adjacent spans by their detected script instead of detecting each token.
-/// Boundary tests check selected overlaps in the locked script/grouping rules.
-/// Armenian characters can join an earlier group and dominate its detected
-/// script; singleton completion needs no statistical call for those spans.
-/// These checks do not establish natural-language detection accuracy.
-pub(crate) fn complete(input: &str, spans: &mut [Span]) -> Result<usize, AnalysisError> {
-    let mut calls = 0;
-    let mut first = 0;
-    while first < spans.len() {
-        let script = spans[first].script;
-        let mut end = first + 1;
-        while end < spans.len() && spans[end].script == script {
-            end += 1;
+/// In the pinned feature map, Latin/Cj/Arabic already request detection while
+/// Cyrillic/Hangul/Thai do not. Repeating a failed detection changes neither
+/// the evidence nor its meaning. Unknown and out-of-scope inputs remain valid.
+pub(crate) fn complete(_input: &str, spans: &mut [Span]) -> Result<usize, AnalysisError> {
+    for span in spans {
+        match span.charabia_language {
+            Some(language) => {
+                span.route = route_for(span.script, Some(language));
+                span.language_source = if span.route == LanguageId::UND {
+                    LanguageSource::None
+                } else {
+                    LanguageSource::Charabia
+                };
+            }
+            None => {
+                span.route = route_for(span.script, singleton(span.script));
+                span.language_source = if span.route == LanguageId::UND {
+                    LanguageSource::None
+                } else {
+                    LanguageSource::Script
+                };
+            }
         }
-        let has_missing = spans[first..end]
-            .iter()
-            .any(|span| span.charabia_language.is_none());
-        let completed = if !has_missing {
-            None
-        } else if let Some(language) = singleton(script) {
-            Some((Some(language), LanguageSource::Script))
-        } else if matches!(
-            script,
-            Script::Latin | Script::Cyrillic | Script::Hebrew | Script::Devanagari
-        ) {
-            calls += 1;
-            let raw = &input[spans[first].start..spans[end - 1].end];
-            let language = whatlang::detect_lang(raw)
-                .map(Language::from)
-                .ok_or_else(|| {
-                    AnalysisError::new(
-                        ErrorKind::Internal,
-                        "fixed model returned no language for a recognized script group",
-                    )
-                })?;
-            Some((Some(language), LanguageSource::Supplement))
-        } else if script == Script::Other {
-            Some((None, LanguageSource::None))
-        } else {
-            return Err(AnalysisError::new(
-                ErrorKind::Internal,
-                "Charabia omitted language on a route that requires existing metadata",
-            ));
-        };
-        for span in &mut spans[first..end] {
-            let (language, source) = match span.charabia_language {
-                Some(language) => (Some(language), LanguageSource::Charabia),
-                None => completed.ok_or_else(|| {
-                    AnalysisError::new(ErrorKind::Internal, "missing language completion")
-                })?,
-            };
-            span.route = route_for(script, language)?;
-            span.language_source = source;
-        }
-        first = end;
     }
-    Ok(calls)
+    Ok(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::TokenType;
 
     #[test]
-    fn singleton_mapping_is_exactly_the_model_unique_scripts() {
-        let mut counts = std::collections::HashMap::new();
-        for language in whatlang::Lang::all() {
-            let route = LanguageId::from_language(Some(Language::from(*language))).unwrap();
-            *counts.entry(route.script()).or_insert(0) += 1;
-        }
-        // Counts come from the locked 70-language model, not detector quality.
+    fn only_three_missing_paths_have_direct_mappings() {
         for (script, expected) in [
-            (Script::Latin, 37),
-            (Script::Cyrillic, 6),
-            (Script::Hebrew, 2),
-            (Script::Devanagari, 3),
-            (Script::Arabic, 3),
-            (Script::Cj, 2),
+            (Script::Latin, None),
+            (Script::Cj, None),
+            (Script::Arabic, None),
+            (Script::Cyrillic, Some(Language::Rus)),
+            (Script::Hangul, Some(Language::Kor)),
+            (Script::Thai, Some(Language::Tha)),
+            (Script::Greek, None),
+            (Script::Hebrew, None),
+            (Script::Devanagari, None),
+            (Script::Bengali, None),
+            (Script::Armenian, None),
+            (Script::Other, None),
         ] {
-            assert_eq!(counts.get(&script), Some(&expected));
+            assert_eq!(singleton(script), expected);
         }
-        assert!(!counts.contains_key(&Script::Other));
-        let singletons: Vec<_> = counts.iter().filter(|(_, count)| **count == 1).collect();
-        assert_eq!(singletons.len(), 17);
-        for (script, _) in singletons {
-            let language = singleton(*script).expect("every unique model script has a map");
-            assert_eq!(
-                route_for(*script, Some(language)).unwrap().script(),
-                *script
-            );
-        }
-        for script in [
-            Script::Latin,
-            Script::Cyrillic,
-            Script::Hebrew,
-            Script::Devanagari,
+        // The finite target set has nine Latin and two Cj languages. These
+        // checks describe its routes, not statistical identification accuracy.
+        assert_eq!(
+            LanguageId::ALL
+                .iter()
+                .filter(|l| l.script() == Script::Latin)
+                .count(),
+            9
+        );
+        assert_eq!(
+            LanguageId::ALL
+                .iter()
+                .filter(|l| l.script() == Script::Cj)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn existing_metadata_must_be_in_range_and_script_compatible() {
+        assert_eq!(
+            route_for(Script::Latin, Some(Language::Eng)),
+            LanguageId::ENG
+        );
+        for (script, language) in [
+            (Script::Latin, Some(Language::Rus)),
+            (Script::Latin, Some(Language::Swe)),
+            (Script::Greek, Some(Language::Ell)),
+            (Script::Cj, Some(Language::Zho)),
+            (Script::Other, Some(Language::Eng)),
+            (Script::Latin, None),
         ] {
-            assert!(singleton(script).is_none());
+            assert_eq!(route_for(script, language), LanguageId::UND);
         }
     }
 
     #[test]
-    fn invalid_metadata_is_an_invariant_error_not_a_fallback() {
-        assert_eq!(
-            route_for(Script::Latin, Some(Language::Rus))
-                .unwrap_err()
-                .kind,
-            ErrorKind::Internal
-        );
-        assert_eq!(
-            route_for(Script::Latin, None).unwrap_err().kind,
-            ErrorKind::Internal
-        );
-        assert_eq!(route_for(Script::Other, None).unwrap(), LanguageId::UND);
-        assert!(LanguageId::from_language(Some(Language::Zho)).is_none());
+    fn unknown_metadata_is_preserved_and_never_redetected() {
+        let samples = [
+            (
+                Script::Latin,
+                Some(Language::Swe),
+                LanguageId::UND,
+                LanguageSource::None,
+            ),
+            (
+                Script::Latin,
+                Some(Language::Rus),
+                LanguageId::UND,
+                LanguageSource::None,
+            ),
+            (Script::Latin, None, LanguageId::UND, LanguageSource::None),
+            (
+                Script::Cyrillic,
+                None,
+                LanguageId::from_alias("rus").unwrap(),
+                LanguageSource::Script,
+            ),
+            (
+                Script::Cyrillic,
+                Some(Language::Ukr),
+                LanguageId::UND,
+                LanguageSource::None,
+            ),
+            (
+                Script::Thai,
+                None,
+                LanguageId::from_alias("tha").unwrap(),
+                LanguageSource::Script,
+            ),
+        ];
+        let mut spans: Vec<_> = samples
+            .iter()
+            .map(|(script, language, _, _)| Span {
+                start: 0,
+                end: 1,
+                char_start: 0,
+                char_end: 1,
+                route: LanguageId::UND,
+                token_type: TokenType::Blank,
+                script: *script,
+                charabia_language: *language,
+                language_source: LanguageSource::None,
+            })
+            .collect();
+        assert_eq!(complete("x", &mut spans).unwrap(), 0);
+        for (span, (_, language, route, source)) in spans.iter().zip(samples) {
+            assert_eq!(span.charabia_language, language);
+            assert_eq!(span.route, route);
+            assert_eq!(span.language_source, source);
+        }
     }
 }

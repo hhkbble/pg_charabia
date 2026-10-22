@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 
-from report_contract import ARCHIVE_SUITES, FORMAT, RELEASE_VERSION, STATIC_INFO_FIELDS, VERIFIED, digest, isolated_pg_environment, read_quality, require_recovery_report, require_release_report, require_static_info, verified_status, verify_checksums
+from report_contract import ARCHIVE_SUITES, DEFAULT_OBJECTS_QUERY, FORMAT, RELEASE_VERSION, STATIC_INFO_FIELDS, VERIFIED, digest, isolated_pg_environment, read_quality, require_default_objects, require_recovery_report, require_release_report, require_static_info, verified_status, verify_checksums
 
 
 def unpack_archive(archive, destination):
@@ -96,6 +96,15 @@ def main():
     try:
         delivery = unpack_archive(args.archive, temporary / "unpacked")
         verify_checksums(delivery)
+        resource_manifest=json.loads((delivery/"resources/manifest.json").read_text())
+        for source in resource_manifest["rebuild_source_archives"]:
+            if source["package_path"]!=f"dependency-sources/{source['crate']}-{source['version']}.crate":
+                raise ValueError("Invalid corresponding-source package path")
+            if digest(delivery/source["package_path"])!=source["sha256"]:
+                raise ValueError("Missing or changed corresponding source archive")
+        for required in ("Cargo.toml","Cargo.lock","build.rs","src/lib.rs","sql/pg_charabia.sql","docker/verify.Dockerfile","scripts/generate-english.py","scripts/rebuild-german","resources/english/words.txt","resources/english/attribution/headword-pages.txt.gz"):
+            if not (delivery/required).is_file():
+                raise ValueError("Missing rebuild/relink material: " + required)
         manifest = json.loads((delivery / "delivery-manifest.json").read_text())
         original = json.loads((delivery / "verification/run.json").read_text())
         require_release_report(original)
@@ -144,6 +153,10 @@ def main():
         for field in STATIC_INFO_FIELDS:
             if info.get(field) != original["analysis_info"].get(field):
                 raise RuntimeError(f"Extracted library analysis_info differs for {field}")
+        defaults = json.loads(command(psql + ["-Atq", "-c", DEFAULT_OBJECTS_QUERY], "default-objects", True))
+        require_default_objects(defaults, info)
+        result["default_objects"] = defaults
+        result["default_objects_verified"] = True
         with (evidence / "loaded-backend.stderr").open("w") as errors:
             backend = subprocess.Popen([str(x) for x in psql] + ["-Atq"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, env=env, text=True)
             try:

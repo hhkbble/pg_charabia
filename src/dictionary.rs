@@ -10,7 +10,10 @@ pub(crate) struct DictionaryState {
 #[cfg(feature = "test-hooks")]
 impl Drop for DictionaryState {
     fn drop(&mut self) {
-        crate::test_hooks::dictionary_dropped(fst_bytes(&self.options));
+        crate::test_hooks::dictionary_dropped(
+            fst_bytes(&self.options),
+            self.options.referenced_fst_bytes(),
+        );
     }
 }
 
@@ -27,8 +30,9 @@ fn dictionary_init(options: Internal) -> Internal {
     let options = unsafe { pg_ffi::dictionary_options(options) };
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
-    let generation = crate::test_hooks::dictionary_created(fst_bytes(&options));
-    // SAFETY: The state owns its FST, Drop is pure Rust, and LEXIZE borrows the
+    let generation =
+        crate::test_hooks::dictionary_created(fst_bytes(&options), options.referenced_fst_bytes());
+    // SAFETY: The state borrows static FST bytes, Drop is pure Rust, and LEXIZE borrows the
     // exact type only while PG keeps the owning dictCtx alive.
     let state = unsafe {
         pg_ffi::owned_state(DictionaryState {

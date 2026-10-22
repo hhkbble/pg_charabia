@@ -85,10 +85,10 @@ $capture$;
     try:
         sql(f"CREATE DATABASE {install_database} TEMPLATE template0;", "install-create-database", False)
         sql("CREATE EXTENSION pg_charabia;", "install-create-extension", False, install_database)
-        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.parser'))=73 AND "
-                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=71);",
+        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.parser'))=18 AND "
+                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=16);",
                   "install-catalog", database=install_database) is True,
-              "clean CREATE EXTENSION installs 73 types and 71 public default mappings")
+              "clean CREATE EXTENSION installs 18 types and 16 public default mappings")
         sql("DROP EXTENSION pg_charabia;", "install-drop-extension", False, install_database)
         uninstalled = sql("SELECT jsonb_build_object('extension_gone',NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_charabia'),"
             "'default_gone',NOT EXISTS(SELECT 1 FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname='public' AND c.cfgname='charabia'),"
@@ -110,6 +110,11 @@ $capture$;
         fixture = json.loads((ROOT / "tests/fixtures/analysis/general/direct-lexize.json").read_text())
         report["algorithm_sources"] = fixture["sources"]
         for ordinal, case in enumerate(fixture["cases"]):
+            if case["route"] not in {"eng","deu","nld","rus","spa","fra","por","ita","ara","tur","cmn","jpn","kor","vie","tha","und"}:
+                check(sql(f"SELECT to_jsonb(NOT EXISTS(SELECT 1 FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname='charabia' AND d.dictname='{case['route']}'));", f"outside-route-{ordinal}") is True,
+                      f"former recorded {case['route']} algorithm example has no installed route")
+                report.setdefault("historical_observations", []).append(dict(case=case, status="outside-supported-routes", note="Original observation retained; its language algorithm is not a current capability"))
+                continue
             actual = sql(f"SELECT coalesce(to_jsonb(ts_lexize('charabia.{case['route']}',{literal(case['raw'])})),'null'::jsonb);",
                          f"independent-lexize-{ordinal}")
             if "contains" in case:
@@ -261,7 +266,7 @@ CREATE TEXT SEARCH CONFIGURATION {changing}(PARSER=charabia.parser);
 DO $map$
 DECLARE types text;
 BEGIN
- SELECT string_agg(quote_ident(alias),',') INTO types FROM ts_token_type('charabia.parser') WHERE tokid<=71;
+ SELECT string_agg(quote_ident(alias),',') INTO types FROM ts_token_type('charabia.parser') WHERE tokid<=16;
  EXECUTE 'ALTER TEXT SEARCH CONFIGURATION {changing} ADD MAPPING FOR '||types||' WITH {schema}.changing_eng';
 END $map$;
 CREATE TABLE {schema}.migration(id integer PRIMARY KEY,body text,manual tsvector,

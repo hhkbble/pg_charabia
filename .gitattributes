@@ -1,0 +1,4 @@
+# Preserve the exact upstream license and source snapshot bytes, including their whitespace.
+resources/notices/ESDB-Copyright.txt whitespace=-blank-at-eol
+resources/notices/CC-BY-SA-4.0.txt whitespace=-blank-at-eof
+resources/english/attribution/kaikki-English.html whitespace=-blank-at-eol

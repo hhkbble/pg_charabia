@@ -17,7 +17,7 @@ REPORT = {
     "source": {
         "protocol": "PG18 ts_parse.c LexizeExec NULL/Stop/TSL_FILTER contract",
         "synonym": "PG18 distributed synonym_sample.syn: postgresql -> pgsql; indices -> index*",
-        "algorithm": "fixed Snowball running -> run and preserved interface research goldens",
+        "algorithm": "fixed Snowball running -> run; Turkish casing/Snowball ABBREVIATE -> abbrevıate/abbrevıa and English -> abbreviate/abbrevi",
         "positions": "independent literals alpha/beta and one explicit Stop hole",
         "multi_position": "PG18 ts_parse.c TSL_ADDPOS; to_tsany.c pushval_morph/plain OP_AND, rewritten to OR by query_any",
         "integration": "real Parser/configuration/Dictionary/vector/index/headline calls",
@@ -161,13 +161,17 @@ def main():
                     schema + "." + name + ");CREATE TEXT SEARCH DICTIONARY " + schema + "." + name +
                     "(TEMPLATE=" + schema + "." + name + "_template)", "protocol-" + name)
             for name, options in (
-                ("eng", "Language='eng',Discard=false,Stem=true,Normalize=true,Filter=false"),
-                ("fra_plain", "Language='fra',Discard=false,Stem=false,Normalize=false,Filter=false"),
-                ("fra_fold", "Language='fra',Discard=false,Stem=false,Normalize=true,Filter=false"),
-                ("filter_fold", "Language='fra',Discard=false,Stem=false,Normalize=true,Filter=true"),
-                ("filter_raw", "Language='fra',Discard=false,Stem=false,Normalize=false,Filter=true"),
-                ("eng_filter", "Language='eng',Discard=false,Stem=false,Normalize=true,Filter=true"),
-                ("eng_stop_filter", "Language='eng',Discard=true,Stem=false,Normalize=true,Filter=true"),
+                ("eng", "Language='eng',Discard=false,Stem=true,Normalize=true,Filter=false,English=false"),
+                ("fra_plain", "Language='fra',Discard=false,Stem=false,Normalize=false,Filter=false,English=false"),
+                ("fra_fold", "Language='fra',Discard=false,Stem=false,Normalize=true,Filter=false,English=false"),
+                ("filter_fold", "Language='fra',Discard=false,Stem=false,Normalize=true,Filter=true,English=false"),
+                ("filter_raw", "Language='fra',Discard=false,Stem=false,Normalize=false,Filter=true,English=false"),
+                ("eng_filter", "Language='eng',Discard=false,Stem=false,Normalize=true,Filter=true,English=false"),
+                ("eng_stop_filter", "Language='eng',Discard=true,Stem=false,Normalize=true,Filter=true,English=false"),
+                ("tur_parallel", "Language='tur',Discard=false,Stem=true,Normalize=false,Filter=false,English=true"),
+                ("tur_native", "Language='tur',Discard=false,Stem=true,Normalize=false,Filter=false,English=false"),
+                ("deu_stop_parallel", "Language='deu',Discard=true,Stem=false,Normalize=true,Filter=false,English=true"),
+                ("tur_stop_parallel", "Language='tur',Discard=true,Stem=false,Normalize=true,Filter=false,English=true"),
             ):
                 sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + "." + name +
                     "(TEMPLATE=charabia.template," + options + ")", "dictionary-" + name)
@@ -198,6 +202,9 @@ def main():
                 "dual_filter": schema + ".dual,pg_catalog.simple",
                 "multi_position": schema + ".multi,pg_catalog.simple",
                 "simple": "pg_catalog.simple",
+                "four_variants": schema + ".tur_parallel",
+                "unaccent_parallel": "public.unaccent," + schema + ".tur_parallel",
+                "branch_stop": schema + ".deu_stop_parallel",
             }
             for name, chain in chains.items():
                 config(session, name, chain)
@@ -232,6 +239,65 @@ def main():
                              literal(raw) + ")::text", "vector-" + name)
                 check(actual == expected, "real dictionary chain " + name,
                       {"input": raw, "expected": expected, "actual": actual})
+            four = literal(schema + ".four_variants")
+            four_terms = ["abbrevıate", "abbrevıa", "abbreviate", "abbrevi"]
+            actual = sql(session, "SELECT to_json(ts_lexize(" + literal(schema + ".tur_parallel") +
+                         ",'ABBREVIATE'))", "four-direct-terms", True)
+            check(actual == four_terms, "direct terminal Dictionary preserves four ordered branch alternatives", actual)
+            positions = sql(session, "SELECT json_object_agg(lexeme,positions) FROM unnest(to_tsvector(" +
+                            four + ",'ABBREVIATE'))", "four-positions", True)
+            check(positions == {term: [1] for term in four_terms},
+                  "all four real lexemes occupy one position without TSL_ADDPOS", positions)
+            analyzed_query = sql(session, "SELECT plainto_tsquery(" + four + ",'ABBREVIATE')::text",
+                                 "four-plain-query")
+            for term in four_terms:
+                match = sql(session, "SELECT to_json(to_tsvector(" + four + ",'ABBREVIATE') @@ " +
+                            literal(term) + "::tsquery AND " + literal("'" + term + "':1") +
+                            "::tsvector @@ plainto_tsquery(" + four + ",'ABBREVIATE'))",
+                            "four-single-" + str(four_terms.index(term)), True)
+                check(match is True,
+                      "one real variant suffices for both a single-term query and analyzed plain query", {
+                          "term": term, "plain_query": analyzed_query, "matches": match})
+            actual = sql(session, "SELECT ts_headline(" + four + ",'ABBREVIATE & <tag>'," +
+                         "plainto_tsquery(" + four + ",'ABBREVIATE'),'HighlightAll=true')", "four-headline")
+            check(actual == "<b>ABBREVIATE</b> &amp; &lt;tag&gt;",
+                  "four alternative operands highlight original spelling exactly once", actual)
+            accented = "ABBREVÍATE"
+            direct = sql(session, "SELECT to_json(ts_lexize(" + literal(schema + ".tur_parallel") +
+                         "," + literal(accented) + "))", "parallel-current-nonascii-direct", True)
+            native = sql(session, "SELECT to_json(ts_lexize(" + literal(schema + ".tur_native") +
+                         "," + literal(accented) + "))", "parallel-current-nonascii-native", True)
+            check(direct == native and 1 <= len(direct) <= 2 and direct[0] == "abbrevíate" and
+                  "abbreviate" not in direct and "abbrevi" not in direct,
+                  "non-ASCII direct bytes cannot activate English through a prepared key", {
+                      "raw": accented, "parallel": direct, "native": native,
+                      "basis": "NFC/accent-preserving preparation and the explicit current-byte ASCII gate; native comparison checks switch independence"})
+            replacement = sql(session, "SELECT to_json(ts_lexize('public.unaccent'," + literal(accented) + "))",
+                              "parallel-unaccent-replacement", True)
+            check(replacement == ["ABBREVIATE"], "native unaccent supplies the exact ASCII replacement", replacement)
+            filtered = literal(schema + ".unaccent_parallel")
+            positions = sql(session, "SELECT json_object_agg(lexeme,positions) FROM unnest(to_tsvector(" +
+                            filtered + "," + literal(accented) + "))", "parallel-after-filter-positions", True)
+            check(positions == {term: [1] for term in four_terms},
+                  "terminal English gate sees replacement bytes and retains all four same-position alternatives", positions)
+            original = accented + " & <tag>"
+            for term in four_terms:
+                actual = sql(session, "SELECT ts_headline(" + filtered + "," + literal(original) + "," +
+                             literal(term) + "::tsquery,'HighlightAll=true')", "parallel-after-filter-headline-" + str(four_terms.index(term)))
+                check(actual == "<b>" + accented + "</b> &amp; &lt;tag&gt;",
+                      "filter-supplied alternatives highlight the accented original exactly once", {
+                          "term": term, "actual": actual, "original": original})
+            for dictionary, raw, expected in (("deu_stop_parallel", "die", ["die"]),
+                                               ("tur_stop_parallel", "the", ["the"]),
+                                               ("deu_stop_parallel", "in", [])):
+                actual = sql(session, "SELECT to_json(ts_lexize(" + literal(schema + "." + dictionary) +
+                             "," + literal(raw) + "))", "parallel-stop-" + raw, True)
+                check(actual == expected, "branch Terms win over another Stop; both Stops stay Stop", {
+                    "dictionary": dictionary, "raw": raw, "expected": expected, "actual": actual,
+                    "basis": "fixed German die/in and English the/in stop entries, with independent non-stop branch"})
+            actual = sql(session, "SELECT to_tsvector(" + literal(schema + ".branch_stop") +
+                         ",'alpha in beta')::text", "parallel-stop-hole")
+            check(actual == "'alpha':1 'beta':3", "both branch Stops consume one position, not two", actual)
             # Display source is never reconstructed from the external synonym lexeme.
             actual = sql(session, "SELECT ts_headline(" + literal(schema + ".filter_syn") +
                          ",'PostgreSQL & <tag>',plainto_tsquery(" + literal(schema + ".filter_syn") +

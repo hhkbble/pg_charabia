@@ -93,6 +93,41 @@ def observe_chinese_headline(label):
     check('<b>全文</b>'in headline and headline.replace('<b>','').replace('</b>','')=='中文全文检索 PostgreSQL 18 支持 BM25',
           label+' Chinese term highlights the original source',headline)
 
+def observe_round4(label):
+    terms=['abbrevıate','abbrevıa','abbreviate','abbrevi']
+    snapshot=json.loads(sql("SELECT jsonb_build_object('options',(SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.parallel'::regdictionary),'direct',ts_lexize('lab.parallel','ABBREVIATE'),'und',ts_lexize('lab.und_words','12345'),'und_dictionary',(SELECT mapdict::regdictionary::text FROM pg_ts_config_map WHERE mapcfg='lab.variant_cfg'::regconfig AND maptokentype=16),'positions',(SELECT jsonb_object_agg(lexeme,positions) FROM unnest(to_tsvector('lab.variant_cfg','ABBREVIATE'))),'types',(SELECT jsonb_agg(alias ORDER BY tokid)FROM ts_token_type('charabia.parser')))",label+'-round4-catalog'))
+    normalized=snapshot['options'].lower().replace("'",'').replace('"','')
+    check('english = true'in normalized and 'stem = true'in normalized and 'normalize = false'in normalized,
+          label+' restores the committed parallel English parameters',snapshot)
+    check(snapshot['und_dictionary']=='lab.und_words',label+' restores actual und index mapping',snapshot)
+    check(snapshot['direct']==terms and snapshot['positions']=={term:[1]for term in terms},
+          label+' rebuilds four same-position alternatives after cold INIT',snapshot)
+    check(snapshot['und']==['12345'] and snapshot['types']==['eng','deu','nld','rus','spa','fra','por','ita','ara','tur','cmn','jpn','kor','vie','tha','und','blank','display_only'],
+          label+' restores the exact route catalog and immutable und behavior',snapshot)
+    check(sql("SELECT bool_and(v IS NOT DISTINCT FROM to_tsvector('lab.variant_cfg',body))FROM lab.variant_docs",label+'-round4-stored')=='t',
+          label+' restored variant stored vectors match target analysis')
+    original='ABBREVIATE & <tag>'
+    headline=sql("SELECT ts_headline('lab.variant_cfg',"+literal(original)+",'abbrevıate | abbrevıa | abbreviate | abbrevi'::tsquery,'HighlightAll=true')",label+'-round4-headline')
+    check(headline=='<b>ABBREVIATE</b> &amp; &lt;tag&gt;',
+          label+' restored alternatives highlight the original once with escaping',headline)
+    merge_rows=json.loads(sql("SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze('PostgreSQL')a",label+'-round4-merge-spans'))
+    check(len(merge_rows)==1 and merge_rows[0]['raw']=='PostgreSQL' and merge_rows[0]['byte_start']==0 and merge_rows[0]['byte_end']==10,
+          label+' complete English word retains its exact original span',merge_rows)
+    check(sql("SELECT ts_headline('lab.variant_cfg','left PostgreSQL right','postgresql:*'::tsquery,'HighlightAll=true')",label+'-round4-merge-headline')=='left <b>PostgreSQL</b> right',
+          label+' merged whole-word prefix highlights original text')
+    und_rows=json.loads(sql("SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze('12345')a",label+'-round4-und-span'))
+    check(len(und_rows)==1 and und_rows[0]['raw']=='12345' and und_rows[0]['language']=='und',
+          label+' missing language metadata safely keeps numeric und input',und_rows)
+    REPORT['observations'][label]['round4']={'catalog':snapshot,'merge_spans':merge_rows,'und_spans':und_rows,'headline':headline};save()
+    queries=[('gin_variant_'+str(i),"SELECT id FROM lab.variant_docs WHERE to_tsvector('lab.variant_cfg',body) @@ "+literal(term)+"::tsquery",'variant_gin',[1])for i,term in enumerate(terms)]
+    queries += [('gin_stored_variant',"SELECT id FROM lab.variant_docs WHERE v @@ 'abbrevıa'::tsquery",'variant_stored_gin',[1]),
+                ('bm25_variant',"SELECT id FROM lab.variant_docs ORDER BY body <@> to_bm25query('ABBREVIATE','lab.variant_bm25')LIMIT 20",'variant_bm25',[1]),
+                ('gin_merged',"SELECT id FROM lab.variant_docs WHERE to_tsvector('lab.variant_cfg',body) @@ 'postgresql'::tsquery",'variant_gin',[2]),
+                ('bm25_merged',"SELECT id FROM lab.variant_docs ORDER BY body <@> to_bm25query('PostgreSQL','lab.variant_bm25')LIMIT 20",'variant_bm25',[2]),
+                ('gin_und',"SELECT id FROM lab.variant_docs WHERE to_tsvector('lab.variant_cfg',body) @@ '12345'::tsquery",'variant_gin',[3]),
+                ('bm25_und',"SELECT id FROM lab.variant_docs ORDER BY body <@> to_bm25query('12345','lab.variant_bm25')LIMIT 20",'variant_bm25',[3])]
+    observe_queries(label,queries)
+
 def observe(label,expected):
     heap=json.loads(sql('SELECT jsonb_agg(id ORDER BY id) FROM lab.docs',label+'-heap'))
     check(heap==expected,label+' heap at target',heap)
@@ -116,6 +151,7 @@ def observe(label,expected):
              ('bm25',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('run','lab.docs_bm25') LIMIT 20",'docs_bm25',[1,3,5]),
              ('mixed_latin',"SELECT id FROM lab.docs ORDER BY body <@> to_bm25query('PostgreSQL','lab.docs_bm25') LIMIT 20",'docs_bm25',[2])]
     observe_queries(label,queries+chinese_queries())
+    observe_round4(label)
 
 def literal(s):return "'"+s.replace("'","''")+"'"
 
@@ -146,21 +182,22 @@ try:
         else:os.kill(os.getpid(),signal.SIGTERM)
     durability=json.loads(sql("SELECT jsonb_build_object('fsync',current_setting('fsync'),'full_page_writes',current_setting('full_page_writes'),'synchronous_commit',current_setting('synchronous_commit'),'archive_mode',current_setting('archive_mode'),'wal_level',current_setting('wal_level'))",'durability'))
     check(all(durability[k]=='on' for k in ('fsync','full_page_writes','synchronous_commit','archive_mode')) and durability['wal_level']=='replica','durable archive settings',durability)
-    sql("CREATE EXTENSION pg_charabia;CREATE EXTENSION pg_textsearch;CREATE SCHEMA lab;CREATE TEXT SEARCH CONFIGURATION lab.cfg(COPY=public.charabia);CREATE TEXT SEARCH DICTIONARY lab.eng_raw(TEMPLATE=charabia.template,Language='eng',Stem=false,Discard=false);CREATE TEXT SEARCH DICTIONARY lab.eng_stem(TEMPLATE=charabia.template,Language='eng',Stem=false,Discard=false);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_raw;CREATE TEXT SEARCH DICTIONARY lab.eng_filter(TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=false,Normalize=false,Filter=true);CREATE TABLE lab.docs(id int PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144),v tsvector);",'setup')
+    sql("CREATE EXTENSION pg_charabia;CREATE EXTENSION pg_textsearch;CREATE SCHEMA lab;CREATE TEXT SEARCH CONFIGURATION lab.cfg(COPY=public.charabia);CREATE TEXT SEARCH DICTIONARY lab.eng_raw(TEMPLATE=charabia.template,Language='eng',Stem=false,Discard=false,English=false);CREATE TEXT SEARCH DICTIONARY lab.eng_stem(TEMPLATE=charabia.template,Language='eng',Stem=false,Discard=false,English=false);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_raw;CREATE TEXT SEARCH DICTIONARY lab.eng_filter(TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=false,Normalize=false,Filter=true,English=false);CREATE TABLE lab.docs(id int PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144),v tsvector);",'setup')
+    sql("CREATE TEXT SEARCH DICTIONARY lab.parallel(TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);CREATE TEXT SEARCH DICTIONARY lab.und_words(TEMPLATE=charabia.template,Language='und',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);CREATE TEXT SEARCH CONFIGURATION lab.variant_cfg(PARSER=charabia.parser);DO $m$ DECLARE r record;BEGIN FOR r IN SELECT alias FROM ts_token_type('charabia.parser')WHERE alias NOT IN('blank','display_only')LOOP EXECUTE format('ALTER TEXT SEARCH CONFIGURATION lab.variant_cfg ADD MAPPING FOR %I WITH lab.parallel',r.alias);END LOOP;END$m$;ALTER TEXT SEARCH CONFIGURATION lab.variant_cfg ALTER MAPPING FOR und WITH lab.und_words;CREATE TABLE lab.variant_docs(id int PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144),v tsvector);INSERT INTO lab.variant_docs VALUES(1,'ABBREVIATE',NULL),(2,'PostgreSQL',NULL),(3,'12345',NULL);UPDATE lab.variant_docs SET v=to_tsvector('lab.variant_cfg',body);CREATE INDEX variant_gin ON lab.variant_docs USING gin(to_tsvector('lab.variant_cfg',body));CREATE INDEX variant_stored_gin ON lab.variant_docs USING gin(v);CREATE INDEX variant_bm25 ON lab.variant_docs USING bm25(body)WITH(text_config='lab.variant_cfg')",'round4-base-data')
     sql("INSERT INTO lab.docs VALUES(1,"+literal(ENGLISH)+",NULL),(2,'中文全文检索 PostgreSQL 18 支持 BM25',NULL),(3,'unrelated',NULL),(4,"+literal(ENGLISH)+",NULL);UPDATE lab.docs SET v=to_tsvector('lab.cfg',body);CREATE INDEX docs_gin ON lab.docs USING gin(to_tsvector('lab.cfg',body));CREATE INDEX docs_stored_gin ON lab.docs USING gin(v);CREATE INDEX docs_bm25 ON lab.docs USING bm25(body)WITH(text_config='lab.cfg');CHECKPOINT",'base-data')
     # A real online basebackup; post-backup changes must come from archived WAL.
     command([BIN/'pg_basebackup','-D',base,'--format=plain','--wal-method=stream','--checkpoint=fast','--no-password'],'basebackup')
     command([BIN/'pg_verifybackup',base],'verify-basebackup')
     REPORT['backup_has_extension_so']=any(p.name=='pg_charabia.so'for p in base.rglob('*'))
     check(not REPORT['backup_has_extension_so'],'basebackup does not include staged extension files')
-    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=true);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_filter,lab.eng_stem;UPDATE lab.docs SET v=to_tsvector('lab.cfg',body);REINDEX INDEX lab.docs_gin;REINDEX INDEX lab.docs_stored_gin;REINDEX INDEX lab.docs_bm25;COMMIT",'target-config')
+    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=true);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_filter,lab.eng_stem;UPDATE lab.docs SET v=to_tsvector('lab.cfg',body);REINDEX INDEX lab.docs_gin;REINDEX INDEX lab.docs_stored_gin;REINDEX INDEX lab.docs_bm25;ALTER TEXT SEARCH DICTIONARY lab.parallel(English=true,Stem=true);UPDATE lab.variant_docs SET v=to_tsvector('lab.variant_cfg',body);REINDEX INDEX lab.variant_gin;REINDEX INDEX lab.variant_stored_gin;REINDEX INDEX lab.variant_bm25;COMMIT",'target-config')
     sql("BEGIN;INSERT INTO lab.docs VALUES(5,"+literal(ENGLISH)+",to_tsvector('lab.cfg',"+literal(ENGLISH)+"));UPDATE lab.docs SET body="+literal(ENGLISH)+",v=to_tsvector('lab.cfg',"+literal(ENGLISH)+")WHERE id=3;DELETE FROM lab.docs WHERE id=4;COMMIT",'target-dml')
-    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=false);ROLLBACK",'rolled-back-ddl')
+    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=false);ALTER TEXT SEARCH DICTIONARY lab.parallel(English=false,Stem=false);ROLLBACK",'rolled-back-ddl')
     observe('target',[1,2,3,5])
     target='pgcb_recovery_'+RUN.replace('-','_')
     lsn=sql('SELECT pg_create_restore_point('+literal(target)+')','restore-point')
     REPORT['target']={'name':target,'lsn':lsn,'timeline':int(sql("SELECT substring(pg_walfile_name(pg_current_wal_lsn()) for 8)",'source-timeline'),16),'kind':'named WAL restore point after target commits and rollback'};save()
-    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=false);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_raw;DELETE FROM lab.docs WHERE id=1;INSERT INTO lab.docs VALUES(99,'after target',to_tsvector('lab.cfg','after target'));COMMIT",'after-target')
+    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=false);ALTER TEXT SEARCH DICTIONARY lab.parallel(English=false,Stem=false);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_raw;DELETE FROM lab.docs WHERE id=1;INSERT INTO lab.docs VALUES(99,'after target',to_tsvector('lab.cfg','after target'));COMMIT",'after-target')
     walfile=sql("SELECT pg_walfile_name(pg_switch_wal())",'wal-switch')
     deadline=time.monotonic()+30
     while not(archive/walfile).is_file()and time.monotonic()<deadline:time.sleep(.1)
@@ -172,6 +209,8 @@ try:
     # Crash recovery must retain committed later state and discard the rollback.
     check(sql('SELECT string_agg(id::text,\',\' ORDER BY id)FROM lab.docs','crash-heap')=='2,3,5,99','crash recovery retains committed post-target state')
     check('stem = false'in sql("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.eng_stem'::regdictionary",'crash-dictionary').lower().replace("'",""),'crash recovery dictionary parameter')
+    check('english = false'in sql("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.parallel'::regdictionary",'crash-english').lower().replace("'",''),
+          'crash recovery retains the later committed English option')
     maps=json.loads(sql("SELECT jsonb_agg(d.dictname ORDER BY m.mapseqno)FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict JOIN ts_token_type('charabia.parser')t ON t.tokid=m.maptokentype WHERE m.mapcfg='lab.cfg'::regconfig AND t.alias='eng'",'crash-mapping'))
     check(maps==['eng_raw'],'crash recovery retains the committed post-target mapping',maps)
     REPORT.setdefault('observations',{})['crash']={'heap':[2,3,5,99],'maps':maps,'queries':[]};save()
@@ -218,6 +257,18 @@ try:
         maps=Path(f'/proc/{backend.pid}/maps').read_text()
         (OUT/'restored-backend-maps.txt').write_text(maps)
         check(str(lib)in maps,'restored backend maps exact staged release library',backend.pid)
+    # Recovery does not pin pre-backup OIDs or runtime state. Ordinary ALTER and
+    # explicit maintenance must still work after target replay and promotion.
+    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.parallel(English=false,Stem=false);UPDATE lab.variant_docs SET v=to_tsvector('lab.variant_cfg',body);REINDEX INDEX lab.variant_gin;REINDEX INDEX lab.variant_stored_gin;REINDEX INDEX lab.variant_bm25;COMMIT",'restored-alter-maintenance')
+    changed=json.loads(sql("SELECT to_jsonb(ts_lexize('lab.parallel','ABBREVIATE'))",'restored-alter-direct'))
+    check(changed==['abbrevıate'],'restored dictionary can disable English and stem after promotion',changed)
+    REPORT['observations']['restored-altered']={'queries':[]};save()
+    observe_queries('restored-altered',[
+        ('gin_changed',"SELECT id FROM lab.variant_docs WHERE to_tsvector('lab.variant_cfg',body) @@ 'abbrevıate'::tsquery",'variant_gin',[1]),
+        ('gin_removed',"SELECT id FROM lab.variant_docs WHERE to_tsvector('lab.variant_cfg',body) @@ 'abbrevi'::tsquery",'variant_gin',[]),
+        ('gin_stored_removed',"SELECT id FROM lab.variant_docs WHERE v @@ 'abbrevi'::tsquery",'variant_stored_gin',[]),
+        ('bm25_changed',"SELECT id FROM lab.variant_docs ORDER BY body <@> to_bm25query('ABBREVIATE','lab.variant_bm25')LIMIT 20",'variant_bm25',[1]),
+        ('bm25_removed',"SELECT id FROM lab.variant_docs ORDER BY body <@> to_bm25query('abbrevi','lab.variant_bm25')LIMIT 20",'variant_bm25',[])])
     stop(recovered)
     REPORT['status']='passed'
 except BaseException as e:

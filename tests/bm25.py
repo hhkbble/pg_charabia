@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
-from support import Session, literal, native_config_sql, record_quality_case
+from support import Session, literal, native_config_sql, record_quality_cases
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = json.loads((ROOT / "tests/fixtures/bm25/corpus.json").read_text())
@@ -49,6 +49,7 @@ class Suite:
         self.sequence = 0
         self.deleted = set()
         self.incremental = set()
+        self.pending_quality = []
 
     def checkpoint(self):
         temporary = self.evidence / "bm25-results.json.tmp"
@@ -60,6 +61,24 @@ class Suite:
         if not condition:
             raise AssertionError(message)
         self.result["assertions"] += 1
+
+    def queue_quality(self, case_id, **fields):
+        # Preserve every domain assertion, but collect independent mechanism
+        # evidence before the shared contract rejects any unreviewed result.
+        if any(item["id"] == case_id for item in self.pending_quality):
+            raise AssertionError("Duplicate pending domain assertion: " + case_id)
+        self.pending_quality.append(dict(id=case_id, **fields))
+        signature = fields.get("known_signature")
+        frozen_match = signature is not None and all(fields[key] == signature[key] for key in ("input", "query", "config", "expected", "actual"))
+        status = "known-domain-failure" if frozen_match else "domain-failure" if fields["actual"] != fields["expected"] else "unreviewed-improvement" if signature else "passed"
+        self.result.setdefault("deferred_domain_assertions", []).append(dict(
+            id=case_id, expected=fields["expected"], actual=fields["actual"], status=status))
+        self.result["pending_quality"] = self.pending_quality
+        self.checkpoint()
+
+    def flush_quality(self):
+        self.result["domain_quality"] = record_quality_cases(self.pending_quality)
+        self.checkpoint()
 
     def run(self, sql, label):
         self.sequence += 1
@@ -171,7 +190,11 @@ class Suite:
                     self.require(len(oracle["all_ids"]) < LIMIT, label + ": LIMIT truncates oracle")
                     target = index_nodes(plan, case["index"])
                     if case.get("empty_analysis"):
-                        self.require(oracle["query_lexemes"] == [], label + ": not the frozen empty analysis")
+                        record["frozen_empty_analysis"] = []
+                        record["frozen_empty_analysis_matches"] = oracle["query_lexemes"] == []
+                        if phase == "bulk" and cache == "on" and mode == "force_custom_plan":
+                            self.queue_quality("bm25-analysis-" + case["name"], input=case["text"], query=case["text"],
+                                config=case["config"], expected=[], actual=oracle["query_lexemes"])
                     else:
                         self.require(bool(oracle["query_lexemes"]), label + ": unexpected empty analysis cannot use the fallback allowance")
                     if not target and not oracle["query_lexemes"]:
@@ -185,18 +208,17 @@ class Suite:
                         self.require(bool(target) and all(n.get("Schema") == "bm25_test" and n.get("Actual Loops",0)>0 for n in target),
                                      label + ": actual target BM25 Index Scan missing")
                         self.require(sorted(actual) == oracle["oracle"], label + ": candidates disagree with native lexeme overlap")
-                        if "expected_ids" in case:
-                            self.require(sorted(actual) == case["expected_ids"], label + f": independent domain IDs {case['expected_ids']} != {actual}")
                         if "expected_order" in case:
                             self.require(actual == case["expected_order"], label + ": independent TF ranking differs")
                         record["path"] = "target-bm25-index-scan"
                     self.require(len(actual) == len(set(actual)), label + ": duplicate candidate IDs")
-                    if phase == "bulk" and cache == "on" and mode == "force_custom_plan" and "expected_ids" in case:
-                        case_id = "bm25-domain-" + case["name"]
-                        self.result["domain_quality"].append(record_quality_case(case_id,
+                    if "expected_ids" in case:
+                        case_id = "bm25-domain-" + case["name"] if phase == "bulk" and cache == "on" and mode == "force_custom_plan" else (
+                            "bm25-domain-" + phase + "-" + cache + "-" + mode + "-" + case["name"])
+                        self.queue_quality(case_id,
                             input=FIXTURE["documents"] if case["table"] == "docs" else case["table"],
-                            query=case["text"], config=case["config"], expected=case["expected_ids"], actual=sorted(actual)))
-                    if not case.get("empty_analysis"):
+                            query=case["text"], config=case["config"], expected=case["expected_ids"], actual=sorted(actual))
+                    if oracle["query_lexemes"]:
                         self.result["scores"].append({"phase":phase,"case":case["name"],"cache":cache,"mode":mode,
                             "score_and_rank":scored,"note":"Observed scores/ranks; no floating-point golden or score-neutrality claim"})
                 counts = values[-1]
@@ -225,51 +247,44 @@ class Suite:
                 f"'query',{query_expression}::text,"
                 f"'actual',to_tsvector('public.charabia',{body}) @@ {query_expression});", "known-" + case_id)[0]
             self.result["known_quality"].append(dict(id=case_id, frozen=case, observation=observation,
-                note="Unresolved domain failure, never counted as passing default retrieval"))
-            analysis = [a for a in observation["query_analysis"] if a["kind"] == "word"]
-            language = "nob" if phrase else "dan" if case_id == "english-den" else "swe"
-            self.require(analysis and all(a["language"] == language for a in analysis), case_id + ": failure changed selected language")
-            self.require(observation["actual"] is False, case_id + ": unexpected improvement requires review")
-            if not phrase:
-                self.require(len(analysis) == 1 and observation["query_lexemes"] == [] and
-                             observation["dictionary_decisions"] == [{"raw": case["query"], "language": language, "lexemes": []}],
-                             case_id + ": not the frozen stop deletion mechanism")
-                self.require(case["query"] in observation["document_lexemes"] and
-                             any(a["raw"] == case["query"] and a["kind"] == "word" for a in observation["document_analysis"]),
-                             case_id + ": document no longer retains the domain word")
-            if phrase:
-                # The bag path still retrieves the original document; it does
-                # not prove the separate domain phrase expectation true.
-                observation["bag_ids"] = self.check_query("public.charabia","docs","docs_bm25",case["query"],[1],"known-phrase-bag")
-                same_context = self.run(f"SELECT to_jsonb(to_tsvector('public.charabia',{body}) @@ phraseto_tsquery('public.charabia',{body}));", "same-context-phrase")[0]
-                self.require(same_context is True,"same-context positions/variants failed independently of short-query selection")
+                note="Original domain expectation and failure signature retained; current analysis is reviewed separately"))
+            # A new candidate set must not pretend dan/swe/nob are reachable.
+            # Actual selected languages and dictionary results above are evidence,
+            # not expected values. Only the exact frozen signature is exempt.
+            analysis = [a for a in observation["query_analysis"] or [] if a["kind"] == "word"]
+            self.require(bool(analysis), case_id + ": query no longer has a real Word token")
+            if observation["query_lexemes"]:
+                observation["default_bag_ids"] = self.check_query(
+                    "public.charabia", "docs", "docs_bm25", case["query"], None, "current-default-bag-" + case_id)
             else:
                 guarded = ("SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM(SELECT id FROM bm25_test.docs "
                     f"WHERE numnode(charabia.query_any({q}))>0 ORDER BY body <@> to_bm25query({q},'bm25_test.docs_bm25') LIMIT 100)r")
-                guarded_ids = self.run(guarded,"known-guarded-bag-"+case_id)[0]
+                guarded_ids = self.run(guarded, "known-guarded-bag-" + case_id)[0]
                 observation["explicit_empty_guard_bm25_ids"] = guarded_ids
-                self.require(guarded_ids==[],case_id+": explicit empty-query guard changed result shape")
-            signature = dict(case)
-            self.result["domain_quality"].append(record_quality_case(case_id, **dict(signature, actual=observation["actual"]), known_signature=signature))
+                self.require(guarded_ids == [], case_id + ": empty-query guard did not suppress fallback rows")
+            if phrase:
+                same_context = self.run(f"SELECT to_jsonb(to_tsvector('public.charabia',{body}) @@ phraseto_tsquery('public.charabia',{body}));", "same-context-phrase")[0]
+                self.require(same_context is True, "same-context positions/variants failed independently of short-query selection")
+            self.queue_quality(case_id, **dict(case, actual=observation["actual"]), known_signature=dict(case))
             config, table, index = "bm25_test.no_stop", "no_stop_docs", "no_stop_bm25"
             cfg = literal(config)
             restored = self.run(f"SELECT to_jsonb(to_tsvector({cfg},{body}) @@ " +
                 (f"phraseto_tsquery({cfg},{q})" if phrase else f"charabia.query_any({q},{cfg})") + ");",
                 "explicit-recovery-" + case_id + "-" + table)[0]
             self.require(restored is True, f"{case_id}: explicit {config} did not restore domain match")
-            self.result["domain_quality"].append(record_quality_case(case_id + "-" + table,
-                input=case["input"],query=case["query"],config=config,expected=True,actual=restored))
-            # No-stop is an explicit different policy. It is not a repair of the
-            # default language error, and also retains Swedish den in document 5.
+            self.queue_quality(case_id + "-" + table,
+                input=case["input"],query=case["query"],config=config,expected=True,actual=restored)
+            # This is an explicit different policy, with its original candidate
+            # requirement retained even when new OR alternatives change recall.
             expected_ids = [1] if phrase else [5,11] if case_id == "english-den" else [12]
             self.check_query(config, table, index, case["query"], expected_ids,
-                             "recovery-" + case_id + "-" + table)
+                             "recovery-" + case_id + "-" + table, domain_case_id=case_id + "-no-stop-bag")
         retains_stemming = self.run("SELECT to_jsonb(tsvector_to_array(to_tsvector('bm25_test.no_stop'," +
             literal(frozen["english-short-phrase"]["input"]) + ")) @> ARRAY['run','running','were']::text[]);",
             "no-stop-retains-stemming")[0]
         self.require(retains_stemming is True, "Discard=false accidentally disabled stemming")
 
-    def check_query(self, config, table, index, query, expected, label):
+    def check_query(self, config, table, index, query, expected, label, domain_case_id=None):
         expression = (f"SELECT id,body <@> to_bm25query({literal(query)},'bm25_test.{index}') AS score "
             f"FROM bm25_test.{table} ORDER BY body <@> to_bm25query({literal(query)},'bm25_test.{index}') LIMIT {LIMIT}")
         plan, rows, oracle = self.run("SET enable_seqscan=off;\n" +
@@ -283,7 +298,11 @@ class Suite:
         self.result.setdefault("focused_queries",[]).append(record)
         target = index_nodes(plan,index)
         self.require(target and all(n.get("Actual Loops",0)>0 for n in target), label + ": missing executed target index")
-        self.require(ids == oracle == expected, label + f": expected {expected}, actual {ids}, native {oracle}")
+        self.require(ids == oracle, label + f": actual {ids} disagree with native overlap {oracle}")
+        if domain_case_id:
+            self.queue_quality(domain_case_id, input=table, query=query, config=config, expected=expected, actual=ids)
+        elif expected is not None:
+            self.require(ids == expected, label + f": expected {expected}, actual {ids}")
         return ids
 
     def bag_and_headline(self):
@@ -292,7 +311,8 @@ class Suite:
             "SELECT to_jsonb(ARRAY(SELECT id FROM bm25_test.docs WHERE to_tsvector('public.charabia',body) "
             "@@ plainto_tsquery('public.charabia','全文 banana') ORDER BY id));", "bag-versus-and")
         self.require(" | " in any_query and " & " not in any_query and plain == [], "query_any does not represent plain OR")
-        self.check_query("public.charabia","docs","docs_bm25","全文 banana",[2,10],"bag-independent-candidates")
+        self.check_query("public.charabia","docs","docs_bm25","全文 banana",[2,10],"bag-independent-candidates",
+                         domain_case_id="bm25-bag-independent-candidates")
         raw_query = "全文 running"
         ranked = ("WITH p AS MATERIALIZED(SELECT charabia.query_any(" + literal(raw_query) + ",'public.charabia')AS q),"
             "ranked AS MATERIALIZED(SELECT id,body,body <@> to_bm25query(" + literal(raw_query) + ",'bm25_test.docs_bm25')AS score "
@@ -308,13 +328,124 @@ class Suite:
         self.require(target and all(n.get("Actual Loops",0)>0 for n in target), "top-k headline did not use target BM25 index")
         self.require(len(p_nodes)==1 and p_nodes[0].get("Actual Loops")==1 and p_nodes[0].get("Actual Rows")==1,
                      "query_any CTE was not constructed exactly once")
-        self.require(len(rows)==1 and rows[0]["id"] in (1,2), "top-k changed raw-query bag candidates")
+        oracle = self.run(
+            "SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM bm25_test.docs "
+            "WHERE tsvector_to_array(to_tsvector('public.charabia',body)) && "
+            "tsvector_to_array(to_tsvector('public.charabia'," + literal(raw_query) + "));",
+            "materialized-query-topk-native-overlap")[0]
+        self.result["topk_headline"].update(native_overlap_ids=oracle,
+            original_domain_expectation={"rows":1,"allowed_ids":[1,2]})
+        self.require(len(rows) == min(1, len(oracle)) and all(row["id"] in oracle for row in rows),
+                     "top-k row is not a real native-overlap candidate or violates LIMIT")
+        self.queue_quality("bm25-topk-domain", input=FIXTURE["documents"], query=raw_query,
+            config="public.charabia", expected=True, actual=len(rows)==1 and rows[0]["id"] in (1,2))
         for row in rows:
             restored = html.unescape(row["headline"].replace("<b>","").replace("</b>",""))
             self.require(restored == row["body"] and "<b>" in row["headline"], "top-k headline lost source or matching terms")
         guarded_empty = ranked.replace(literal(raw_query),"''")
         empty = self.run("SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]'::jsonb)FROM("+guarded_empty+")r;", "guard-empty-query")[0]
         self.require(empty == [], "explicit complete-query guard did not prevent empty BM25 fallback rows")
+
+    def four_term_protocol(self):
+        # The expected terms are retained direct Snowball/Charabia examples.
+        # Raw ::tsquery predicates intentionally do not re-analyze final lexemes.
+        expected = ["abbrevıate", "abbrevıa", "abbreviate", "abbrevi"]
+        terms, query, positions, individual, headline = self.run(
+            "SELECT to_jsonb(ts_lexize('bm25_test.four_terms_dict','ABBREVIATE'));"
+            "SELECT to_jsonb(plainto_tsquery('bm25_test.four_terms','ABBREVIATE')::text);"
+            "SELECT jsonb_agg(jsonb_build_object('lexeme',lexeme,'positions',positions)ORDER BY lexeme)"
+            "FROM unnest(to_tsvector('bm25_test.four_terms','ABBREVIATE'));"
+            "SELECT jsonb_object_agg(term,to_tsvector('bm25_test.four_terms','ABBREVIATE') @@ term::tsquery)"
+            "FROM unnest(ARRAY['abbrevıate','abbrevıa','abbreviate','abbrevi'])term;"
+            "SELECT to_jsonb(ts_headline('bm25_test.four_terms','left ABBREVIATE right',"
+            "plainto_tsquery('bm25_test.four_terms','ABBREVIATE'),'HighlightAll=true'));",
+            "four-terms-protocol")
+        self.result["four_term_protocol"] = dict(terms=terms, query=query, positions=positions,
+            individual_matches=individual, headline=headline,
+            basis="Retained upstream Turkish/English stem samples; each variant is an independent same-position alternative")
+        self.require(terms == expected, "forced Turkish/English four-term golden differs")
+        self.require(query.count(" | ") == 3 and " & " not in query,
+                     "four dictionary entries became AND or sequential positions")
+        self.require(len(positions) == 4 and all(entry["positions"] == [1] for entry in positions),
+                     "four dictionary entries do not share one PG position")
+        self.require(individual == dict.fromkeys(expected, True), "a single raw variant cannot match")
+        self.require(headline == "left <b>ABBREVIATE</b> right", "variant matches duplicated or lost original headline")
+        self.check_query("bm25_test.four_terms", "four_docs", "four_bm25", "ABBREVIATE", [1,2,3,4,5], "four-terms-build")
+        self.check_query("bm25_test.native_terms", "four_native_docs", "four_native_bm25", "ABBREVIATE", [1,2,3], "two-terms-control")
+        comparison = self.run(
+            "SELECT jsonb_build_object('four_bytes',pg_relation_size('bm25_test.four_bm25'),"
+            "'native_bytes',pg_relation_size('bm25_test.four_native_bm25'),"
+            "'four_vectors',(SELECT jsonb_agg(jsonb_build_object('id',id,'vector',to_tsvector('bm25_test.four_terms',body)::text)ORDER BY id)FROM bm25_test.four_docs),"
+            "'native_vectors',(SELECT jsonb_agg(jsonb_build_object('id',id,'vector',to_tsvector('bm25_test.native_terms',body)::text)ORDER BY id)FROM bm25_test.four_native_docs));",
+            "four-terms-observed-statistics")[0]
+        comparison["meaning"] = "Observed vectors, position inputs and small relation sizes; scores are retained in focused_queries, with no score or storage neutrality claim"
+        self.result["four_term_comparison"] = comparison
+        self.run("INSERT INTO bm25_test.four_docs VALUES(20,'ABBREVIATE');", "four-terms-insert")
+        self.check_query("bm25_test.four_terms", "four_docs", "four_bm25", "ABBREVIATE", [1,2,3,4,5,20], "four-terms-insert-query")
+        self.run("UPDATE bm25_test.four_docs SET body='replacementcanary'WHERE id=20;", "four-terms-update")
+        self.check_query("bm25_test.four_terms", "four_docs", "four_bm25", "ABBREVIATE", [1,2,3,4,5], "four-terms-update-query")
+        self.run("DELETE FROM bm25_test.four_docs WHERE id=4;", "four-terms-delete")
+        self.check_query("bm25_test.four_terms", "four_docs", "four_bm25", "ABBREVIATE", [1,2,3,5], "four-terms-delete-query")
+
+    def round4_quality(self):
+        fixture = json.loads((ROOT / "tests/fixtures/bm25/route16-quality.json").read_text())
+        self.result["route16_quality"] = dict(basis=fixture["basis"], observations=[])
+        # These ordinary native configurations are explicit controls. They do
+        # not repair or excuse default-policy false positives.
+        self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.native_german_dict(TEMPLATE=charabia.template,"
+            "Language='deu',Discard=true,Stem=true,Normalize=true,Filter=false,English=false);"
+            "CREATE TEXT SEARCH DICTIONARY bm25_test.forced_italian_dict(TEMPLATE=charabia.template,"
+            "Language='ita',Discard=true,Stem=true,Normalize=true,Filter=false,English=false);"
+            "CREATE TEXT SEARCH CONFIGURATION bm25_test.native_german(PARSER=charabia.parser);"
+            "CREATE TEXT SEARCH CONFIGURATION bm25_test.forced_italian(PARSER=charabia.parser);"
+            "DO $fixture$ DECLARE l jsonb; BEGIN FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP "
+            "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.native_german ADD MAPPING FOR %I WITH bm25_test.native_german_dict',l->>'language');"
+            "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.forced_italian ADD MAPPING FOR %I WITH bm25_test.forced_italian_dict',l->>'language');"
+            "END LOOP;END $fixture$;", "route16-quality-controls")
+
+        def observe(label, body, query, config="public.charabia"):
+            q, text, cfg = literal(query), literal(body), literal(config)
+            record = self.run(
+                f"SELECT jsonb_build_object('input',{text},'query',{q},'config',{cfg},"
+                f"'query_analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze({q})a),"
+                f"'document_analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze({text})a),"
+                f"'document_vector',to_tsvector({cfg},{text})::text,'plain_query',plainto_tsquery({cfg},{q})::text,"
+                f"'actual',to_tsvector({cfg},{text}) @@ plainto_tsquery({cfg},{q}),"
+                f"'same_full_context',to_tsvector({cfg},{text}) @@ phraseto_tsquery({cfg},{text}),"
+                f"'headline',ts_headline({cfg},{text},plainto_tsquery({cfg},{q}),'HighlightAll=true'));", label)[0]
+            self.result["route16_quality"]["observations"].append(dict(label=label, **record))
+            self.require(record["same_full_context"] is True, label + ": identical complete context does not match its own positions")
+            restored = html.unescape(record["headline"].replace("<b>", "").replace("</b>", ""))
+            self.require(restored == body, label + ": quality diagnostic headline lost original text")
+            return record
+
+        die = fixture["die"]
+        observation = observe("route16-die-default", die["input"], die["query"])
+        self.run("CREATE TABLE bm25_test.die_docs(id integer PRIMARY KEY,body text NOT NULL);"
+            f"INSERT INTO bm25_test.die_docs VALUES(1,{literal(die['input'])}),"
+            "(2,'The old trees may die when the dry summer continues without any rain.');"
+            "CREATE INDEX die_bm25 ON bm25_test.die_docs USING bm25(body)WITH(text_config='public.charabia');"
+            "ANALYZE bm25_test.die_docs;", "route16-die-index")
+        die_ids = self.check_query("public.charabia", "die_docs", "die_bm25", die["query"], None, "route16-die-bm25")
+        observation["bm25_candidate_ids"] = die_ids
+        self.require((1 in die_ids) == observation["actual"], "die native query and actual BM25 candidate differ")
+        self.queue_quality("german-die-precision", input=die["input"], query=die["query"],
+            config="public.charabia", expected=die["expected"], actual=observation["actual"])
+        control = observe("route16-die-english-disabled", die["input"], die["query"], "bm25_test.native_german")
+        self.require(control["actual"] is False, "explicit native German stop control did not reject die")
+        italian = fixture["italian"]
+        observe("route16-italian-automatic", italian["input"], italian["query"])
+        forced = observe("route16-italian-forced", italian["input"], italian["query"], "bm25_test.forced_italian")
+        self.require(forced["actual"] is italian["forced_language_expected"],
+                     "forced Italian native stemmer does not connect bambino/bambini")
+        german = fixture["german"]
+        for number, query in enumerate(german["queries"]):
+            observe("route16-german-short-" + str(number), german["input"], query)
+        self.result["route16_quality"]["automatic_selection_limit"] = (
+            "Short Italian/German query observations are not universal language or inflection guarantees; "
+            "the forced Italian algorithm and complete-context positions are independent required controls. "
+            "The die precision requirement is separately blocking and has no known-failure exemption.")
+        self.checkpoint()
 
     def chunk_control(self):
         observations = []
@@ -530,7 +661,9 @@ END$fixture$;"""
         try:
             self.populate()
             self.matrix("bulk",full=True)
+            self.four_term_protocol()
             self.known_quality()
+            self.round4_quality()
             self.bag_and_headline()
             self.chunk_control()
             self.configuration_lifecycle()
@@ -552,9 +685,14 @@ END$fixture$;"""
             self.restart()
             self.run("REINDEX INDEX bm25_test.docs_bm25;","final-reindex")
             self.matrix("reindex")
+            self.result["mechanism_status"]="passed"
+            self.checkpoint()
+            self.flush_quality()
+            self.result["quality_status"]="passed"
             self.result["status"] = "passed"
         except BaseException as error:
             failure = error
+            self.result["quality_status" if self.result.get("mechanism_status")=="passed" else "mechanism_status"]="failed"
             self.result["status"] = "failed"
             self.result["error"] = repr(error)
             self.checkpoint()

@@ -43,7 +43,7 @@ def fragment_positions(session):
         # Parser's statistical language choice; ordinary native mappings suffice.
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".words ("
                       "TEMPLATE=charabia.template,Language='eng',Discard=true,"
-                      "Stem=true,Normalize=true,Filter=false)")
+                      "Stem=true,Normalize=true,Filter=false,English=false)")
         session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
         routes = json.loads(session.value(
             "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
@@ -107,10 +107,10 @@ def external_dictionary_cases(session):
                       "TEMPLATE=pg_catalog.synonym,SYNONYMS='synonym_sample')")
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".filter("
                       "TEMPLATE=charabia.template,Language='eng',Discard=false,"
-                      "Stem=false,Normalize=true,Filter=true)")
+                      "Stem=false,Normalize=true,Filter=true,English=false)")
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".fra_plain("
                       "TEMPLATE=charabia.template,Language='fra',Discard=false,"
-                      "Stem=false,Normalize=false,Filter=false)")
+                      "Stem=false,Normalize=false,Filter=false,English=false)")
         aliases = json.loads(session.value(
             "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
             "WHERE alias NOT IN ('blank','display_only')"))
@@ -157,6 +157,96 @@ def external_dictionary_cases(session):
             primary.add_note("external headline cleanup also failed: " + repr(cleanup_error))
 
 
+def merge_and_parallel_cases(session):
+    """Independent source/position expectations with explicit dictionary rules."""
+    schema = "pgcb_headline_round4_" + str(os.getpid())
+    session.value("CREATE SCHEMA " + schema)
+    try:
+        session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".words("
+                      "TEMPLATE=charabia.template,Language='eng',Discard=false,"
+                      "Stem=false,Normalize=false,Filter=false,English=false);")
+        session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".parallel("
+                      "TEMPLATE=charabia.template,Language='tur',Discard=false,"
+                      "Stem=true,Normalize=false,Filter=false,English=true);")
+        aliases = json.loads(session.value(
+            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
+            "WHERE alias NOT IN ('blank','display_only')"))
+        for name in ("words", "parallel"):
+            config = schema + "." + name
+            session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
+            for alias in aliases:
+                session.value("ALTER TEXT SEARCH CONFIGURATION " + config +
+                              " ADD MAPPING FOR " + alias + " WITH " + config)
+        config = schema + ".words"
+        for raw in ("PostgreSQL", "postgreSQL", "POSTGRESQL"):
+            rows = json.loads(session.value(
+                "SELECT json_agg(row_to_json(a)) FROM (SELECT raw,kind,language,language_source,"
+                "byte_start,byte_end FROM charabia.analyze(" + literal(raw) + "))a"))
+            report.setdefault("parser_calls", []).append({"raw": raw, "rows": rows})
+            check(len(rows) == 1 and rows[0]["raw"] == raw and rows[0]["kind"] == "word" and
+                  rows[0]["byte_start"] == 0 and rows[0]["byte_end"] == len(raw.encode()),
+                  "complete English word keeps one exact original span", {"raw": raw, "rows": rows})
+            if rows[0]["language_source"] == "english-merge":
+                check(rows[0]["language"] == "eng", "an actual whole-word merge selects eng", rows)
+            check(session.value("SELECT to_tsvector(" + literal(config) + "," + literal(raw) +
+                                ")::text") == "'postgresql':1",
+                  "restored English whole word has one index position", raw)
+            actual = headline(session, "left " + raw + " right", "'postgresql'::tsquery", config=config)
+            check(actual == "left <b>" + raw + "</b> right",
+                  "whole-word matching emits original case exactly once", actual)
+        raw = "left PostgreSQL right"
+        check(session.value("SELECT to_tsvector(" + literal(config) + "," + literal(raw) +
+                            ") @@ 'left <-> postgresql <-> right'::tsquery") == "t",
+              "merged word does not leave replaced fragment positions in adjacent phrase", raw)
+        check(session.value("SELECT to_tsvector(" + literal(config) + ",'PostgreSQL') @@ "
+                            "'postgre:*'::tsquery AND NOT(to_tsvector(" + literal(config) +
+                            ",'PostgreSQL') @@ 'sql:*'::tsquery)") == "t",
+              "prefix sees the complete restored word without an inner component posting", raw)
+        check(headline(session, "PostgreSQL", "'postgre:*'::tsquery", config=config) == "<b>PostgreSQL</b>",
+              "prefix highlights the complete restored original word", raw)
+        for raw in ("post greSQL", "postgreSQL2", "éPostgreSQL", "PostgreSQLé", "PostgreSQL\u0301", "databaseAPI"):
+            rows = json.loads(session.value(
+                "SELECT json_agg(row_to_json(a)) FROM (SELECT raw,language_source,byte_start,byte_end "
+                "FROM charabia.analyze(" + literal(raw) + "))a"))
+            report.setdefault("parser_calls", []).append({"raw": raw, "rows": rows})
+            valid_boundary = (all(not any(character.isspace() for character in row["raw"])
+                                  for row in rows if row["language_source"] == "english-merge")
+                              if raw == "post greSQL" else
+                              all(row["language_source"] != "english-merge" for row in rows))
+            check("".join(row["raw"] for row in rows) == raw and valid_boundary,
+                  "whole-word restoration never crosses delimiters or searches an inner ASCII substring", {
+                      "raw": raw, "rows": rows})
+            actual = headline(session, raw, "'postgre:*'::tsquery", config=config)
+            check(html.unescape(actual.replace("<b>", "").replace("</b>", "")) == raw,
+                  "nonmerged boundary cases retain every original byte in headline", actual)
+        check(session.value("SELECT NOT(to_tsvector(" + literal(config) +
+                            ",'post greSQL') @@ 'postgresql'::tsquery)") == "t",
+              "space-separated near spelling never creates a full-word posting", "post greSQL")
+        config = schema + ".parallel"
+        for term in ("abbrevıate", "abbrevıa", "abbreviate", "abbrevi"):
+            check(headline(session, "ABBREVIATE & <tag>", literal(term) + "::tsquery", config=config) ==
+                  "<b>ABBREVIATE</b> &amp; &lt;tag&gt;",
+                  "each Turkish/English alternative matches one original headline span", term)
+        for typ in ("json", "jsonb"):
+            raw = {"original": ["ABBREVIATE & <tag>", "ABBREVIATE"]}
+            expected = {"original": ["<b>ABBREVIATE</b> &amp; &lt;tag&gt;", "<b>ABBREVIATE</b>"]}
+            actual = json.loads(session.value("SELECT ts_headline(" + literal(config) + "," +
+                literal(json.dumps(raw)) + "::" + typ +
+                ",'abbrevıate | abbrevıa | abbreviate | abbrevi'::tsquery,'HighlightAll=true')"))
+            check(actual == expected, "four-variant JSON callbacks render each original source exactly once", {
+                "type": typ, "expected": expected, "actual": actual})
+    finally:
+        primary = sys.exception()
+        try:
+            session.value("DROP SCHEMA " + schema + " CASCADE")
+        except BaseException as cleanup_error:
+            report.setdefault("cleanup_errors", []).append(repr(cleanup_error))
+            checkpoint()
+            if primary is None:
+                raise
+            primary.add_note("round-4 headline cleanup also failed: " + repr(cleanup_error))
+
+
 try:
     with Session() as session:
         # No oracle is obtained from analyze()/lexize(): raw equality is a separate
@@ -191,6 +281,7 @@ try:
               "selector returns both separated covers in source order", fragments)
         fragment_positions(session)
         external_dictionary_cases(session)
+        merge_and_parallel_cases(session)
 
         # PG's deserialize_deflist owns CSV/quoting; the adapter receives parsed values.
         actual = headline(session, "CAFÉ", options='HighlightAll=YES,StartSel="[a,b]",StopSel="[/a,b]"')

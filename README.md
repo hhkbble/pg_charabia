@@ -2,9 +2,20 @@
 
 pg_charabia provides multilingual text analysis for PostgreSQL 18. It uses Rust, pgrx, and Charabia. The default `public.charabia` configuration works with native full-text search (FTS), GIN indexes, optional pg_textsearch BM25 indexes, and standard `ts_headline` highlighting.
 
-Each language dictionary enables built-in stopwords and stemming when supported. Stopwords are words that the dictionary discards. Stemming reduces a word to a stem, not a general dictionary form. Terminal mode keeps the surface form and adds one distinct stem at the same position.
+Each language dictionary enables built-in stopwords and stemming when supported. Stopwords are words that the dictionary discards. Stemming reduces a word to a stem, not a general dictionary form. Terminal mode keeps each enabled branch's surface and distinct stem at the same position. Up to four terms are OR alternatives.
 
-The extension covers 70 languages and `und` for an undetermined language. Of these languages, 52 have stopword tables and 19 have stemming algorithms. Each language uses its complete NLTK table when available. ISO supplies languages absent from NLTK. The tables are not merged.
+The extension supports 15 languages and `und` for an undetermined language:
+`eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und`.
+All 15 natural languages have stopword tables. Ten have native stemming
+algorithms. NLTK supplies the complete table when available. ISO supplies missing
+languages. The tables are not merged.
+
+Eight non-English Latin dictionaries also enable an English analysis branch by
+default: `deu,nld,spa,fra,por,ita,tur,vie`. It uses a fixed English word set and
+keeps the original language branch. Word-set membership is a routing rule, not
+proof of language. The Parser can restore a split complete ASCII English word
+without changing its original text. `English=false` controls the Dictionary
+branch, not that Parser rule.
 
 ## Supported environments and prerequisites
 
@@ -92,7 +103,7 @@ The search returns document `1`. The headline marks both original `running` word
 
 `analyze` does not report final terms from a Dictionary chain. Use `to_tsvector` and query functions to inspect effective analysis. Diagnostic/query functions use `SECURITY INVOKER` and a fixed `search_path=pg_catalog`. Internal callbacks do not grant direct `PUBLIC EXECUTE`.
 
-The Parser emits 71 language types, `blank`, and `display_only`. The last two have no default mapping and consume no word position. Stopwords leave position holes. Surface and stem alternatives share one position. See [Architecture](docs/architecture.md) for the implementation.
+The Parser emits 16 language types, `blank`, and `display_only`. The last two have no default mapping and consume no word position. Stopwords leave position holes. All retained alternatives share one position. See [Architecture](docs/architecture.md) for the implementation.
 
 ## Native configuration and dictionary chains
 
@@ -131,10 +142,11 @@ SELECT to_tsvector('app.filtered',body) FROM documents WHERE id=2;
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `Language` | Required | A supported lowercase ISO639-3 code or `und`. The Dictionary applies that language without detecting it again. Two-letter aliases are not accepted. |
-| `Discard` | `true` if a table exists | Discard tokens whose prepared key matches that language's built-in stopword table. |
-| `Stem` | `true` if an algorithm exists | Add one stem for prepared keys of at most 1000 bytes containing only letters or combining marks. Otherwise, keep the surface form. |
-| `Normalize` | `true` | Apply final normalization to the surface and stem. `false` still performs required non-lossy preparation, NFC, and language-specific lowercase rules. |
-| `Filter` | `false` | Terminal mode returns final terms. `true` passes one replacement onward and requires `Stem=false`. |
+| `Discard` | `true` for the 15 natural languages; `false` for und | Apply each enabled branch's own built-in stopword table before stemming. A Stop in one branch does not remove another branch's terms. |
+| `Stem` | `true` when a native algorithm or the English branch is enabled | Add one stem per eligible branch for prepared keys of at most 1000 bytes containing only letters or combining marks. Vietnamese can stem its English branch without a native algorithm. |
+| `Normalize` | `true` | Apply final normalization to each surface and stem. `false` still performs non-lossy preparation, NFC, and language-specific lowercase rules. |
+| `Filter` | `false` | Pass one replacement onward. Requires `Stem=false` and `English=false`. |
+| `English` | `true` for the eight eligible languages in terminal mode; otherwise `false` | For a current nonempty ASCII-letter token in the fixed English set, add English preparation, stopword matching and optional stemming. It does not replace Language or detect it again. |
 
 Preparation precedes stopword matching and stemming. It preserves accents needed by the stemmer. `Normalize=false` does not mean byte-for-byte output. Final normalization depends on language and script. It does not promise identical accent folding or Unicode form across languages.
 
@@ -142,14 +154,18 @@ Use unquoted parameter names and Boolean values `true`/`false`. PostgreSQL also 
 
 | SQLSTATE | Condition |
 | --- | --- |
-| `22023` | Missing/unknown Language, unknown or duplicate options received by INIT, or `Filter=true` with `Stem=true`. |
-| `0A000` | Explicit Discard/Stem activation without the required language capability. |
+| `22023` | Missing/unknown Language, unknown or duplicate options received by INIT, or `Filter=true` with `Stem=true` or `English=true`, or English enabled for eng, und, or a non-Latin language. |
+| `0A000` | Discard without a table, or Stem without an enabled native or English algorithm. |
 | `42601` | Invalid Boolean syntax under PostgreSQL's `defGetBoolean` rules. |
 | `54000` | An input or filter replacement exceeds the extension's byte limit. |
 
 Native `ALTER TEXT SEARCH DICTIONARY` keeps unlisted stored options. `ALTER ... (Stem)` removes the stored value and restores its capability default. It does not set `Stem=false`. Removing required Language fails and rolls back.
 
 PostgreSQL merges same-spelling duplicate ALTER keys before INIT, with the last value taking effect. CREATE duplicates and quoted case variants can reach INIT and be rejected. A Language change recalculates omitted defaults. Explicit stored values remain and can fail for the new language's capabilities.
+For Vietnamese with a saved `Stem=true`, disabling English also requires
+`Stem=false` or removal of the saved Stem value. Otherwise, ALTER fails with
+`0A000`. For a native stemmer, enabling Filter requires an explicit `Stem=false`.
+Filter does not silently disable conflicting stored values.
 
 There are no proprietary management functions, editable built-in stopword tables, add/keep settings, or per-query analysis switches. Use independent native objects for independent index parameters. Ordinary CREATE, ALTER, rename, schema move, ownership, and DROP follow PostgreSQL rules. Use `RESTRICT` to expose dependencies before removing objects.
 
@@ -159,7 +175,7 @@ There are no proprietary management functions, editable built-in stopword tables
 | --- | --- |
 | NULL | Try the next dictionary with the current input, including an earlier filter replacement. |
 | Stop, an empty non-NULL result | End the chain and leave a position hole. |
-| Terminal terms | End the chain. Up to two distinct terms share one position. |
+| Terminal terms | End the chain. Up to four distinct terms share one position. |
 | Filter replacement | Pass one token to the next dictionary. It is not a final term. |
 | Final filter, or filter followed only by NULL results | No indexed term and no position hole. |
 
@@ -225,19 +241,38 @@ Unknown/duplicate options, invalid values, and conflicting settings fail with `2
 
 For JSON headline, limits apply to each string, not the complete JSON value. These callback limits do not bound earlier PostgreSQL matching allocations. Limit query complexity, highlight only selected results, and use statement timeouts for workload control.
 
-Automatic language selection is imperfect, especially for short or mixed-language queries. The exact frozen cases are in [quality-known.json](tests/fixtures/quality-known.json):
+Automatic selection uses only the 15 natural-language candidates. Existing
+metadata outside that set becomes und. Missing Cyrillic, Hangul, and Thai
+metadata maps to rus, kor, and tha. Other missing metadata becomes und without a
+second detector. Same-script foreign text can still select a supported language.
+There is no confidence threshold or English statistical fallback.
 
-| Query | Default failure |
-| --- | --- |
-| `den` | Does not find the English fox-den document. |
-| `var` | Does not find the technical document about a variable named `var`. |
-| `cats were running` | Fails the phrase expectation for the English quick-start document. |
+German compound segmentation and Latin camelCase segmentation are enabled.
+Only a complete split ASCII-letter envelope in the fixed English set is restored
+as one word. No spaces or punctuation are removed. Unsplit words are not forced
+to English. A Dictionary sees only its current token, so ASCII fragments from a
+non-ASCII word can also enter its English branch.
 
-Explicit `Discard=false` recovery is a separate result, not a fix for default behavior. Surface/stem alternatives do not fix stopword deletion or guarantee cross-form matches. They also change BM25 term frequencies, document lengths, and scores. Score changes do not necessarily change result order.
+Short-query and mixed-language errors remain possible. Japanese and Korean
+segmentation does not extract base forms or guarantee inflection matching.
+The retained [quality cases](tests/fixtures/quality-known.json) preserve the
+original inputs and failure records. Current validation finds the `den` and `var`
+documents with English enabled. The short `cats were running` phrase still fails.
+The two reviewed closures do not add any failure exemption. English alternatives can
+also retain a foreign stopword such as German `die`, causing a false match.
+Use an explicit `English=false` dictionary when that tradeoff is unsuitable.
+
+Explicit controls do not establish that defaults satisfy every domain case.
+Alternatives do not guarantee cross-form or phrase recall. They change BM25
+term frequencies, document lengths, scores, and potentially ranks. Performance
+and ranking reports keep these observations separate from index consistency.
 
 ## Analysis changes and index maintenance
 
-Dictionary parameters, mappings, chain order, external rules, and resource changes can invalidate old indexed terms. Cache invalidation rebuilds process state, not vectors or indexes. The build/resource fingerprint does not certify user chains or existing indexed data.
+Dictionary parameters, candidate/route sets, segmentation features, whole-word restoration, mappings, chain order, external rules, and resource changes can invalidate old indexed terms. Cache invalidation rebuilds process state, not vectors or indexes. A route/type-ID
+change also requires correct new Configuration mappings and affected expression
+or index definitions. Replacing a library or rebuilding postings alone does not
+repair old numeric mappings. The build/resource fingerprint does not certify user chains or existing indexed data.
 
 1. Inventory affected configurations, shared Dictionary references, stored vectors, and indexes. Include COPY relationships.
 2. Save source text, ordinary object DDL, owners, package/resource identity, and external rules.
@@ -266,7 +301,7 @@ Default extension members are rebuilt from the installed package. User changes t
 
 Point-in-time recovery (PITR) needs a complete cluster base backup and continuous archived write-ahead log (WAL) through the target. The target cannot precede the backup's earliest consistent point. Retain the following outside the database backup:
 
-- The exact extension package, control/SQL files, dynamic libraries, resource manifest, and checksums for the target time.
+- The exact extension package, control/SQL files, dynamic libraries, resource manifest, checksums, English TXT/attribution, and source/rebuild materials for the target time.
 - Matching pg_textsearch files and preload setup when BM25 is used.
 - External synonym or other dictionary rule files, plus required locale/OS dependencies and server/restore configuration.
 

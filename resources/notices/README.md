@@ -11,15 +11,20 @@ No resource is downloaded at PostgreSQL runtime.
 - MeCab KoDic 2.1.1-20180720 uses Apache-2.0. The archive COPYING and Lindera
   notice are preserved in `ko-dic/COPYING.txt` and
   `lindera-ko-dic-NOTICE.txt`.
-- The German segmentation feature is disabled in general 0.2.0. The following
-  German source and notices remain as historical distribution material; they
-  do not identify an active embedded German segmentation dictionary.
-  Charabia's German dictionary source explicitly states LGPL-3.0-or-later.
-  The corresponding unmodified source is `german-words-source.txt`; the
-  upstream attribution notice and both LGPL-3.0 and GPL-3.0 texts accompany
-  it. This data license is distinct from Charabia's crate license. Rebuild
-  the FST using the pinned Charabia source's dictionary generation tools
-  when modifying the data. The extension does not modify this source.
+- German segmentation uses the pinned LGPL-3.0-or-later dictionary. The
+  unmodified source is `german-words-source.txt`. The original NOTICE and
+  complete LGPL-3.0 and GPL-3.0 texts accompany it. Run `scripts/rebuild-german`
+  from the source checkout to reproduce the FST, including all original header
+  and empty lines. Read `resources/german/README.md` for the recipient's source,
+  modification, rebuild, and relink requirements. This data license is separate
+  from the MIT crate license. The delivery must include the corresponding
+  complete source and application build materials.
+- English lexical data combines the fixed Wiktionary/Kaikki English source and
+  ESDB inputs. The derived TXT and FST retain applicable CC BY-SA 4.0 conditions,
+  source attribution, and modification notices. ESDB also retains its complete
+  applicable Copyright, including AU and large-list requirements. Read
+  `resources/english/NOTICE.md` and retain `CC-BY-SA-4.0.txt`,
+  `ESDB-Copyright.txt`, and the source/page attribution with the data.
 - Charabia identifies PyThaiNLP/nlpo3 as its Thai dictionary source and ICU as
   its Khmer dictionary source. Their upstream license/notice snapshots are
   included; `manifest.json` records the exact snapshot commit and checksum.

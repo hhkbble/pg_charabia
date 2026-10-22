@@ -80,6 +80,39 @@ def mapping(session, name, dictionary_name):
     value(session, f'ALTER TEXT SEARCH CONFIGURATION {name} ADD MAPPING FOR eng WITH {dictionary_name}')
 
 
+def explicit_option_matrix(session):
+    """Exercise INIT's finite SQL state space, not a language-quality oracle."""
+    value(session, f"""CREATE TEMP TABLE route16_options(accepted int,rejected int);
+    DO $matrix$ DECLARE language_code text; mask int; d bool; s bool; n bool; f bool; e bool;
+      eligible bool; native_stem bool; valid bool; accepted int:=0; rejected int:=0;
+    BEGIN
+      FOREACH language_code IN ARRAY ARRAY['eng','deu','nld','rus','spa','fra','por','ita','ara','tur','cmn','jpn','kor','vie','tha','und'] LOOP
+        eligible:=language_code=ANY(ARRAY['deu','nld','spa','fra','por','ita','tur','vie']);
+        native_stem:=language_code=ANY(ARRAY['eng','deu','nld','rus','spa','fra','por','ita','ara','tur']);
+        FOR mask IN 0..31 LOOP
+          d:=(mask&1)<>0;s:=(mask&2)<>0;n:=(mask&4)<>0;f:=(mask&8)<>0;e:=(mask&16)<>0;
+          valid:=(NOT e OR eligible) AND NOT(e AND f) AND NOT(s AND f)
+            AND (NOT d OR language_code<>'und') AND (NOT s OR native_stem OR e);
+          BEGIN
+            EXECUTE format('CREATE TEXT SEARCH DICTIONARY {schema}.matrix_entry(TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize=%s,Filter=%s,English=%s)',language_code,d::text,s::text,n::text,f::text,e::text);
+            IF NOT valid THEN RAISE EXCEPTION 'accepted forbidden Language=%, mask=%',language_code,mask;END IF;
+            EXECUTE 'DROP TEXT SEARCH DICTIONARY {schema}.matrix_entry';accepted:=accepted+1;
+          EXCEPTION WHEN invalid_parameter_value OR feature_not_supported THEN
+            IF valid THEN RAISE EXCEPTION 'rejected valid Language=%, mask=%: %',language_code,mask,SQLERRM;END IF;
+            rejected:=rejected+1;
+          END;
+        END LOOP;
+      END LOOP;
+      INSERT INTO route16_options VALUES(accepted,rejected);
+    END $matrix$""")
+    observed = scalar_json(session, "SELECT jsonb_build_object('accepted',accepted,'rejected',rejected) FROM route16_options")
+    check(observed == {'accepted': 228, 'rejected': 284},
+          'SQL INIT enforces the exact finite capability matrix', {
+              'actual': observed,
+              'basis': 'independent 16 route capability sets and five explicit Boolean predicates; not statistical language quality'})
+    value(session, 'DROP TABLE route16_options')
+
+
 try:
     command(f'CREATE ROLE {owner}; CREATE ROLE {other}; CREATE SCHEMA {schema} AUTHORIZATION {owner}; '
             f'CREATE SCHEMA {moved} AUTHORIZATION {owner}; GRANT USAGE ON SCHEMA {schema},{moved} TO {other}')
@@ -151,17 +184,64 @@ try:
         error(s, f'ALTER TEXT SEARCH DICTIONARY {schema}.b_eng("Stem"=false)',
               'quoted-case duplicate reaching INIT is rejected')
 
+        # English is an independent branch, not a Parser switch or language fallback.
+        dictionary(s, schema + '.vie', "Language='vie'")
+        check(direct(s, schema + '.vie', 'running') == ['running','run'],
+              'Vietnamese defaults enable the English stem without a native algorithm')
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false)")
+        check(direct(s, schema + '.vie', 'running') == ['running'],
+              'omitted Stem recomputes false when English is disabled for Vietnamese')
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=true,Stem=true)")
+        error(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false)",
+              'saved Stem cannot outlive its only enabled algorithm', '0A000')
+        check(direct(s, schema + '.vie', 'running') == ['running','run'],
+              'failed English ALTER rolls back the whole option change')
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)")
+        error(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(Filter=true,English=true)",
+              'filter cannot transmit a parallel English branch', '22023')
+        error(s, f"CREATE TEXT SEARCH DICTIONARY {schema}.bad_eng(TEMPLATE=charabia.template,Language='eng',English=true)",
+              'English option cannot duplicate the primary English route', '22023')
+        error(s, f"CREATE TEXT SEARCH DICTIONARY {schema}.bad_lang(TEMPLATE=charabia.template,Language='swe')",
+              'outside Language is rejected rather than mapped to und', '22023')
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(Filter=true)")
+        check(direct(s, schema + '.vie', 'running') == ['running'],
+              'saved false English/Stem permits one-replacement Vietnamese filter')
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(Filter=false,English,Stem)")
+        check(direct(s, schema + '.vie', 'running') == ['running','run'],
+              'removing English and Stem options recomputes terminal capability defaults')
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=true,Stem=true)")
+        error(s, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie("English"=false)',
+              'quoted-case English duplicate reaching INIT is rejected')
+        error(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(Language='eng')",
+              'saved English true is rejected when primary Language becomes English')
+        dictionary(s, schema + '.vie_filter', "Language='vie',Filter=true")
+        check(direct(s, schema + '.vie_filter', 'running') == ['running'],
+              'omitted English and Stem defaults are false in the no-native-stem filter')
+        dictionary(s, schema + '.four', "Language='tur',Discard=false,Stem=true,Normalize=false,Filter=false,English=true")
+        check(direct(s, schema + '.four', 'ABBREVIATE') == ['abbrevıate','abbrevıa','abbreviate','abbrevi'],
+              'ordinary native dictionary stores four-variant parallel parameters')
+        parallel_a = schema + '.parallel_a'
+        parallel_b = schema + '.parallel_b'
+        mapping(s, parallel_a, schema + '.vie')
+        value(s, f'CREATE TEXT SEARCH CONFIGURATION {parallel_b}(COPY={parallel_a})')
+        value(s, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)')
+        check(scalar_json(s, f"SELECT jsonb_agg(ts_lexize(mapdict::regdictionary,'running')) FROM pg_ts_config_map "
+                         f"WHERE mapcfg IN('{parallel_a}'::regconfig,'{parallel_b}'::regconfig)") == [['running'],['running']],
+              'COPY shares native English-option mutation without a hidden profile')
+        value(s, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=true,Stem=true)')
+        explicit_option_matrix(s)
+
         # Language changes recompute only omitted defaults; explicit unsupported true is rejected.
         dictionary(s, schema + '.changing', "Language='eng'")
-        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='kat')")
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='und')")
         check(direct(s, schema + '.changing', 'THE') == ['the'],
               'new language recomputes absent Discard/Stem defaults')
         value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='eng',Stem=true)")
-        error(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='kat')",
+        error(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='und')",
               'saved unsupported capability prevents Language change', '0A000')
         check(direct(s, schema + '.changing', 'running') == ['running', 'run'],
               'failed ALTER leaves the prior dictionary intact')
-        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='kat',Stem=false)")
+        value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='und',Stem=false)")
         error(s, f'ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language)', 'required Language cannot be removed')
         value(s, 'BEGIN')
         value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.changing(Language='eng',Stem=true)")
@@ -177,10 +257,14 @@ try:
             ("Language='eng',Stem=false,Stem=true", '22023'),
             ("Language='eng',Filter=true", '22023'),
             ("Language='eng',Stem=true,Filter=true", '22023'),
-            ("Language='kat',Discard=true", '0A000'),
-            ("Language='kat',Stem=true", '0A000'),
-            ("Language='cmn',Stem=true", '0A000'),
+            ("Language='vie',English=false,Stem=true", '0A000'),
+            ("Language='vie',English=true,Filter=true,Stem=false", '22023'),
+            ("Language='rus',English=true", '22023'),
+            ("Language='cmn',English=true", '22023'),
+            ("Language='und',English=true", '22023'),
             ("Language='und',Discard=true", '0A000'),
+            ("Language='und',Stem=true", '0A000'),
+            ("Language='cmn',Stem=true", '0A000'),
             ("Language='und',Stem=true,Filter=true", '0A000'),
             ("Language='eng',Stem='yes'", '42601'),
             ("Language='eng',Stem='f'", '42601'),
@@ -206,7 +290,7 @@ try:
         check(value(s, f"SELECT charabia.query_any('The children were running through the garden while their teachers were reading books.','{partial}')::text") != '',
               'query_any accepts an ordinary partial external mapping')
         identity = scalar_json(s, 'SELECT charabia.analysis_info()')
-        check(identity['language_count'] == 71 and 'configuration_oid' not in identity and 'settings' not in identity,
+        check(identity['language_count'] == 16 and 'configuration_oid' not in identity and 'settings' not in identity,
               'analysis_info remains static rather than enforcing complete private mappings')
         rows = scalar_json(s, "SELECT jsonb_agg(to_jsonb(a)) FROM charabia.analyze('alpha, beta') a")
         check(all(set(row) == {'raw', 'kind', 'script', 'charabia_language', 'language', 'language_source',
@@ -226,9 +310,12 @@ try:
         error(s, f'DROP TEXT SEARCH DICTIONARY {renamed}', 'native mapping dependency enforces RESTRICT', '2BP01')
         old_oid = int(value(s, f"SELECT '{a}'::regconfig::oid"))
         saved_dictionary = catalog(s, renamed)
+        saved_parallel = catalog(s, schema + '.vie')
         value(s, 'RESET ROLE')
         value(s, 'SET ROLE ' + other)
         error(s, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=false)', 'foreign owner cannot alter dictionary', '42501')
+        error(s, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)',
+              'foreign owner cannot alter English parameters', '42501')
         error(s, f'CREATE TEXT SEARCH CONFIGURATION {schema}.forbidden(PARSER=charabia.parser)',
               'target schema CREATE permission is enforced', '42501')
         error(s, 'CREATE FUNCTION charabia.untrusted()RETURNS int LANGUAGE sql AS $$SELECT 1$$',
@@ -251,6 +338,22 @@ try:
         check(direct(reader, renamed, 'running') == ['running'], 'committed ALTER invalidates the warm reader cache')
         value(writer, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=true)')
         check(direct(reader, renamed, 'running') == ['running', 'run'], 'second commit rebuilds the same reader cache again')
+        check(direct(reader, schema + '.vie', 'running') == ['running','run'],
+              'reader warms a dictionary with the English-only algorithm')
+        value(writer, 'BEGIN')
+        value(writer, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)')
+        check(direct(writer, schema + '.vie', 'running') == ['running'] and
+              direct(reader, schema + '.vie', 'running') == ['running','run'],
+              'uncommitted English change stays in the writer session')
+        value(writer, 'ROLLBACK')
+        check(direct(reader, schema + '.vie', 'running') == ['running','run'],
+              'English option rollback leaves the warm reader unchanged')
+        value(writer, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)')
+        check(direct(reader, schema + '.vie', 'running') == ['running'],
+              'committed English change invalidates the warm reader')
+        value(writer, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=true,Stem=true)')
+        check(direct(reader, schema + '.vie', 'running') == ['running','run'],
+              'second English commit rebuilds the reader using shared resources')
         report['cache_backends'] = {'reader': reader.pid, 'writer': writer.pid}
         checkpoint()
 
@@ -278,6 +381,18 @@ try:
         check(after['owner'] == owner and after['options'] == saved_dictionary['options'],
               'native dump/restore preserves owner, serialized options and renamed references', after)
         check(direct(target, unusual, 'ÉTÉ') == ['été'], 'quoted Unicode dictionary restores correctly')
+        restored_parallel = catalog(target, schema + '.vie')
+        check(restored_parallel['oid'] != saved_parallel['oid'] and restored_parallel['owner'] == owner and
+              restored_parallel['options'] == saved_parallel['options'],
+              'dump/restore preserves English parameters and owner with a new OID', restored_parallel)
+        check(direct(target, schema + '.four', 'ABBREVIATE') == ['abbrevıate','abbrevıa','abbreviate','abbrevi'],
+              'restored Dictionary reconstructs four alternatives from immutable resources')
+        value(target, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)')
+        check(direct(target, schema + '.vie', 'running') == ['running'],
+              'restored English parameter can be changed using ordinary DDL')
+        value(target, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=true,Stem)')
+        check(direct(target, schema + '.vie', 'running') == ['running','run'],
+              'restored option removal recomputes the English algorithm default')
         value(target, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=false)')
         check(direct(target, renamed, 'running') == ['running'], 'restored dictionary can be altered without old OID assumptions')
         value(target, f'DROP TEXT SEARCH CONFIGURATION {a}')

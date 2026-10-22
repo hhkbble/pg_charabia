@@ -2,9 +2,15 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 
 FORMAT = 2
 RELEASE_VERSION = "0.3.0"
+ANALYSIS_REVISION = "route16-english-shared-fst-1"
+LANGUAGE_CODES = ("eng", "deu", "nld", "rus", "spa", "fra", "por", "ita", "ara", "tur", "cmn", "jpn", "kor", "vie", "tha", "und")
+ENGLISH_ELIGIBLE = frozenset(("deu", "nld", "spa", "fra", "por", "ita", "tur", "vie"))
+LANGUAGE_SCRIPTS = dict(zip(LANGUAGE_CODES, ("Latin", "Latin", "Latin", "Cyrillic", "Latin", "Latin", "Latin", "Latin", "Arabic", "Latin", "Cj", "Cj", "Hangul", "Latin", "Thai", "Other")))
+LANGUAGE_STEMMERS = dict(zip(LANGUAGE_CODES[:10], ("English", "German", "Dutch", "Russian", "Spanish", "French", "Portuguese", "Italian", "Arabic", "Turkish")))
 SUITES = ("unit", "smoke", "native", "chain", "bm25", "headline", "config", "lifecycle", "errors", "stress", "recovery", "benchmark")
 MAC_DEFAULT = ("unit", "native", "chain", "headline", "config", "lifecycle", "errors")
 ARCHIVE_SUITES = ("smoke", "chain", "headline", "config", "recovery")
@@ -12,6 +18,74 @@ STATIC_INFO_FIELDS = frozenset(("extension", "pgrx", "charabia", "target", "carg
 VERIFIED = ("verified", "verified-with-known-quality-failures")
 QUALITY_FIELDS = ("input", "query", "config", "expected", "actual")
 REQUIRED_QUALITY_CASES = frozenset(("english-den", "code-var", "english-short-phrase"))
+# Reviewed against the unchanged domain inputs, real native vectors and BM25
+# candidates of the route16 implementation. This closes failures, never adds one.
+REVIEWED_QUALITY_RESOLUTIONS = {
+    "english-den": "The nld route retains den through the English branch; the unchanged fox-den document matches.",
+    "code-var": "The tur route retains var through the English branch; the unchanged technical document matches.",
+}
+
+
+# Native catalog inspection also runs against the extracted package. Keep this
+# query shared so a second runner cannot omit explicit installation defaults.
+DEFAULT_OBJECTS_QUERY = """SELECT json_build_object(
+    'parser',(SELECT json_build_object('schema',n.nspname,'name',p.prsname) FROM pg_ts_config c JOIN pg_ts_parser p ON p.oid=c.cfgparser JOIN pg_namespace n ON n.oid=p.prsnamespace WHERE c.oid='public.charabia'::regconfig),
+    'types',(SELECT json_agg(json_build_object('id',tokid,'alias',alias) ORDER BY tokid) FROM ts_token_type('charabia.parser')),
+    'dictionaries',(SELECT json_agg(d.dictname ORDER BY d.dictname) FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname='charabia'),
+    'dictionary_options',(SELECT json_agg(json_build_object('dictionary',d.dictname,'template_schema',tn.nspname,'template',t.tmplname,
+        'options',d.dictinitoption) ORDER BY d.dictname)
+        FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace JOIN pg_ts_template t ON t.oid=d.dicttemplate JOIN pg_namespace tn ON tn.oid=t.tmplnamespace WHERE n.nspname='charabia'),
+    'mappings',(SELECT json_agg(json_build_object('type',m.maptokentype,'order',m.mapseqno,'dictionary_schema',n.nspname,'dictionary',d.dictname) ORDER BY m.maptokentype,m.mapseqno) FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE m.mapcfg='public.charabia'::regconfig));"""
+
+
+def language_capabilities():
+    """Independent release expectations, ordered by the public token type IDs."""
+    return [{"language": alias, "script": LANGUAGE_SCRIPTS[alias],
+             "has_stopwords": alias != "und", "stemmer": LANGUAGE_STEMMERS.get(alias),
+             "english_eligible": alias in ENGLISH_ELIGIBLE,
+             "defaults": {"discard": alias != "und",
+                          "stem": alias in LANGUAGE_STEMMERS or alias in ENGLISH_ELIGIBLE,
+                          "normalize": True, "filter": False, "english": alias in ENGLISH_ELIGIBLE}}
+            for alias in LANGUAGE_CODES]
+
+
+def require_default_objects(document, info):
+    """Check the real installed catalog, including all six explicit options."""
+    require_static_info(info, {})
+    if not isinstance(document, dict) or set(document) != {"parser", "types", "dictionaries", "dictionary_options", "mappings"}:
+        raise ValueError("Missing default Parser/Dictionary/Configuration catalog evidence")
+    if not same_json(document["parser"], {"schema": "charabia", "name": "parser"}):
+        raise ValueError("Default Configuration must use charabia.parser")
+    expected_types = [{"id": index, "alias": alias} for index, alias in enumerate((*LANGUAGE_CODES, "blank", "display_only"), 1)]
+    if not same_json(document["types"], expected_types):
+        raise ValueError("Installed Parser types differ from the 16 ordered languages + blank + display_only contract")
+    if not same_json(document["dictionaries"], sorted(LANGUAGE_CODES)):
+        raise ValueError("Expected exactly the 16 default language dictionaries")
+    expected_mappings = [{"type": index, "order": 1, "dictionary_schema": "charabia", "dictionary": alias} for index, alias in enumerate(LANGUAGE_CODES, 1)]
+    if not same_json(document["mappings"], expected_mappings):
+        raise ValueError("Default mappings must use each language dictionary once, with blank/display_only unmapped")
+    rows = document["dictionary_options"]
+    if not isinstance(rows, list) or len(rows) != len(LANGUAGE_CODES):
+        raise ValueError("Missing default Dictionary option rows")
+    for actual, expected in zip(rows, sorted(info["languages"], key=lambda item: item["language"])):
+        if not isinstance(actual, dict) or set(actual) != {"dictionary", "template_schema", "template", "options"} or actual["dictionary"] != expected["language"] or actual["template_schema"] != "charabia" or actual["template"] != "template":
+            raise ValueError("Default dictionaries require the charabia.template template")
+        # dictinitoption is PostgreSQL's text serialization of DefElem entries,
+        # not the text[] consumed by pg_options_to_table. Installed defaults are
+        # deliberately only lowercase language codes and quoted Boolean values.
+        options = {}
+        for entry in actual["options"].split(",") if isinstance(actual["options"], str) else ():
+            match = re.fullmatch(r'\s*(?:"([a-z]+)"|([a-z]+))\s*=\s*\'([a-z]+)\'\s*', entry)
+            if match is None:
+                raise ValueError("Invalid explicit default Dictionary option")
+            name=match[1] or match[2]
+            if name in options:
+                raise ValueError("Duplicate explicit default Dictionary option")
+            options[name] = match[3]
+        wanted = {"language": expected["language"], **{key: str(value).lower() for key, value in expected["defaults"].items()}}
+        if options != wanted:
+            raise ValueError("Default dictionaries require six explicit Language/Boolean defaults")
+
 
 def isolated_pg_environment(source):
     """Do not let libpq services/hostaddr override an owned Unix socket.
@@ -82,36 +156,36 @@ def require_static_info(info, expected):
     mismatches = {key: {"expected": value, "actual": info.get(key)} for key, value in expected.items() if not same_json(info.get(key), value)}
     if mismatches:
         raise ValueError(f"analysis_info static identity differs from the build inputs: {mismatches}")
-    if info["extension"] != RELEASE_VERSION or info["language_count"] != 71:
-        raise ValueError("analysis_info requires release 0.3.0 and 71 language dictionaries")
-    if not isinstance(info["analysis_revision"], str) or not info["analysis_revision"]:
-        raise ValueError("analysis_info requires a nonempty analysis_revision")
+    if info["extension"] != RELEASE_VERSION or type(info["language_count"]) is not int or info["language_count"] != len(LANGUAGE_CODES):
+        raise ValueError("analysis_info requires release 0.3.0 and 16 language dictionaries")
+    if info["analysis_revision"] != ANALYSIS_REVISION:
+        raise ValueError("analysis_info requires the current analysis_revision")
     for field in ("cargo_lock_sha256", "resource_manifest_sha256", "resource_fingerprint"):
         value = info[field]
         if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
             raise ValueError(f"analysis_info contains an invalid {field}")
     languages = info["languages"]
-    if not isinstance(languages, list) or len(languages) != 71:
-        raise ValueError("analysis_info requires exactly 71 language capability rows")
+    if not isinstance(languages, list) or len(languages) != len(LANGUAGE_CODES):
+        raise ValueError("analysis_info requires exactly 16 language capability rows")
     aliases = set()
     for row in languages:
-        if not isinstance(row, dict) or set(row) != {"language", "script", "has_stopwords", "stemmer", "defaults"}:
+        if not isinstance(row, dict) or set(row) != {"language", "script", "has_stopwords", "stemmer", "english_eligible", "defaults"}:
             raise ValueError("Invalid language capability row")
         alias = row["language"]
         if not isinstance(alias, str) or len(alias) != 3 or not alias.isascii() or not alias.islower() or not alias.isalpha() or alias in aliases:
             raise ValueError("Language aliases must be unique three-letter lowercase codes")
         aliases.add(alias)
-        if type(row["has_stopwords"]) is not bool or not isinstance(row["script"], str) or not row["script"]:
+        if type(row["has_stopwords"]) is not bool or type(row["english_eligible"]) is not bool or not isinstance(row["script"], str) or not row["script"]:
             raise ValueError("Invalid language script or stopword capability")
         stemmer = row["stemmer"]
         if stemmer is not None and (not isinstance(stemmer, str) or not stemmer):
             raise ValueError("Invalid stemmer capability")
         defaults = row["defaults"]
-        wanted = {"discard": row["has_stopwords"], "stem": stemmer is not None, "normalize": True, "filter": False}
+        wanted = {"discard": row["has_stopwords"], "stem": stemmer is not None or row["english_eligible"], "normalize": True, "filter": False, "english": row["english_eligible"]}
         if not same_json(defaults, wanted):
             raise ValueError(f"Invalid defaults for {alias}")
-    if "und" not in aliases or sum(row["has_stopwords"] for row in languages) != 52 or sum(row["stemmer"] is not None for row in languages) != 19:
-        raise ValueError("Language capability coverage differs from the fixed 71/52/19 contract")
+    if not same_json(languages, language_capabilities()):
+        raise ValueError("Language order or capability coverage differs from the fixed 16/15/10/8 contract")
 
 
 def require_recovery_report(recovery, library_hash):
@@ -151,7 +225,12 @@ def quality_case(case_id, *, input, query, config, expected, actual, known_signa
             raise ValueError(f"Quality case {case_id} requires its reviewed frozen signature")
         case["known_signature"] = frozen
         exact = all(same_json(case[field], frozen[field]) for field in QUALITY_FIELDS)
-        case["status"] = "known-failure" if exact else "regression"
+        if case_id in REVIEWED_QUALITY_RESOLUTIONS:
+            unchanged=all(same_json(case[field],frozen[field]) for field in QUALITY_FIELDS if field!="actual")
+            case["status"]="passed" if unchanged and same_json(actual,expected) else "regression"
+            case["resolution"]={"analysis_revision":ANALYSIS_REVISION,"basis":REVIEWED_QUALITY_RESOLUTIONS[case_id],"tests":["tests/bm25.py","tests/chain.py","src/analysis.rs"]}
+        else:
+            case["status"] = "known-failure" if exact else "regression"
     elif known_signature is not None:
         raise ValueError(f"Quality case {case_id} is not an eligible known failure")
     else:
@@ -171,6 +250,8 @@ def validate_quality(document):
             checked = quality_case(case["id"], **{key: case[key] for key in QUALITY_FIELDS}, known_signature=case.get("known_signature"))
         except (KeyError, TypeError) as exc:
             raise ValueError("Incomplete quality case") from exc
+        if not same_json(case.get("resolution"),checked.get("resolution")):
+            raise ValueError(f"Quality case {case['id']} has invalid resolution evidence")
         if case.get("status") != checked["status"]:
             raise ValueError(f"Quality case {case['id']} has an invalid status")
         seen.add(case["id"])
@@ -248,11 +329,12 @@ def require_release_report(report):
     require_static_info(report.get("analysis_info"), {"extension": RELEASE_VERSION})
     if not report.get("public_api_abi_verified") or not report.get("default_objects_verified"):
         raise ValueError("Public diagnostic ABI and default text search objects were not verified")
+    require_default_objects(report.get("default_objects"), report["analysis_info"])
     require_recovery_report(report.get("recovery"), report.get("loaded_library_sha256"))
     if not report.get("pg_textsearch", {}).get("loaded_backend_verified"):
         raise ValueError("The actual pg_textsearch backend library was not verified")
     commands = {item["label"]: item for item in report.get("commands", [])}
-    for label in ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract"):
+    for label in ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract", "word-generator-contract", "resource-verification", "normal-cargo-tree"):
         if commands.get(label, {}).get("exit_code") != 0:
             raise ValueError(f"Missing successful {label} evidence")
     for suite in set(SUITES) - {"unit"}:

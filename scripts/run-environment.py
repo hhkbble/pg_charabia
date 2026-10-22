@@ -15,7 +15,7 @@ import tempfile
 import time
 import tomllib
 
-from report_contract import FORMAT, RELEASE_VERSION, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_known_quality_cases, require_recovery_report, require_static_info, select_suites, verified_status
+from report_contract import DEFAULT_OBJECTS_QUERY, FORMAT, RELEASE_VERSION, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_default_objects, require_known_quality_cases, require_recovery_report, require_static_info, select_suites, verified_status
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -137,8 +137,12 @@ def main():
         command([sys.executable, ROOT / "scripts/prepare-resources.py", "--cache", env["LINDERA_BUILD_DICTIONARY_CACHE_DIR"]], "resource-verification")
         command(["cargo", "tree", "--locked", "--no-default-features", "--features", feature_string], "cargo-tree")
         command(["cargo", "tree", "--locked", "-e", "features", "--no-default-features", "--features", feature_string], "cargo-feature-tree")
+        normal_tree=command(["cargo","tree","--locked","-e","normal","--no-default-features","--features",feature_string],"normal-cargo-tree",True)
+        if "stop-words v" in normal_tree:
+            raise RuntimeError("Raw stop-words arrays remain in runtime dependencies")
         if "unit" in selected:
             command([sys.executable, ROOT / "scripts/check-report-contract"], "runner-contract")
+            command([sys.executable, ROOT / "scripts/check-english-generator"], "word-generator-contract")
             command(["cargo", "test", "--locked", "--lib", "--no-default-features", "--features", feature_string], "unit")
             result["suite_results"]["unit"] = {"status": "passed", "commands": ["runner-contract", "unit"]}
             checkpoint()
@@ -194,6 +198,27 @@ def main():
                 raise RuntimeError(f"Embedded resource hash mismatch: {data_path}")
             actual_resources.append(dict(item, verified_sha256=actual_hash))
         (evidence / "embedded-resources.json").write_text(json.dumps(actual_resources, indent=2) + "\n")
+        # Keep the exact corresponding upstream source in the binary delivery.
+        source_archives=[]
+        for entry in resource_manifest["rebuild_source_archives"]:
+            package_metadata=next(p for p in metadata["packages"] if p["name"]==entry["crate"] and p["version"]==entry["version"])
+            source_root=Path(package_metadata["manifest_path"]).parent
+            archive=source_root.parents[2]/"cache"/source_root.parent.name/(entry["crate"]+"-"+entry["version"]+".crate")
+            if sha256(archive)!=entry["sha256"]:
+                raise RuntimeError("Rebuild source archive checksum mismatch: "+str(archive))
+            if entry["crate"]=="charabia":
+                import tarfile
+                with tarfile.open(archive) as contents:
+                    for relative,wanted in (("dictionaries/txt/german/words.txt",resource_manifest["german_rebuild"]["source_sha256"]),("dictionaries/fst/german/words.fst",resource_manifest["german_rebuild"]["fst_sha256"])):
+                        source=contents.extractfile("charabia-0.10.0/"+relative)
+                        if source is None or hashlib.sha256(source.read()).hexdigest()!=wanted:
+                            raise RuntimeError("German corresponding source differs: "+relative)
+            destination=package_out/entry["package_path"]
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(archive,destination)
+            source_archives.append(dict(entry,verified_sha256=sha256(destination)))
+        result["rebuild_source_archives"]=source_archives
+        (evidence/"rebuild-source-archives.json").write_text(json.dumps(source_archives,indent=2)+"\n")
         licenses = [{"name": p["name"], "version": p["version"], "license": p.get("license"), "license_file": p.get("license_file"), "source": p.get("source")} for p in metadata["packages"]]
         (package_out / "dependency-licenses.json").write_text(json.dumps(licenses, indent=2) + "\n")
         license_dir = package_out / "dependency-notices"
@@ -274,20 +299,8 @@ def main():
             raise RuntimeError("Loaded analysis_info static identity does not match build inputs; see actual and expected evidence") from exc
         result["analysis_info"] = analysis_info
         result["analysis_info_verified"] = True
-        default_query = """SELECT json_build_object(
-            'types',(SELECT json_agg(json_build_object('id',tokid,'alias',alias) ORDER BY tokid) FROM ts_token_type('charabia.parser')),
-            'dictionaries',(SELECT json_agg(d.dictname ORDER BY d.dictname) FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname='charabia'),
-            'mappings',(SELECT json_agg(json_build_object('type',m.maptokentype,'order',m.mapseqno,'dictionary',d.dictname) ORDER BY m.maptokentype,m.mapseqno) FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict WHERE m.mapcfg='public.charabia'::regconfig));"""
-        defaults = json.loads(command(psql + ["-Atq", "-c", default_query], "default-objects", True))
-        language_names = {item["language"] for item in analysis_info["languages"]}
-        types = defaults.get("types", [])
-        if len(types) != 73 or [row["id"] for row in types] != list(range(1, 74)) or {row["alias"] for row in types[:71]} != language_names or types[71:] != [{"id": 72, "alias": "blank"}, {"id": 73, "alias": "display_only"}]:
-            raise RuntimeError("Installed Parser types differ from the 71 language + blank + display_only contract")
-        if len(defaults.get("dictionaries", [])) != 71 or set(defaults["dictionaries"]) != language_names:
-            raise RuntimeError("Expected exactly the 71 default language dictionaries")
-        mappings = defaults.get("mappings", [])
-        if len(mappings) != 71 or any(row != {"type": token["id"], "order": 1, "dictionary": token["alias"]} for row, token in zip(mappings, types[:71])):
-            raise RuntimeError("Default mappings must use each language dictionary once, with blank/display_only unmapped")
+        defaults = json.loads(command(psql + ["-Atq", "-c", DEFAULT_OBJECTS_QUERY], "default-objects", True))
+        require_default_objects(defaults, analysis_info)
         result["default_objects_verified"] = True
         result["default_objects"] = defaults
         abi_query = """SELECT json_agg(json_build_object('name',p.proname,

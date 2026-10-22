@@ -30,6 +30,8 @@ fn benchmark_direct_pipeline() {
         ),
     ];
     let mut builder = TokenizerBuilder::default();
+    let allowed = crate::language_data::LANGUAGES.map(|row| row.0);
+    builder.allow_list(&allowed);
     let tokenizer = builder.build();
     let start = Instant::now();
     black_box(tokenizer.segment(texts[0].1).count());
@@ -47,27 +49,38 @@ fn benchmark_direct_pipeline() {
             let start = Instant::now();
             let state = route
                 .has_stopwords()
-                .then(|| crate::stopwords::build(route).unwrap());
+                .then(|| crate::stopwords::stop_set(route).unwrap());
             let fst_init_ns = start.elapsed().as_nanos();
             let start = Instant::now();
             let dictionary = Options::new(
                 route,
                 route.has_stopwords(),
-                route.algorithm().is_some(),
+                route.default_stem(route.default_english(false)),
                 true,
                 false,
+                route.default_english(false),
             )
             .unwrap();
             let options_init_ns = start.elapsed().as_nanos();
             assert_eq!(
-                dictionary.fst_bytes(),
+                dictionary.referenced_fst_bytes(),
                 state
                     .as_ref()
                     .map_or(0, |s| s.fst.as_fst().as_bytes().len())
+                    + if route.english_eligible() {
+                        crate::stopwords::stop_set(LanguageId::ENG)
+                            .unwrap()
+                            .fst
+                            .as_fst()
+                            .as_bytes()
+                            .len()
+                    } else {
+                        0
+                    }
             );
             fst_initializations.push(serde_json::json!({
-            "route":route.alias(),"fst_build_ns":fst_init_ns,"full_options_init_ns":options_init_ns,
-            "fst_bytes":dictionary.fst_bytes(),"keys":dictionary.effective_stopwords(),
+            "route":route.alias(),"fst_view_ns":fst_init_ns,"full_options_init_ns":options_init_ns,
+            "fst_bytes":dictionary.referenced_fst_bytes(),"keys":dictionary.effective_stopwords(),
             "excluded_builtin":dictionary.excluded_builtin_count()}));
             state
         })
@@ -81,19 +94,20 @@ fn benchmark_direct_pipeline() {
                     Options::new(
                         route,
                         stop && route.has_stopwords(),
-                        stem && route.algorithm().is_some(),
+                        stem && route.default_stem(route.default_english(false)),
                         true,
                         false,
+                        route.default_english(false),
                     )
                     .unwrap()
                 })
                 .collect::<Vec<_>>()
         });
     let four_configurations_init_ns = start.elapsed().as_nanos();
-    let filter_options =
-        LanguageId::ALL.map(|language| Options::new(language, false, false, true, true).unwrap());
-    let prepared_options =
-        LanguageId::ALL.map(|language| Options::new(language, false, false, false, false).unwrap());
+    let filter_options = LanguageId::ALL
+        .map(|language| Options::new(language, false, false, true, true, false).unwrap());
+    let prepared_options = LanguageId::ALL
+        .map(|language| Options::new(language, false, false, false, false, false).unwrap());
     let stemmers = LanguageId::ALL
         .into_iter()
         .map(|route| route.algorithm().map(Stemmer::create))
@@ -122,6 +136,7 @@ fn benchmark_direct_pipeline() {
             "classify_prefix",
             "prepare",
             "fst_lookup_prepared",
+            "english_fst_current_ascii",
             "snowball_prepared",
             "surface_no_stop",
             "surface_stop",
@@ -173,6 +188,19 @@ fn benchmark_direct_pipeline() {
                             for (route, key) in &prepared {
                                 if let Some(set) = &sets[route.id() as usize - 1] {
                                     black_box(set.fst.contains(black_box(key)));
+                                    count += 1;
+                                }
+                            }
+                        }
+                        "english_fst_current_ascii" => {
+                            for span in spans.iter().filter(|span| {
+                                span.token_type.is_language() && span.route.english_eligible()
+                            }) {
+                                let raw = &input[span.start..span.end];
+                                if !raw.is_empty() && raw.bytes().all(|c| c.is_ascii_alphabetic()) {
+                                    black_box(crate::resources::english_contains(black_box(
+                                        &raw.to_ascii_lowercase(),
+                                    )));
                                     count += 1;
                                 }
                             }
@@ -250,7 +278,7 @@ fn benchmark_direct_pipeline() {
         "first_segment_with_language_ns":first_segment_with_language_ns,
         "first_sample_order":"raw segment first, then completion; not two independent cold starts",
         "per_language_builtin_fst_init":fst_initializations,"four_configurations_init_ns":four_configurations_init_ns,
-        "state_scope":"owned local Rust states; not PostgreSQL dictCtx live counts",
+        "state_scope":"local Rust options and shared static FST views; not PostgreSQL dictCtx live counts",
         "inputs":inputs})
     );
 }

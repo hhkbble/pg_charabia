@@ -179,17 +179,18 @@ def cached_init_faults():
                         failed_generation = after["dictionary_last_created"]
                         assert after["dictionary_last_lexized"] != failed_generation, after
                         assert after["dictionary_last_lexized"] == before["dictionary_last_lexized"], (before, after)
+                        assert after["dictionary_live_fst_bytes"] == 0, after
                         retained = point == "init"
                         previous_retained = (warmed if attempt == 0 else retained)
                         assert after["dictionary_dropped"] - before["dictionary_dropped"] == int(previous_retained) + int(not retained), (before, after)
                         assert after["state_registered"] - before["state_registered"] == int(retained), (before, after)
                         assert after["state_released"] - before["state_released"] == int(previous_retained), (before, after)
                         assert after["dictionary_created"] - after["dictionary_dropped"] == initial_live - int(warmed) + int(retained), after
-                        assert after["dictionary_last_created_fst_bytes"] > 0, after
-                        expected_bytes = (before["dictionary_live_fst_bytes"]
-                                          - int(previous_retained) * before["dictionary_last_created_fst_bytes"]
-                                          + int(retained) * after["dictionary_last_created_fst_bytes"])
-                        assert after["dictionary_live_fst_bytes"] == expected_bytes, (before, after)
+                        assert after["dictionary_last_referenced_fst_bytes"] > 0, after
+                        expected_bytes = (before["dictionary_live_referenced_fst_bytes"]
+                                          - int(previous_retained) * before["dictionary_last_referenced_fst_bytes"]
+                                          + int(retained) * after["dictionary_last_referenced_fst_bytes"])
+                        assert after["dictionary_live_referenced_fst_bytes"] == expected_bytes, (before, after)
                         assert session.value("SELECT 1") == "1"
                         before = after
                     assert session.value(sql) == ("{running}" if warmed else "{running,run}")
@@ -199,10 +200,10 @@ def cached_init_faults():
                     assert recovered["state_registered"] - before["state_registered"] == 1, (before, recovered)
                     assert recovered["state_released"] - before["state_released"] == int(point == "init"), (before, recovered)
                     assert recovered["dictionary_last_lexized"] == recovered["dictionary_last_created"], recovered
-                    expected_bytes = (before["dictionary_live_fst_bytes"]
-                                      - int(point == "init") * before["dictionary_last_created_fst_bytes"]
-                                      + recovered["dictionary_last_created_fst_bytes"])
-                    assert recovered["dictionary_live_fst_bytes"] == expected_bytes, (before, recovered)
+                    expected_bytes = (before["dictionary_live_referenced_fst_bytes"]
+                                      - int(point == "init") * before["dictionary_last_referenced_fst_bytes"]
+                                      + recovered["dictionary_last_referenced_fst_bytes"])
+                    assert recovered["dictionary_live_referenced_fst_bytes"] == expected_bytes, (before, recovered)
                     assert recovered["dictionary_created"] - recovered["dictionary_dropped"] == initial_live + int(not warmed), recovered
                     label["recovered"] = recovered
                     # An external catalog change during A's transaction must
@@ -228,13 +229,94 @@ def cached_init_faults():
                     assert final["dictionary_dropped"] - after_savepoint["dictionary_dropped"] == int(retained), (after_savepoint, final)
                     assert final["state_registered"] - after_savepoint["state_registered"] == 1, (after_savepoint, final)
                     assert final["state_released"] - after_savepoint["state_released"] == int(retained), (after_savepoint, final)
-                    assert final["dictionary_live_fst_bytes"] == final["dictionary_last_created_fst_bytes"], final
+                    assert final["dictionary_live_referenced_fst_bytes"] == final["dictionary_last_referenced_fst_bytes"], final
                     assert final["dictionary_created"] - final["dictionary_dropped"] == initial_live + int(not warmed), final
                     session.value("COMMIT")
                     assert session.value("SELECT 1") == "1"
                     label["savepoint"] = {"before":before_savepoint,"error":failed,"after_rollback":after_savepoint,"recovered":final}
                     save("lifecycle-results.json", results)
                 run("DROP TEXT SEARCH DICTIONARY " + name)
+
+
+def parallel_cached_init_faults():
+    """Complement the exhaustive native faults with the new two-branch state."""
+    manifest = json.loads((Path(__file__).resolve().parent.parent / "resources/manifest.json").read_text())
+    native_bytes = manifest["compiled_stop_sets"]["tur"]["fst_bytes"]
+    both_bytes = native_bytes + manifest["compiled_stop_sets"]["eng"]["fst_bytes"]
+    four = ["abbrevıate", "abbrevıa", "abbreviate", "abbrevi"]
+    folded = ["abbreviate", "abbrevia", "abbrevi"]
+    results["parallel_cached_init_faults"] = []
+    for warmed, point, mode in ((False,"register_alloc","allocation_error"),
+                                (False,"init","panic"),
+                                (True,"register_link","error"),
+                                (True,"init","error")):
+        name = "lifecycle.parallel_failure_" + str(int(warmed)) + "_" + point
+        run("CREATE TEXT SEARCH DICTIONARY " + name + "(TEMPLATE=charabia.template,"
+            "Language='tur',Discard=true,Stem=true,Normalize=false,Filter=false,English=true)")
+        try:
+            with Session() as session:
+                sql = "SELECT to_json(ts_lexize(" + literal(name) + ",'ABBREVIATE'))"
+                if warmed:
+                    assert json.loads(session.value(sql)) == four
+                    # Preserve both stemmers and both stop references while
+                    # invalidating a warmed cache entry from another backend.
+                    run("ALTER TEXT SEARCH DICTIONARY " + name + "(Normalize=true)")
+                before = json.loads(session.value("SELECT charabia.test_stats()"))
+                session.value("SELECT charabia.test_set_fault(" + literal(point) + "," + literal(mode) + ")")
+                output = session.query(sql)
+                after = json.loads(session.value("SELECT charabia.test_stats()"))
+                record = {"warmed":warmed,"point":point,"mode":mode,"pid":session.pid,
+                          "before":before,"error":output,"after":after,"expected_referenced_bytes":both_bytes}
+                results["parallel_cached_init_faults"].append(record)
+                save("lifecycle-results.json", results)
+                retained = point == "init"
+                assert "ERROR:" in output and "XX000" in output, record
+                assert ("invalid memory alloc request size" if mode == "allocation_error" else "injected pg_charabia") in output, record
+                assert after["dictionary_created"] - before["dictionary_created"] == 1, record
+                assert after["dictionary_dropped"] - before["dictionary_dropped"] == int(warmed) + int(not retained), record
+                assert after["state_registered"] - before["state_registered"] == int(retained), record
+                assert after["state_released"] - before["state_released"] == int(warmed), record
+                assert after["dictionary_last_lexized"] == before["dictionary_last_lexized"], record
+                assert after["dictionary_last_created"] != after["dictionary_last_lexized"], record
+                assert after["dictionary_live_fst_bytes"] == 0 and after["dictionary_last_created_fst_bytes"] == 0, record
+                assert after["dictionary_last_referenced_fst_bytes"] == both_bytes, record
+                assert after["dictionary_live_referenced_fst_bytes"] == (
+                    before["dictionary_live_referenced_fst_bytes"] - int(warmed) * both_bytes + int(retained) * both_bytes), record
+                assert session.value("SELECT 1") == "1"
+                actual = json.loads(session.value(sql))
+                expected = folded if warmed else four
+                recovered = json.loads(session.value("SELECT charabia.test_stats()"))
+                record.update(recovered=recovered,recovered_terms=actual)
+                save("lifecycle-results.json", results)
+                assert actual == expected, record
+                assert recovered["dictionary_created"] - after["dictionary_created"] == 1, record
+                assert recovered["dictionary_dropped"] - after["dictionary_dropped"] == int(retained), record
+                assert recovered["state_registered"] - after["state_registered"] == 1, record
+                assert recovered["state_released"] - after["state_released"] == int(retained), record
+                assert recovered["dictionary_last_lexized"] == recovered["dictionary_last_created"], record
+                assert recovered["dictionary_created"] - recovered["dictionary_dropped"] == 1, record
+                assert recovered["dictionary_live_fst_bytes"] == 0 and recovered["dictionary_live_referenced_fst_bytes"] == both_bytes, record
+                record["alter_states"] = []
+                for enabled in (False, True):
+                    run("ALTER TEXT SEARCH DICTIONARY " + name + "(English=" + ("true" if enabled else "false") + ")")
+                    current = json.loads(session.value(sql))
+                    counters = json.loads(session.value("SELECT charabia.test_stats()"))
+                    state = {"english":enabled,"terms":current,"counters":counters}
+                    record["alter_states"].append(state)
+                    save("lifecycle-results.json", results)
+                    native_terms = ["abbreviate","abbrevia"] if warmed else ["abbrevıate","abbrevıa"]
+                    assert current == (expected if enabled else native_terms), state
+                    assert counters["dictionary_created"] - recovered["dictionary_created"] == 1, state
+                    assert counters["dictionary_dropped"] - recovered["dictionary_dropped"] == 1, state
+                    assert counters["state_registered"] - recovered["state_registered"] == 1, state
+                    assert counters["state_released"] - recovered["state_released"] == 1, state
+                    assert counters["dictionary_last_lexized"] == counters["dictionary_last_created"], state
+                    assert counters["dictionary_live_fst_bytes"] == 0, state
+                    assert counters["dictionary_live_referenced_fst_bytes"] == (both_bytes if enabled else native_bytes), state
+                    assert counters["dictionary_created"] - counters["dictionary_dropped"] == 1, state
+                    recovered = counters
+        finally:
+            run("DROP TEXT SEARCH DICTIONARY " + name)
 
 
 restore_db="pgcb_restore_"+str(os.getpid())
@@ -289,6 +371,7 @@ try:
         results["constant_literal"]["after_reprepare"] = refreshed
     if has_hooks:
         cached_init_faults()
+        parallel_cached_init_faults()
 
     run(native_config_sql("lifecycle.roundtrip", stem=False, discard=False, normalize=False))
     original_oid = int(run("SELECT 'lifecycle.roundtrip'::regconfig::oid"))

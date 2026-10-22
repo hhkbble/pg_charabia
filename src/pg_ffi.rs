@@ -229,26 +229,31 @@ fn pg_string(value: &str) -> *mut c_char {
 }
 
 pub fn lexemes(outcome: LexizeOutcome) -> Internal {
-    let (first, second, filter) = match outcome {
+    let count = match &outcome {
         LexizeOutcome::Ignore => return datum(0),
-        LexizeOutcome::Stop => (None, None, false),
-        LexizeOutcome::Filter(term) => (Some(term), None, true),
-        LexizeOutcome::Terms { first, second } => (Some(first), second, false),
+        LexizeOutcome::Stop => 0,
+        LexizeOutcome::Filter(_) => 1,
+        LexizeOutcome::Terms(terms) => terms.len(),
     };
-    // SAFETY: PG owns the zero-terminated array and each separately allocated
-    // string. Distinct nvariant values express alternatives at the same position.
+    // SAFETY: The bounded result has at most four alternatives. PG owns the
+    // zero-terminated array and strings. Each variant shares the input position.
     unsafe {
-        let result =
-            pg_sys::palloc0(std::mem::size_of::<pg_sys::TSLexeme>() * 3).cast::<pg_sys::TSLexeme>();
-        if let Some(term) = first {
-            (*result).lexeme = pg_string(&term);
-            if filter {
+        let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::TSLexeme>() * (count + 1))
+            .cast::<pg_sys::TSLexeme>();
+        match outcome {
+            LexizeOutcome::Terms(terms) => {
+                for (index, term) in terms.into_iter().enumerate() {
+                    let entry = result.add(index);
+                    (*entry).lexeme = pg_string(&term);
+                    (*entry).nvariant = index as u16;
+                }
+            }
+            LexizeOutcome::Filter(term) => {
+                (*result).lexeme = pg_string(&term);
                 (*result).flags = pg_sys::TSL_FILTER as u16;
             }
-        }
-        if let Some(term) = second {
-            (*result.add(1)).lexeme = pg_string(&term);
-            (*result.add(1)).nvariant = 1;
+            LexizeOutcome::Stop => {}
+            LexizeOutcome::Ignore => unreachable!(),
         }
         pointer(result)
     }
@@ -316,6 +321,7 @@ pub unsafe fn dictionary_options(options: Internal) -> crate::analysis::Options 
     let mut language = None;
     let mut discard = None;
     let mut stem = None;
+    let mut english = None;
     let mut normalize = true;
     let mut filter = false;
     let mut seen = std::collections::BTreeSet::new();
@@ -345,6 +351,7 @@ pub unsafe fn dictionary_options(options: Internal) -> crate::analysis::Options 
                 }
                 "discard" => discard = Some(unsafe { pg_sys::defGetBoolean(def) }),
                 "stem" => stem = Some(unsafe { pg_sys::defGetBoolean(def) }),
+                "english" => english = Some(unsafe { pg_sys::defGetBoolean(def) }),
                 "normalize" => normalize = unsafe { pg_sys::defGetBoolean(def) },
                 "filter" => filter = unsafe { pg_sys::defGetBoolean(def) },
                 _ => invalid(format!("unknown dictionary option: {name}")),
@@ -353,17 +360,21 @@ pub unsafe fn dictionary_options(options: Internal) -> crate::analysis::Options 
     });
     let language = language.unwrap_or_else(|| invalid("Language is required"));
     let discard = discard.unwrap_or_else(|| language.has_stopwords());
-    let stem = stem.unwrap_or_else(|| language.algorithm().is_some());
+    let english = english.unwrap_or_else(|| language.default_english(filter));
+    if english && (!language.english_eligible() || filter) {
+        invalid("English=true requires a non-English Latin language and Filter=false");
+    }
+    let stem = stem.unwrap_or_else(|| language.default_stem(english));
     if discard && !language.has_stopwords() {
         fail(
             PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             "Discard=true requires a language with a builtin stoplist",
         );
     }
-    if stem && language.algorithm().is_none() {
+    if stem && language.algorithm().is_none() && !english {
         fail(
             PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            "Stem=true requires a language with a supported stemmer",
+            "Stem=true requires an enabled branch with a supported stemmer",
         );
     }
     if filter && stem {
@@ -372,7 +383,7 @@ pub unsafe fn dictionary_options(options: Internal) -> crate::analysis::Options 
         );
     }
     checked(crate::analysis::Options::new(
-        language, discard, stem, normalize, filter,
+        language, discard, stem, normalize, filter, english,
     ))
 }
 

@@ -54,12 +54,17 @@ try:
         record["status"] = "passed"
         checkpoint()
     first_info = [item for item in json_lines(results["examples"][0]["output"]) if "extension" in item]
-    check(len(first_info)==1 and first_info[0]["extension"]=="0.3.0" and first_info[0]["language_count"]==71,
+    check(len(first_info)==1 and first_info[0]["extension"]=="0.3.0" and first_info[0]["language_count"]==16,
           "README loads this native interface release",first_info)
+    capabilities = first_info[0]["languages"]
+    check([row["language"] for row in capabilities] ==
+          ["eng","deu","nld","rus","spa","fra","por","ita","ara","tur","cmn","jpn","kor","vie","tha","und"] and
+          sum(row["defaults"]["english"] for row in capabilities) == 8,
+          "README analysis identity lists the ordered supported routes and English defaults", capabilities)
     options=run("SELECT dictinitoption FROM pg_ts_dict WHERE oid='app.search_eng'::regdictionary",database)
     check("stem = true" in options.replace("'","") and "discard = true" in options.replace("'",""),
           "native ALTER keeps other stored options",options)
-    check(run("SELECT mapdict=(SELECT mapdict FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig AND maptokentype=9) FROM pg_ts_config_map WHERE mapcfg='app.search'::regconfig AND maptokentype=9",database)=="t",
+    check(run("SELECT mapdict=(SELECT mapdict FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig AND maptokentype=6) FROM pg_ts_config_map WHERE mapcfg='app.search'::regconfig AND maptokentype=6",database)=="t",
           "COPY shares unchanged French dictionary",options)
     ids = run("SELECT id FROM documents WHERE to_tsvector('public.charabia',body) @@ plainto_tsquery('public.charabia','POSTGRESQL') ORDER BY id",database)
     check(ids == "1","native case normalization finds the independent Chinese document",ids)

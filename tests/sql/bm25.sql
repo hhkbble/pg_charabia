@@ -81,3 +81,29 @@ DO $$ BEGIN
   EXCEPTION WHEN program_limit_exceeded THEN NULL; END;
 END $$;
 CREATE INDEX bypass_bm25 ON bm25_test.bypass_docs USING bm25(body) WITH(text_config='public.charabia');
+
+-- Force one Dictionary language without passing Parser-private metadata. This
+-- isolates the four-variant protocol from statistical language identification.
+CREATE TEXT SEARCH DICTIONARY bm25_test.four_terms_dict(
+  TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=true,
+  Normalize=false,Filter=false,English=true);
+CREATE TEXT SEARCH DICTIONARY bm25_test.native_terms_dict(
+  TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=true,
+  Normalize=false,Filter=false,English=false);
+CREATE TEXT SEARCH CONFIGURATION bm25_test.four_terms(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION bm25_test.native_terms(PARSER=charabia.parser);
+DO $fixture$ DECLARE l jsonb; BEGIN
+  FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
+    EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.four_terms ADD MAPPING FOR %I WITH bm25_test.four_terms_dict',l->>'language');
+    EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.native_terms ADD MAPPING FOR %I WITH bm25_test.native_terms_dict',l->>'language');
+  END LOOP;
+END $fixture$;
+CREATE TABLE bm25_test.four_docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));
+INSERT INTO bm25_test.four_docs VALUES
+  (1,'ABBREVIATE'),(2,'abbrevıate'),(3,'abbrevıa'),(4,'abbreviate'),(5,'abbrevi'),(6,'unrelatedcanary');
+CREATE TABLE bm25_test.four_native_docs(LIKE bm25_test.four_docs INCLUDING ALL);
+INSERT INTO bm25_test.four_native_docs SELECT * FROM bm25_test.four_docs;
+CREATE INDEX four_bm25 ON bm25_test.four_docs USING bm25(body)WITH(text_config='bm25_test.four_terms');
+CREATE INDEX four_native_bm25 ON bm25_test.four_native_docs USING bm25(body)WITH(text_config='bm25_test.native_terms');
+ANALYZE bm25_test.four_docs;
+ANALYZE bm25_test.four_native_docs;

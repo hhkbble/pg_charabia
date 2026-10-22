@@ -126,7 +126,10 @@ def memory(session, phase, config):
              "fst_counter_note": "release SQL has no live FST counter; exact local per-route FST sizes are in direct Rust results"}
     if os.environ.get("PGCB_TEST_HOOKS") == "1":
         state["test_hooks"] = json.loads(statement(session, "SELECT charabia.test_stats()", "memory-hooks-" + phase))
-        state["fst_live_counter"] = state["test_hooks"]["dictionary_live_fst_bytes"]
+        state["fst_owned_bytes"] = state["test_hooks"]["dictionary_live_fst_bytes"]
+        state["fst_referenced_bytes"] = state["test_hooks"]["dictionary_live_referenced_fst_bytes"]
+        state["fst_static_bytes"] = state["test_hooks"]["embedded_stop_fst_bytes"] + state["test_hooks"]["embedded_english_fst_bytes"]
+        check(state["fst_owned_bytes"] == 0, "dictionary state never owns static FST bytes", state)
         state["fst_counter_note"] = "test-hooks backend counters; does not replace release-library evidence"
     results["memory"].append(state)
     checkpoint()
@@ -198,7 +201,7 @@ FROM {table} d WHERE d.id<=60
             check(token["kind"] != "display_only", "counterfactual corpus includes display-only")
             terms = token["terms"]
             if token["kind"] == "word":
-                check(1 <= len(terms) <= 2 and len(set(terms)) == len(terms), "counterfactual Word terms invariant", token)
+                check(1 <= len(terms) <= 4 and len(set(terms)) == len(terms), "counterfactual Word terms invariant", token)
                 check(all(0 < len(term.encode()) <= 2047 for term in terms), "counterfactual normalized cap assumption", token)
                 words += 1
                 dual.update(terms)

@@ -15,6 +15,34 @@ The native local runner requires macOS ARM64. The Docker runner targets Linux AM
 
 First builds need network access for dependencies, model archives, and notices, or verified caches. [prepare-resources.py](../scripts/prepare-resources.py) validates real archives and seeds the dictionary build cache. `DOCS_RS` dummy resources are prohibited. Runtime analysis performs no downloads.
 
+## Resource generation and identity
+
+Ordinary builds use the committed English TXT and generate FSTs in `OUT_DIR`.
+They prepare the 15 selected stopword tables with the same source module as
+runtime. The host Charabia dependency has no features. The target keeps the
+manifest's exact segmentation/normalization features. Check the resolved graph
+instead of assuming host and target features were unified.
+
+`stop-words` is a build dependency only. Runtime binds static FST views and does
+not rebuild tables at INIT. The manifest records canonical keys, generated-byte
+identities, source inputs, notices, and generator identities. The resource
+verifier rejects missing or changed committed materials. Do not fix such a
+failure by accepting a new hash without reviewing the cause.
+
+To intentionally regenerate English data, first retain the exact inputs named
+in `resources/english/sources.json`. Use the commands and attribution rules in
+[the English data notice](../resources/english/NOTICE.md). The normal build never
+downloads that large source. Run the small independent extraction tests with
+`./scripts/check-english-generator`; full unit verification also runs them.
+
+[German rebuild instructions](../resources/german/README.md) provide the pinned
+source, all-line FST reconstruction, and recipient modification/relink procedure.
+The binary archive includes the complete extension source and required build
+materials. Its resources keep their own licenses, attribution, and source duties.
+Keep large raw input archives outside Git with exact checksums and a declared
+retention location. Do not make builds depend on local research or experiment
+files.
+
 ## Build and test
 
 Debug builds leave the extension unoptimized. [Cargo.toml](../Cargo.toml) optimizes only `whatlang`, with debug assertions, overflow checks, and debug information retained. This targets measured language-detection cost without changing release compilation or test budgets.
@@ -103,7 +131,13 @@ Validate Markdown structure, local links/anchors, shell fences with `bash -n`, a
 
 Keep algorithm examples, recorded probe observations, explicit extension contracts, domain expectations, and index-consistency checks distinct. A fixture's recorded observation is not an independent upstream guarantee. Never generate new expected values from the extension and accept them without review. Finite-state checks and test counts do not establish natural-language accuracy.
 
-Format-2 reports separate mechanism, quality, and cleanup. [quality-known.json](../tests/fixtures/quality-known.json) freezes three unresolved domain cases. Their inputs, queries, configurations, expected values, and actual failure signatures must remain exact. A diagnostic control or a new failure cannot expand that set.
+Format-2 reports separate mechanism, quality, and cleanup.
+[quality-known.json](../tests/fixtures/quality-known.json) preserves three original
+domain failures and their exact signatures. The current report contract explicitly
+closes `den` and `var` after reviewed native/index evidence. Their original records
+stay unchanged; returning to the old false result is now a regression. The phrase
+case remains unresolved. A diagnostic control or new failure cannot expand the
+exemption set.
 
 - `verified` means the selected mechanisms and cleanup passed without reported quality failures.
 - `verified-with-known-quality-failures` permits local delivery only for exact frozen failures. They remain failures, not passed quality cases.
@@ -114,7 +148,11 @@ Review unexpected improvement before changing a frozen case. Report explicit Dis
 
 Keep hooks and release evidence separate and traceable to the same final commit. Hooks exercise allocation/link registration, INIT/LEXIZE, and headline fault points. Release tests cover actual errors, timeout/cancel, concurrency, and resource behavior. Each build has its own library hash. Registered failed-INIT state follows dictCtx reset, not an assumed transaction-abort drop.
 
-Resource tests preserve the fixed warmup/control/measurement protocol and existing context/RSS gates. State, callback, and FST counts must reflect actually initialized dictionaries. Do not relax thresholds to obtain a pass. Worker-launch counts alone do not prove analysis ran in workers.
+Resource tests preserve the fixed warmup/control/measurement protocol and existing context/RSS gates. State/callback counts must reflect actually initialized dictionaries. Separate
+owned FST bytes (zero per Dictionary), logical references to static bytes, unique
+embedded bytes, and ordinary state/stemmer allocations. A reset releases a view
+and state, not the static data. Reference counters are not resident-memory
+measurements. Do not relax thresholds to obtain a pass. Worker-launch counts alone do not prove analysis ran in workers.
 
 Performance observations separate detection, preparation, FST cold/warm cost, filtering, dual terms, index build/size, writes, queries, and headline. Preserve raw samples and relevance labels. Scores and ranks are separate observations. Label emulated results and avoid unsupported SLA claims.
 
@@ -168,6 +206,25 @@ Replace the uppercase placeholders with the completed outer run directory and re
 ./scripts/verify-linux-amd64 --archive dist/ARCHIVE.tar.gz
 ```
 
-The archive contains the verified library, control/SQL, resources/notices, manifests, `SHA256SUMS`, and evidence. It is a binary delivery, not a complete source checkout. The extracted-package verifier checks checksums and loads the extracted library without compiling a replacement. It executes smoke, chain, headline, configuration, recovery, and the archive's README examples. `--archive` cannot combine with suite, hooks, or debug selections.
+The archive contains the verified library, control/SQL, resources/notices,
+English TXT/attribution, manifests, `SHA256SUMS`, and evidence. It also includes
+the committed extension source, lockfile, build script, SQL, resource tools, and
+container build files for rebuilding and relinking. It also supplies the exact hash-checked Charabia and fst crate source archives
+under `dependency-sources/`, including the original German source/FST. It does
+not bundle huge raw source inputs or claim an offline cache of every dependency. The extracted-package verifier checks checksums and loads the extracted library without compiling a replacement. It executes smoke, chain, headline, configuration, recovery, and the archive's README examples. `--archive` cannot combine with suite, hooks, or debug selections.
 
-After release content changes, form a new final commit and rerun full acceptance before packaging. Do not overwrite old archives or evidence. Keep the delivery report in `artifacts/` or `dist/`, recording source/package identity, tests, quality failures, performance scope, recovery scope, and cleanup. Later tracked-file edits cannot retain an earlier tested commit identity.
+After release content changes, form a new final commit and rerun full acceptance before packaging. Do not overwrite old archives or evidence. To rebuild from an extracted archive, enter its root and use the same prerequisites
+and pinned toolchain. The archive has source files but no `.git` directory. A
+recipient can create a new local Git checkout before using the evidence runners.
+A direct isolated build can instead package without Git metadata:
+
+```sh
+: "${PG_CONFIG:?Set PG_CONFIG to the target PostgreSQL 18 pg_config}"
+cargo pgrx package --pg-config "$PG_CONFIG" --out-dir /path/to/owned-stage \
+  --prefix-dir extension --no-default-features --features pg18 --cargo=--locked
+```
+
+This creates a new recipient build. It does not replace extracted-library
+verification or inherit the original delivery's tested commit/hash identity.
+
+Keep the delivery report in `artifacts/` or `dist/`, recording source/package identity, tests, quality failures, performance scope, recovery scope, and cleanup. Later tracked-file edits cannot retain an earlier tested commit identity.

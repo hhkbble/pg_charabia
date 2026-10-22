@@ -7,14 +7,13 @@
   "irg_kvariants": "0.1.1",
   "features": [
     "chinese",
-    "hebrew",
     "japanese",
-    "thai",
     "korean",
-    "greek",
-    "khmer",
+    "thai",
     "vietnamese",
-    "turkish"
+    "turkish",
+    "german-segmentation",
+    "latin-camelcase"
   ],
   "runtime_downloads": false,
   "archives": [
@@ -58,6 +57,14 @@
       "url": "https://raw.githubusercontent.com/stopwords-iso/stopwords-iso/6e8e9a2d1c019ad2a885bcbe157628dea624dfb6/LICENSE",
       "notice": "notices/stopwords-iso-LICENSE",
       "notice_sha256": "7f2982f30e863a3c9826dcc51e1ad895d2a78b1f55d4398d0f5eb9b5c0631f13"
+    },
+    {
+      "repository": "uschindler/german-decompounder",
+      "license_source_commit": "6fb4deb6c9152f2feca4b13d5c8250264f685538",
+      "url": "https://raw.githubusercontent.com/uschindler/german-decompounder/6fb4deb6c9152f2feca4b13d5c8250264f685538/NOTICE.txt",
+      "notice": "notices/german-decompounder-NOTICE.txt",
+      "notice_sha256": "abb37d58a38238c34814c4433293fddea2c53e7e377a7763abce9517219e1033",
+      "note": "Upstream notice snapshot; embedded dictionary identity is pinned separately by Charabia crate and data SHA256."
     }
   ],
   "embedded_data": [
@@ -67,13 +74,6 @@
       "path": "dictionaries/fst/thai/words.fst",
       "sha256": "1b7a36a693f90f83f6084dc9525d9b18bd9a7e391de0ea05f7e27c6314bd49e2",
       "bytes": 893314
-    },
-    {
-      "crate": "charabia",
-      "version": "0.10.0",
-      "path": "dictionaries/fst/khmer/words.fst",
-      "sha256": "e971bb0b1c43497d1e492539f05ba9c058754b878cfc45543f3913428c81559e",
-      "bytes": 1042497
     },
     {
       "crate": "charabia",
@@ -333,37 +333,18 @@
       "path": "src/nltk/uzbek",
       "sha256": "d26cf170a141a6302acbf98e0984769587269715d42a44c608b016f2131ef9c6",
       "bytes": 2359
-    }
-  ],
-  "pipeline_revision": "native-dictionary-0.3.0",
-  "language_policy": "charabia-reuse-script17-missing4",
-  "lexeme_policy": "terminal-surface-and-single-stem-or-single-filter",
-  "historical_disabled_data": [
+    },
     {
       "crate": "charabia",
       "version": "0.10.0",
       "path": "dictionaries/fst/german/words.fst",
       "sha256": "fafef0c1258549ed3a7fac0d73bbcc874226e58d43d61eb20bddf30256ed96e2",
       "bytes": 142094
-    },
-    {
-      "crate": "charabia",
-      "version": "0.10.0",
-      "path": "dictionaries/txt/german/words.txt",
-      "sha256": "9a643bc1e0ce04337100a4b62a39d3e8ead004458d46f5ddf01c0c02ec5844a1",
-      "bytes": 304396
     }
   ],
-  "historical_disabled_notices": [
-    {
-      "repository": "uschindler/german-decompounder",
-      "license_source_commit": "6fb4deb6c9152f2feca4b13d5c8250264f685538",
-      "url": "https://raw.githubusercontent.com/uschindler/german-decompounder/6fb4deb6c9152f2feca4b13d5c8250264f685538/NOTICE.txt",
-      "notice": "notices/german-decompounder-NOTICE.txt",
-      "notice_sha256": "abb37d58a38238c34814c4433293fddea2c53e7e377a7763abce9517219e1033",
-      "note": "Upstream notice snapshot; embedded dictionary identity is pinned separately by Charabia crate and data SHA256."
-    }
-  ],
+  "pipeline_revision": "route16-english-shared-fst-1",
+  "language_policy": "charabia15-clamp-script3-english-merge",
+  "lexeme_policy": "terminal-native-and-english-up-to-four-or-single-filter",
   "general_dependencies": {
     "qdrant-rust-stemmers": {
       "version": "1.2.2",
@@ -381,424 +362,109 @@
   },
   "language_routes": [
     {
-      "language": "Epo",
-      "script": "Latin",
-      "stopword_key": "eo",
-      "stemmer": null
-    },
-    {
       "language": "Eng",
       "script": "Latin",
       "stopword_key": "en",
-      "stemmer": "English"
-    },
-    {
-      "language": "Rus",
-      "script": "Cyrillic",
-      "stopword_key": "ru",
-      "stemmer": "Russian"
-    },
-    {
-      "language": "Cmn",
-      "script": "Cj",
-      "stopword_key": "zh",
-      "stemmer": null
-    },
-    {
-      "language": "Spa",
-      "script": "Latin",
-      "stopword_key": "es",
-      "stemmer": "Spanish"
-    },
-    {
-      "language": "Por",
-      "script": "Latin",
-      "stopword_key": "pt",
-      "stemmer": "Portuguese"
-    },
-    {
-      "language": "Ita",
-      "script": "Latin",
-      "stopword_key": "it",
-      "stemmer": "Italian"
-    },
-    {
-      "language": "Ben",
-      "script": "Bengali",
-      "stopword_key": "bn",
-      "stemmer": null
-    },
-    {
-      "language": "Fra",
-      "script": "Latin",
-      "stopword_key": "fr",
-      "stemmer": "French"
+      "stemmer": "English",
+      "english_eligible": false
     },
     {
       "language": "Deu",
       "script": "Latin",
       "stopword_key": "de",
-      "stemmer": "German"
-    },
-    {
-      "language": "Ukr",
-      "script": "Cyrillic",
-      "stopword_key": "uk",
-      "stemmer": null
-    },
-    {
-      "language": "Kat",
-      "script": "Georgian",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Ara",
-      "script": "Arabic",
-      "stopword_key": "ar",
-      "stemmer": "Arabic"
-    },
-    {
-      "language": "Hin",
-      "script": "Devanagari",
-      "stopword_key": "hi",
-      "stemmer": null
-    },
-    {
-      "language": "Jpn",
-      "script": "Cj",
-      "stopword_key": "ja",
-      "stemmer": null
-    },
-    {
-      "language": "Heb",
-      "script": "Hebrew",
-      "stopword_key": "he",
-      "stemmer": null
-    },
-    {
-      "language": "Yid",
-      "script": "Hebrew",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Pol",
-      "script": "Latin",
-      "stopword_key": "pl",
-      "stemmer": null
-    },
-    {
-      "language": "Amh",
-      "script": "Ethiopic",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Jav",
-      "script": "Latin",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Kor",
-      "script": "Hangul",
-      "stopword_key": "ko",
-      "stemmer": null
-    },
-    {
-      "language": "Nob",
-      "script": "Latin",
-      "stopword_key": "no",
-      "stemmer": "Norwegian"
-    },
-    {
-      "language": "Dan",
-      "script": "Latin",
-      "stopword_key": "da",
-      "stemmer": "Danish"
-    },
-    {
-      "language": "Swe",
-      "script": "Latin",
-      "stopword_key": "sv",
-      "stemmer": "Swedish"
-    },
-    {
-      "language": "Fin",
-      "script": "Latin",
-      "stopword_key": "fi",
-      "stemmer": "Finnish"
-    },
-    {
-      "language": "Tur",
-      "script": "Latin",
-      "stopword_key": "tr",
-      "stemmer": "Turkish"
+      "stemmer": "German",
+      "english_eligible": true
     },
     {
       "language": "Nld",
       "script": "Latin",
       "stopword_key": "nl",
-      "stemmer": "Dutch"
+      "stemmer": "Dutch",
+      "english_eligible": true
     },
     {
-      "language": "Hun",
-      "script": "Latin",
-      "stopword_key": "hu",
-      "stemmer": "Hungarian"
-    },
-    {
-      "language": "Ces",
-      "script": "Latin",
-      "stopword_key": "cs",
-      "stemmer": null
-    },
-    {
-      "language": "Ell",
-      "script": "Greek",
-      "stopword_key": "el",
-      "stemmer": "Greek"
-    },
-    {
-      "language": "Bul",
+      "language": "Rus",
       "script": "Cyrillic",
-      "stopword_key": "bg",
-      "stemmer": null
+      "stopword_key": "ru",
+      "stemmer": "Russian",
+      "english_eligible": false
     },
     {
-      "language": "Bel",
-      "script": "Cyrillic",
-      "stopword_key": "be",
-      "stemmer": null
-    },
-    {
-      "language": "Mar",
-      "script": "Devanagari",
-      "stopword_key": "mr",
-      "stemmer": null
-    },
-    {
-      "language": "Kan",
-      "script": "Kannada",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Ron",
+      "language": "Spa",
       "script": "Latin",
-      "stopword_key": "ro",
-      "stemmer": "Romanian"
+      "stopword_key": "es",
+      "stemmer": "Spanish",
+      "english_eligible": true
     },
     {
-      "language": "Slv",
+      "language": "Fra",
       "script": "Latin",
-      "stopword_key": "sl",
-      "stemmer": null
+      "stopword_key": "fr",
+      "stemmer": "French",
+      "english_eligible": true
     },
     {
-      "language": "Hrv",
+      "language": "Por",
       "script": "Latin",
-      "stopword_key": "hr",
-      "stemmer": null
+      "stopword_key": "pt",
+      "stemmer": "Portuguese",
+      "english_eligible": true
     },
     {
-      "language": "Srp",
-      "script": "Cyrillic",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Mkd",
-      "script": "Cyrillic",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Lit",
+      "language": "Ita",
       "script": "Latin",
-      "stopword_key": "lt",
-      "stemmer": null
+      "stopword_key": "it",
+      "stemmer": "Italian",
+      "english_eligible": true
     },
     {
-      "language": "Lav",
+      "language": "Ara",
+      "script": "Arabic",
+      "stopword_key": "ar",
+      "stemmer": "Arabic",
+      "english_eligible": false
+    },
+    {
+      "language": "Tur",
       "script": "Latin",
-      "stopword_key": "lv",
-      "stemmer": null
+      "stopword_key": "tr",
+      "stemmer": "Turkish",
+      "english_eligible": true
     },
     {
-      "language": "Est",
-      "script": "Latin",
-      "stopword_key": "et",
-      "stemmer": null
+      "language": "Cmn",
+      "script": "Cj",
+      "stopword_key": "zh",
+      "stemmer": null,
+      "english_eligible": false
     },
     {
-      "language": "Tam",
-      "script": "Tamil",
-      "stopword_key": "ta",
-      "stemmer": "Tamil"
+      "language": "Jpn",
+      "script": "Cj",
+      "stopword_key": "ja",
+      "stemmer": null,
+      "english_eligible": false
+    },
+    {
+      "language": "Kor",
+      "script": "Hangul",
+      "stopword_key": "ko",
+      "stemmer": null,
+      "english_eligible": false
     },
     {
       "language": "Vie",
       "script": "Latin",
       "stopword_key": "vi",
-      "stemmer": null
-    },
-    {
-      "language": "Urd",
-      "script": "Arabic",
-      "stopword_key": "ur",
-      "stemmer": null
+      "stemmer": null,
+      "english_eligible": true
     },
     {
       "language": "Tha",
       "script": "Thai",
       "stopword_key": "th",
-      "stemmer": null
-    },
-    {
-      "language": "Guj",
-      "script": "Gujarati",
-      "stopword_key": "gu",
-      "stemmer": null
-    },
-    {
-      "language": "Uzb",
-      "script": "Latin",
-      "stopword_key": "uz",
-      "stemmer": null
-    },
-    {
-      "language": "Pan",
-      "script": "Gurmukhi",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Aze",
-      "script": "Latin",
-      "stopword_key": "az",
-      "stemmer": null
-    },
-    {
-      "language": "Ind",
-      "script": "Latin",
-      "stopword_key": "id",
-      "stemmer": null
-    },
-    {
-      "language": "Tel",
-      "script": "Telugu",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Pes",
-      "script": "Arabic",
-      "stopword_key": "fa",
-      "stemmer": null
-    },
-    {
-      "language": "Mal",
-      "script": "Malayalam",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Ori",
-      "script": "Oriya",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Mya",
-      "script": "Myanmar",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Nep",
-      "script": "Devanagari",
-      "stopword_key": "ne",
-      "stemmer": null
-    },
-    {
-      "language": "Sin",
-      "script": "Sinhala",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Khm",
-      "script": "Khmer",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Tuk",
-      "script": "Latin",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Aka",
-      "script": "Latin",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Zul",
-      "script": "Latin",
-      "stopword_key": "zu",
-      "stemmer": null
-    },
-    {
-      "language": "Sna",
-      "script": "Latin",
-      "stopword_key": null,
-      "stemmer": null
-    },
-    {
-      "language": "Afr",
-      "script": "Latin",
-      "stopword_key": "af",
-      "stemmer": null
-    },
-    {
-      "language": "Lat",
-      "script": "Latin",
-      "stopword_key": "la",
-      "stemmer": null
-    },
-    {
-      "language": "Slk",
-      "script": "Latin",
-      "stopword_key": "sk",
-      "stemmer": null
-    },
-    {
-      "language": "Cat",
-      "script": "Latin",
-      "stopword_key": "ca",
-      "stemmer": null
-    },
-    {
-      "language": "Tgl",
-      "script": "Latin",
-      "stopword_key": "tl",
-      "stemmer": null
-    },
-    {
-      "language": "Hye",
-      "script": "Armenian",
-      "stopword_key": "hy",
-      "stemmer": "Armenian"
-    },
-    {
-      "language": "Cym",
-      "script": "Latin",
-      "stopword_key": null,
-      "stemmer": null
+      "stemmer": null,
+      "english_eligible": false
     }
   ],
   "rust_toolchain": "1.97.1",
@@ -808,373 +474,97 @@
     "chinese",
     "chinese-normalization",
     "chinese-segmentation",
-    "greek",
-    "hebrew",
+    "german-segmentation",
     "japanese",
     "japanese-segmentation-unidic",
     "japanese-transliteration",
-    "khmer",
     "korean",
+    "latin-camelcase",
     "lindera",
     "thai",
     "turkish",
     "vietnamese"
   ],
   "canonical_stop_sets": {
-    "afr": {
-      "entries": 51,
-      "excluded_builtin_entries": 0,
-      "sha256": "5ffe9e6d094a4380044513009cf14acc6414b820c84a2e6d6a1e6c0a419a5c65"
-    },
-    "aka": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "amh": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
     "ara": {
       "entries": 701,
       "excluded_builtin_entries": 0,
       "sha256": "ee29262ee5d8cce1a690d739ef1dea8f4edef9ddc0dad6b0fcd05a52aa2ed44c"
-    },
-    "aze": {
-      "entries": 165,
-      "excluded_builtin_entries": 0,
-      "sha256": "d51693ef9b1cfb23c30a7ed9bfde5181999e7e9836269acbaf4c16cfc07d2501"
-    },
-    "bel": {
-      "entries": 224,
-      "excluded_builtin_entries": 0,
-      "sha256": "fa118e26d72afe4f2143fce279ede74f597d96c0e7b54fbf9ec986e1fc90b80c"
-    },
-    "ben": {
-      "entries": 389,
-      "excluded_builtin_entries": 0,
-      "sha256": "16576434e28cbc9da592462f4c18af4007ff342e08e53a3df0ec980a459d525e"
-    },
-    "bul": {
-      "entries": 259,
-      "excluded_builtin_entries": 0,
-      "sha256": "560929ad5398c370fd16c4455ec5a81e2b5d6d45427e39dc98ee0d52ac3147ff"
-    },
-    "cat": {
-      "entries": 278,
-      "excluded_builtin_entries": 0,
-      "sha256": "c8d161573327951f71c174470a55469a276d696f7db55795339a79da4ac41f74"
-    },
-    "ces": {
-      "entries": 423,
-      "excluded_builtin_entries": 0,
-      "sha256": "5f65a5c16c99fa41a36b6bcdcdf39858acc5f08ea4699f794dc95f3e834a7462"
     },
     "cmn": {
       "entries": 841,
       "excluded_builtin_entries": 0,
       "sha256": "e71aef950c240f239f740b6177d6d310ffd5b211d79c4da2e9b5434fb509f7ed"
     },
-    "cym": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "dan": {
-      "entries": 94,
-      "excluded_builtin_entries": 0,
-      "sha256": "19eb98175560f1b2a053a3df8d46dd3e3325f3b3666e5a9e40ab3bb438d188e0"
-    },
     "deu": {
       "entries": 232,
       "excluded_builtin_entries": 0,
       "sha256": "7d74ff8b919cc914f6787a4df100a951ad70c537b8ab496bccde4719ab208477"
-    },
-    "ell": {
-      "entries": 265,
-      "excluded_builtin_entries": 0,
-      "sha256": "7b61194b01a6033633e4652dece95dc21a5353d91adc9b309277cf6ec5bfe097"
     },
     "eng": {
       "entries": 198,
       "excluded_builtin_entries": 0,
       "sha256": "9614e1610d4b5c0625006d4f0a2111ea4bcd3b8d4147ca5f72a10b4198c84eec"
     },
-    "epo": {
-      "entries": 173,
-      "excluded_builtin_entries": 0,
-      "sha256": "6bafedda9326826ecefa83178f07b218a407928b94dc2d8daeeeff7e931df6d1"
-    },
-    "est": {
-      "entries": 35,
-      "excluded_builtin_entries": 0,
-      "sha256": "bb7e48096ca305fbdd39b1fadf044f6e9978ebc469a095f868363c64399637b1"
-    },
-    "fin": {
-      "entries": 229,
-      "excluded_builtin_entries": 0,
-      "sha256": "aae4248036253b0557cbc81487f4417b1c0018d713d9758a8194951b2fb7c1f0"
-    },
     "fra": {
       "entries": 157,
       "excluded_builtin_entries": 0,
       "sha256": "f8cd2fd2537b617a9010df0448d4fa489350018681d75b501f2694f6e68ef774"
-    },
-    "guj": {
-      "entries": 224,
-      "excluded_builtin_entries": 0,
-      "sha256": "d22b9e9a7c743794f286d4d97f3f76c94a33bda89b359203a0e5c98d011896af"
-    },
-    "heb": {
-      "entries": 193,
-      "excluded_builtin_entries": 0,
-      "sha256": "9e07605fb637fc57623ba400d052f3383d52818ddebbd7f4f602f1f656622301"
-    },
-    "hin": {
-      "entries": 225,
-      "excluded_builtin_entries": 0,
-      "sha256": "d8301033dca496f0491f161338e4b9f3cf8a2d239355806794adc6ccb8913cba"
-    },
-    "hrv": {
-      "entries": 179,
-      "excluded_builtin_entries": 0,
-      "sha256": "fdfc86e3e7b39d0a5a975b8e114de166b33e3a45e882102d6c54b4543446bc2a"
-    },
-    "hun": {
-      "entries": 198,
-      "excluded_builtin_entries": 0,
-      "sha256": "3014abd3e596de02cac2897eef38f5b624a260de976bcfac50ae8eb8ebcda6ea"
-    },
-    "hye": {
-      "entries": 45,
-      "excluded_builtin_entries": 0,
-      "sha256": "1fc37076e9517ecc2b9c4bd4625855febdc50a3946b5e92e4d3c9d71963e3d8a"
-    },
-    "ind": {
-      "entries": 757,
-      "excluded_builtin_entries": 0,
-      "sha256": "5a51076a72722ce091e127080aa5a264bb3c1a6a55acd4b22a8d72940d2bb053"
     },
     "ita": {
       "entries": 279,
       "excluded_builtin_entries": 0,
       "sha256": "76f5fbc46d84e3802be32c155e356ac158e4eee5503246976c349907e12bc1e5"
     },
-    "jav": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
     "jpn": {
       "entries": 134,
       "excluded_builtin_entries": 0,
       "sha256": "fd31181a290da3ce75cb1caeecb506ac2981dcad009c5fd028b5ef17b4698b77"
-    },
-    "kan": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "kat": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "khm": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "kor": {
       "entries": 615,
       "excluded_builtin_entries": 48,
       "sha256": "26b4c010dd92b5737d7e722d6fc6081e5e3da76f5f9b00b32d9f5ff4f5fb8a75"
     },
-    "lat": {
-      "entries": 49,
-      "excluded_builtin_entries": 0,
-      "sha256": "41d76e0922aca200523cf511c43e88ded08528b735a599b0d2f4a9f19569d79c"
-    },
-    "lav": {
-      "entries": 161,
-      "excluded_builtin_entries": 0,
-      "sha256": "fb98e7cb8b919741eeb7d99174af1d8e931f34d6a554f9eaa429d52d22853b46"
-    },
-    "lit": {
-      "entries": 474,
-      "excluded_builtin_entries": 0,
-      "sha256": "935aa18585cfeaaec9c1f04aa4acc2335922ff92ae7642a7f7628644fcfa678d"
-    },
-    "mal": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "mar": {
-      "entries": 99,
-      "excluded_builtin_entries": 0,
-      "sha256": "15aca86b15e8022303d58be46fc8af13e1dc6ca969a2ebddbf30aca620dcb4d9"
-    },
-    "mkd": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "mya": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "nep": {
-      "entries": 254,
-      "excluded_builtin_entries": 0,
-      "sha256": "819e6bfa63c7c80a8274eb46a616853e62ac9322c736ac8220853aeaa7663a4b"
-    },
     "nld": {
       "entries": 101,
       "excluded_builtin_entries": 0,
       "sha256": "780106fcf8447650072b752a36b8730c102bb3aafcf9f2549736d5a584f76781"
-    },
-    "nob": {
-      "entries": 172,
-      "excluded_builtin_entries": 0,
-      "sha256": "b8b104b7ff7436fa225d58b95ecb54f130b69dcfa703e0c2ff1f3881fb56c6ec"
-    },
-    "ori": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "pan": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "pes": {
-      "entries": 710,
-      "excluded_builtin_entries": 9,
-      "sha256": "847c74f395d9b96eaae5da4017535c015d38f6da17c9f86660c9742db73f4ac8"
-    },
-    "pol": {
-      "entries": 329,
-      "excluded_builtin_entries": 0,
-      "sha256": "01d375465e0d251e813dd80da6efd36e76171b129fc0753fa626990e782edc11"
     },
     "por": {
       "entries": 207,
       "excluded_builtin_entries": 0,
       "sha256": "c8ffb0f7b3ee226056ba44d91e504ca7e8e03fcd5c41751d13c534bb3f54ff0f"
     },
-    "ron": {
-      "entries": 356,
-      "excluded_builtin_entries": 0,
-      "sha256": "3de45f4e61e7d63ac0a1562618ff1e8fc86f3ac7822f2c76e82419263eaf6909"
-    },
     "rus": {
       "entries": 151,
       "excluded_builtin_entries": 0,
       "sha256": "53e2dbd073fd4aa309b17ab9736aed51c475ef04e30345cb8f84815bbed99a02"
-    },
-    "sin": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "slk": {
-      "entries": 418,
-      "excluded_builtin_entries": 0,
-      "sha256": "1a0fc4752535e5910e866d5267f36cbf106012af738a136a414defe5acba0914"
-    },
-    "slv": {
-      "entries": 1784,
-      "excluded_builtin_entries": 0,
-      "sha256": "c0dd3006ea538b5e3c22e90639fb31951628eff8d5128033a2dbb14a7452543d"
-    },
-    "sna": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "spa": {
       "entries": 313,
       "excluded_builtin_entries": 0,
       "sha256": "dcc879413075220473a6d19f2dbffbc3bd89701ae21889a8cb06af4d7b1adb40"
     },
-    "srp": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "swe": {
-      "entries": 114,
-      "excluded_builtin_entries": 0,
-      "sha256": "2f43b9730c41c4be3d51decfbaed870591a7e415705145fc4d46dfd6dfc66af8"
-    },
-    "tam": {
-      "entries": 125,
-      "excluded_builtin_entries": 0,
-      "sha256": "ade7b827c129c7d79b1acd266db4ba0058347d60c14c0baa1b98911bfa6ae806"
-    },
-    "tel": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "tgl": {
-      "entries": 147,
-      "excluded_builtin_entries": 0,
-      "sha256": "c7dae8875d50caf03b1b748d633da55f57e30ede19a462d5bb09430dac50c4c4"
-    },
     "tha": {
       "entries": 116,
       "excluded_builtin_entries": 0,
       "sha256": "4b3d20f387cabb980590c244960e3b57775a5d1fe0b142ac4917da40e27782b2"
-    },
-    "tuk": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "tur": {
       "entries": 53,
       "excluded_builtin_entries": 0,
       "sha256": "b2cb1fcbf2d9b571cc67bc2cb84a4f25194a203b89ee7c8eee9d347092a02c22"
     },
-    "ukr": {
-      "entries": 73,
-      "excluded_builtin_entries": 0,
-      "sha256": "534049018d0f071a7392c8a3c06f4bf7bb252a8d0f17ca0317aa875a8f7f4d53"
-    },
     "und": {
       "entries": 0,
       "excluded_builtin_entries": 0,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
-    "urd": {
-      "entries": 517,
-      "excluded_builtin_entries": 0,
-      "sha256": "3fb3da1912e7d17193dc353616842751f257670193b2816a76652cc42d940d35"
-    },
-    "uzb": {
-      "entries": 287,
-      "excluded_builtin_entries": 0,
-      "sha256": "53f4b656d233e7829f23b1abd8fb070124be34670e83d944f0e09e0b2b3326a7"
-    },
     "vie": {
       "entries": 645,
       "excluded_builtin_entries": 0,
       "sha256": "c09cc6cdef4a8211bc9aebe81259e1062c13e6add0a251c0fc58665aa50d695b"
-    },
-    "yid": {
-      "entries": 0,
-      "excluded_builtin_entries": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    "zul": {
-      "entries": 29,
-      "excluded_builtin_entries": 0,
-      "sha256": "81cd93a0a1ce47c3ca61d5b4339692f69cf6f18c258fa9469b2ec31f45d09639"
     }
   },
   "canonical_stop_set_hash_encoding": "sorted UTF8 keys, each prefixed by u64 little-endian byte length; SHA-256",
@@ -1189,9 +579,11 @@
     }
   },
   "notice_files": {
+    "notices/CC-BY-SA-4.0.txt": "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5",
+    "notices/ESDB-Copyright.txt": "71bffd4b74ad47fff01c8b3c666e77da92737854e568850d8728024e0a53f304",
     "notices/GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
     "notices/LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
-    "notices/README.md": "d2774926973d669ce09deea22ca8ba2971202bd648b778588011bd802ae68fac",
+    "notices/README.md": "4d1dd1ef733138af3c0802dd613604d78ec6cf8480df3cde36388d8c60e532e8",
     "notices/charabia-MIT.txt": "b0b5aee3ad1a8cad84dd3b73dbac346bf2b903b33ea90b1d1b3d0800744f5a74",
     "notices/german-decompounder-NOTICE.txt": "abb37d58a38238c34814c4433293fddea2c53e7e377a7763abce9517219e1033",
     "notices/german-words-source.txt": "9a643bc1e0ce04337100a4b62a39d3e8ead004458d46f5ddf01c0c02ec5844a1",
@@ -1209,5 +601,200 @@
     "notices/stop-words-src-nltk-README": "e0365fde880eadb522f844cba2774529969b66b7406db7643cf260dcd77d6541",
     "notices/stopwords-iso-LICENSE": "7f2982f30e863a3c9826dcc51e1ad895d2a78b1f55d4398d0f5eb9b5c0631f13",
     "notices/unidic/COPYING.txt": "178ffb7cbc2beadb0b87a14497e58222b484076ba7cfc8938a07ac7627fa22c4"
-  }
+  },
+  "compiled_stop_sets": {
+    "eng": {
+      "raw_entries": 198,
+      "entries": 198,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 768,
+      "fst_sha256": "6fc6c0effa43ba8abc02b5a8dfe964a2f7fd813a765fd351f864817404f31d6f"
+    },
+    "deu": {
+      "raw_entries": 232,
+      "entries": 232,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 840,
+      "fst_sha256": "0de4ff433a9b5c19355fc4eec58ffb0d1dbe2f87b1c08ef365a53dd0a5123ce4"
+    },
+    "nld": {
+      "raw_entries": 101,
+      "entries": 101,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 502,
+      "fst_sha256": "45f4c0b9c963a9e6775a544a978cf6f96335220cea496ba8f7eab636b3a0f4a7"
+    },
+    "rus": {
+      "raw_entries": 151,
+      "entries": 151,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 1192,
+      "fst_sha256": "ab8516aa6c586507b51942cab5a29525a09d7863969d15c260a4c6e690fa74d4"
+    },
+    "spa": {
+      "raw_entries": 313,
+      "entries": 313,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 847,
+      "fst_sha256": "5cdb42476199ca396fa876f282bda32903cb479d1806e14de8da3dade28149b8"
+    },
+    "fra": {
+      "raw_entries": 157,
+      "entries": 157,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 498,
+      "fst_sha256": "9961cf3359855296662e3d6856ee408f87d4914b8e14ba1644499d6f3d33b85f"
+    },
+    "por": {
+      "raw_entries": 207,
+      "entries": 207,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 711,
+      "fst_sha256": "1b1d6fb5a844548e6ed5c547d26973a0de3ac536918a5477a5a2a33efd56ac3c"
+    },
+    "ita": {
+      "raw_entries": 279,
+      "entries": 279,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 725,
+      "fst_sha256": "b6eaefdafe20b7a0941be2da9a142111f67ee8f239b389692897442d6007981d"
+    },
+    "ara": {
+      "raw_entries": 754,
+      "entries": 701,
+      "excluded_builtin_entries": 0,
+      "duplicates": 53,
+      "fst_bytes": 4212,
+      "fst_sha256": "092276672929c5207d0312351ed5cb3f542efb3c11c0361376aa7f8c4d94d3b5"
+    },
+    "tur": {
+      "raw_entries": 53,
+      "entries": 53,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 334,
+      "fst_sha256": "59f2901f97f7ed345f05d3a9df5e2070309501ceb1394c1a2a88e6c9e5d0f8ab"
+    },
+    "cmn": {
+      "raw_entries": 841,
+      "entries": 841,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 5547,
+      "fst_sha256": "cef62619972ea38a4a6c3bcc85c6ae1eccbb4ddefed72c1e70e5d4605f44b54b"
+    },
+    "jpn": {
+      "raw_entries": 134,
+      "entries": 134,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 894,
+      "fst_sha256": "d5a088beff5d8a170d44f02c7747db54f27787539ca13501b3ebd149454e0073"
+    },
+    "kor": {
+      "raw_entries": 679,
+      "entries": 615,
+      "excluded_builtin_entries": 48,
+      "duplicates": 16,
+      "fst_bytes": 6598,
+      "fst_sha256": "74b36f2168a219fd12b89ad925d07d19bf29bda1e62664d7eb727fe7648ae746"
+    },
+    "vie": {
+      "raw_entries": 645,
+      "entries": 645,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 5215,
+      "fst_sha256": "fd8f6885993008ba81200c85697a1e33ee5c9a1befeda60aeb2315c52aa806cc"
+    },
+    "tha": {
+      "raw_entries": 116,
+      "entries": 116,
+      "excluded_builtin_entries": 0,
+      "duplicates": 0,
+      "fst_bytes": 1307,
+      "fst_sha256": "1e4ddfb7b0d359e5d8d15990c0877b712b69d3fc945ba21cc28c3a2b91a1d912"
+    }
+  },
+  "finl_unicode": {
+    "version": "1.4.0",
+    "sha256": "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
+  },
+  "english_lexicon": {
+    "txt": "english/words.txt",
+    "txt_sha256": "8eb0b22f0110fac191ee0acc32382821755a7ad2674bd79c00b48a138ab4b9e5",
+    "entries": 1012224,
+    "fst_sha256": "eb1e91d4ce6ea6106de9ee09956e3158529a88a6da7b64ba7658628184d7b91b",
+    "fst_bytes": 3900465,
+    "source_replay": "fixed-source-replay-verified",
+    "kaikki": {
+      "url": "https://kaikki.org/dictionary/English/kaikki.org-dictionary-English.jsonl.gz",
+      "bytes": 534135938,
+      "sha256": "cabb3a13b7179d5f8c5909e06b1dcd2e2ae6465d05f35de56509a5b4e2bf0a49"
+    },
+    "tracked_material": {
+      "resources/english/NOTICE.md": {
+        "sha256": "237abdd31c2f2347a4396bc6a6420fbc3c45c115a34c143b1c409b3739357570",
+        "bytes": 4183
+      },
+      "resources/english/attribution/headword-pages.txt.gz": {
+        "sha256": "279c4c823b16f3d318a499ea5c3241919f2b899e3ce1dd779a9ff42eb17a02a8",
+        "bytes": 5008775
+      },
+      "resources/english/attribution/kaikki-English.html": {
+        "sha256": "36908ece124a9e921dea2ab0d165807f6787a72923e3cc4c153da872730113dd",
+        "bytes": 17608
+      },
+      "resources/english/generation.json": {
+        "sha256": "d697974232c6dc7607f9fcb5ca496b5011ebc44d44ffc4feb9406ecf9bd7f15e",
+        "bytes": 893
+      },
+      "resources/english/sources.json": {
+        "sha256": "7beeda4dcbf1b32bde98e5e934f4b57c708667f73870a241790f8a96ee0b9c6d",
+        "bytes": 4686
+      },
+      "resources/english/words.txt": {
+        "sha256": "8eb0b22f0110fac191ee0acc32382821755a7ad2674bd79c00b48a138ab4b9e5",
+        "bytes": 10821299
+      }
+    },
+    "generator": {
+      "path": "scripts/generate-english.py",
+      "sha256": "991b016dbbdd1899e3d5229aef393b49ae4f42db8afa52df738c514f5907e1aa"
+    },
+    "parent_pages": 1396111
+  },
+  "german_rebuild": {
+    "source_sha256": "9a643bc1e0ce04337100a4b62a39d3e8ead004458d46f5ddf01c0c02ec5844a1",
+    "fst_sha256": "fafef0c1258549ed3a7fac0d73bbcc874226e58d43d61eb20bddf30256ed96e2",
+    "fst_bytes": 142094,
+    "pinned_identity": true,
+    "fst_version": "0.4.7",
+    "rule": "all UTF-8 str.lines(), including headers and empty lines; byte-sort unique",
+    "tool": "scripts/rebuild-german",
+    "tool_sha256": "3c5af2f5494d2ec40fef602669f60b3b088120c71ad35a73f2c5b3cec9de07cc",
+    "instructions": "german/README.md"
+  },
+  "rebuild_source_archives": [
+    {
+      "crate": "charabia",
+      "version": "0.10.0",
+      "sha256": "27d98f4c66de52108210ee491c9c991513021dfd259bf65e4bbd889687b488d7",
+      "package_path": "dependency-sources/charabia-0.10.0.crate"
+    },
+    {
+      "crate": "fst",
+      "version": "0.4.7",
+      "sha256": "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a",
+      "package_path": "dependency-sources/fst-0.4.7.crate"
+    }
+  ]
 }

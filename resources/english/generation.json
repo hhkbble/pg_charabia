@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "rule": "lang_code=en; word/forms[].form only; Python str.split; ASCII fullmatch; ASCII lowercase; byte-sort unique; LF",
+  "python": "3.14.7",
+  "generator_sha256": "991b016dbbdd1899e3d5229aef393b49ae4f42db8afa52df738c514f5907e1aa",
+  "sources_sha256": "7beeda4dcbf1b32bde98e5e934f4b57c708667f73870a241790f8a96ee0b9c6d",
+  "words": 1012224,
+  "parent_pages": 1396111,
+  "counts": {
+    "english_records": 1499161,
+    "word_fields": 1499161,
+    "form_fields": 993231,
+    "candidate_parts": 4627494,
+    "rejected_parts": 410190,
+    "esdb_lines": 1222889
+  },
+  "outputs": {
+    "words.txt": {
+      "sha256": "8eb0b22f0110fac191ee0acc32382821755a7ad2674bd79c00b48a138ab4b9e5",
+      "bytes": 10821299
+    },
+    "attribution/headword-pages.txt.gz": {
+      "sha256": "279c4c823b16f3d318a499ea5c3241919f2b899e3ce1dd779a9ff42eb17a02a8",
+      "bytes": 5008775
+    }
+  }
+}

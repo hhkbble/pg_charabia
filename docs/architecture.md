@@ -13,7 +13,8 @@ The [README](../README.md) owns public parameters, limits, installation, and req
 | [analysis.rs](../src/analysis.rs) | `segment`, `prepare`, `inspect`, and `normalize`. Validated spans and bounded Dictionary analysis. |
 | [language.rs](../src/language.rs) | `complete` and `LanguageSource`. Reuse detected language and complete missing metadata. |
 | [routes.rs](../src/routes.rs) | `LanguageId` and `TokenType`. Fixed language, script, stopword-code, algorithm, and type mappings. |
-| [stopwords.rs](../src/stopwords.rs) | `build` creates one effective stopword set for a Dictionary instance. |
+| [prepare.rs](../src/prepare.rs) and [language_data.rs](../src/language_data.rs) | Shared host/target preparation and the fixed language capabilities. |
+| [resources.rs](../src/resources.rs), [stopwords.rs](../src/stopwords.rs), and [build.rs](../build.rs) | Build-generated immutable English/stopword FSTs and shared views. |
 | [parser.rs](../src/parser.rs) | START/GETTOKEN/END/LEXTYPES callbacks and the standard HEADLINE callback. |
 | [dictionary.rs](../src/dictionary.rs) | INIT validates options and owns state. LEXIZE analyzes one supplied token. |
 | [headline.rs](../src/headline.rs) | Strict option parsing, HTML escaping, and output-size accounting. |
@@ -21,7 +22,7 @@ The [README](../README.md) owns public parameters, limits, installation, and req
 | [lib.rs](../src/lib.rs) | Module registration and the diagnostic/query functions. |
 | [pg_charabia.sql](../sql/pg_charabia.sql) | Public SQL signatures, default objects, permissions, and callback registration. |
 
-The default installation has one Parser, one Template, 71 language dictionaries, and `public.charabia`. Ordinary user configurations can share these dictionaries or use other standard dictionaries. There is no configuration table, proprietary object manager, global derived Dictionary cache, or cross-dictionary private payload.
+The default installation has one Parser, one Template, 16 language dictionaries, and `public.charabia`. Ordinary user configurations can share these dictionaries or use other standard dictionaries. There is no configuration table, proprietary object manager, global derived Dictionary cache, or cross-dictionary private payload.
 
 ```text
 Original UTF-8 text
@@ -38,35 +39,80 @@ Original UTF-8 text
 
 ## Segmentation, language, and raw spans
 
-`analysis::segment_counted` uses a default Charabia Tokenizer's `segment` iterator once. It does not run a second tokenizer for Dictionary preparation. Enabled features exclude German compound segmentation and Swedish recomposition. German compounds therefore do not receive that dictionary split. Swedish final normalization uses accent folding, while preparation preserves accents for stemming.
+`analysis::segment_counted` runs Charabia segmentation once with exactly 15
+natural-language candidates. The fixed features enable German compound
+segmentation and Latin camelCase. German runs when the Latin group selects deu.
+The generic Latin path applies camelCase. These are alternative segmenters, not
+two sequential passes. Swedish, Greek, Hebrew, and Khmer features are disabled.
+The Japanese UniDic and Korean ko-dic resource choices remain fixed.
 
-Each `Span` stores byte/character ranges, script, original Charabia language, selected route, token type, and language source. Validation requires nonempty contiguous UTF-8 ranges, unchanged raw bytes, correct scalar counts, and complete input coverage. Offsets always refer to original text.
+Each `Span` keeps original byte/scalar ranges, Script, original Charabia language,
+selected route, type, and source. Input coverage must be contiguous, UTF-8 valid,
+and byte-identical. `language::complete` reuses only candidate metadata compatible
+with the Script. Unknown, outside, and incompatible metadata safely selects und.
+Only missing Cyrillic, Hangul, and Thai map directly to rus, kor, and tha. The
+pinned Latin/Cj/Arabic paths already request detection, so missing metadata does
+not trigger a second attempt. There is no supplement detector, confidence gate,
+English fallback, independent window, or per-token statistical classification.
+Closed candidates can still misclassify foreign text with the same Script.
 
-`language::complete` first reuses existing Charabia language. For missing metadata, 17 scripts with one model language use direct mappings. Missing Latin, Cyrillic, Hebrew, or Devanagari metadata triggers one `whatlang::detect_lang` call for the original contiguous script group. `Script::Other` text uses `und`. Missing metadata on an unexpected path, or a script/language mismatch, is an invariant error.
+The language-independent public classification prefix runs once per raw span.
+Word spans form maximal contiguous envelopes. A split complete ASCII-letter
+envelope, bounded by non-letter/non-number/non-combining characters, is looked
+up as one lowercase English key. A hit replaces all spans with one original-text
+span, route eng, and source `english-merge`. Unsplit words and unmatched envelopes
+keep their routes/spans. The code neither finds substrings nor deletes separators.
+Original metadata remains diagnostic information rather than proof of English.
 
-There is no project confidence gate, English fallback, separate detection window, per-token detection, or second normalization context. All 70 model languages remain candidates. Tests check fixed model mappings and selected raw-group boundaries, including overlapping script predicates and Armenian-dominant groups. They do not prove arbitrary Unicode grouping or natural-language detection accuracy.
-
-The Parser classifies raw spans using the public compatibility-decomposition, control-character, and classifier prefix. It returns original bytes rather than that prefix's output. Language types occupy IDs 1 through 71, `blank` is 72, and `display_only` is 73. Oversized raw tokens become bounded display fragments, preserving source bytes without indexing word fragments by default.
+Language IDs follow the fixed order in `language_data.rs`: 1 through 16, with
+und last. Blank is 17 and display-only is 18. Both stay unmapped by default.
+Oversized raw tokens split into bounded display fragments without indexing
+subterms. Span checks and long-token handling run on the restored result.
 
 START receives text and length, not configuration identity or Dictionary options. PostgreSQL maps types to the active chain. LEXIZE receives neither Parser type nor detected language. A Dictionary therefore uses its own `Language`, even if the mapping chooses a different language from the Parser's type.
 
 ## Dictionary analysis
 
-`DictionaryState` owns validated `analysis::Options`, an optional stopword FST, and an optional stemmer. An FST is a finite-state transducer used here as a word set. Disabling Discard avoids building that set. Disabling Stem avoids creating a stemmer. The two switches are independent.
+`DictionaryState` owns validated `analysis::Options` and at most two stemmers.
+It borrows immutable stopword FSTs. An FST is a finite-state transducer used as a
+word set. Discard controls stopword references, not resource generation. Stem
+controls algorithm instances. English independently enables an additional branch
+for eligible terminal dictionaries and ASCII-letter tokens in the English FST.
 
-For each token supplied by PostgreSQL, `analysis::inspect` follows this order:
+For each token supplied by PostgreSQL, `analysis::inspect`:
 
-1. Validate the input independently of START. Direct `ts_lexize` and earlier filters can supply different bytes.
-2. Run non-lossy Charabia normalization/classification, then NFC, language-specific lowercase, then NFC again. NFC composes canonically equivalent Unicode sequences.
-3. Return Ignore for a non-word or empty prepared key.
-4. Match the prepared key against this Dictionary's stopword set. A match returns Stop before stemming.
-5. Keep a surface key and, when eligible, compute one stem from the prepared key.
-6. Apply the selected finalization to surface and stem independently. Remove empty and duplicate terms.
-7. Return terminal alternatives, one filter replacement, or Ignore when no term remains.
+1. Validates input independently of START, including direct calls and filters.
+2. Prepares the original language branch with non-lossy normalization and
+   classification, NFC, language-specific lowercase, and NFC again.
+3. Checks that branch's prepared stop key before optional stemming.
+4. Keeps its surface and one eligible stem, finalizes each separately, and
+   removes empty or duplicate terms.
+5. When English is enabled and the actual current ASCII token hits the English
+   FST, performs the same operations with English rules. Turkish lowercase is
+   not reused as the English lookup key.
+6. Aggregates in native-surface/native-stem/English-surface/English-stem order.
+   Any Terms win over another branch's Stop. Without Terms, any Stop produces
+   Stop; otherwise the result is Ignore. Real errors are never suppressed.
+
+`Terms` privately stores one through four distinct nonempty strings. Filter
+rejects Stem and English, so it returns only one current-input replacement.
+The Dictionary cannot recover the original whole word around an ASCII fragment.
 
 Turkish preparation maps `I` to dotless `ı` and `İ` to `i`. Other characters follow Unicode lowercase. This happens before stopword lookup and stemming. Feeding an already lossy-folded surface into the stemmer changes the algorithm input.
 
-`stopwords::build` uses the per-language mapping and the dependency's NLTK-first, ISO-for-missing-language lookup. It prepares source entries with the same rules as tokens, excludes non-word/empty entries, sorts/deduplicates, and builds the FST. It neither merges all languages nor splits source entries through another tokenizer.
+`build.rs` uses the same `prepare.rs` and language metadata as runtime. Its
+Charabia build dependency has no features; non-lossy preparation does not need
+large segmenter data. The runtime dependency has the fixed feature set. The
+lock and feature graph must preserve this host/target distinction.
+
+Build generation selects each language's entire NLTK table, with ISO only for a
+missing language, then prepares, excludes non-word/empty keys, sorts/deduplicates,
+and serializes 15 FSTs. und has no FST. The committed English TXT generates one
+additional FST. All generated bytes stay in OUT_DIR and are embedded. Runtime
+uses bounded lazy parsing of static bytes, never raw stop arrays, network/files,
+per-dictionary generation, or copies of the full data. The static view is an
+immutable resource, not an OID/parameter-derived cache. The resource manifest
+records sources, generator/preparation identity, counts, and hashes.
 
 With Normalize disabled, surface retains the NFC prepared key and stem receives NFC. With Normalize enabled, both use Charabia's full finalizer. Finalization is script/language dependent. It is not a promise that every output is NFC or that every accent is removed.
 
@@ -76,11 +122,11 @@ The retained [direct Dictionary cases](../tests/fixtures/analysis/general/direct
 
 ## Dictionary chains and positions
 
-`pg_ffi::lexemes` translates the owned Rust result into PG-allocated, zero-terminated `TSLexeme` storage. Terminal alternatives have distinct `nvariant` values 0 and 1, flags zero, and the same position. They are alternatives, not two sequential words.
+`pg_ffi::lexemes` translates the owned Rust result into PG-allocated, zero-terminated `TSLexeme` storage. Terminal alternatives have distinct `nvariant` values 0 through at most 3, flags zero, and the same position. They are alternatives, not two sequential words.
 
 Ignore returns a non-SQL-NULL Datum containing a null pointer. PostgreSQL tries the next Dictionary. Stop returns a non-null empty array, ends the chain, and leaves one position hole. If the chain never recognizes the token, it produces no position. Default blank/display types have no Dictionary mapping.
 
-A filter returns one nonempty term with `TSL_FILTER`. PostgreSQL passes it as the current input to later dictionaries. It does not run two independent pipelines for surface and stem. Rejecting Filter with Stem preserves that distinction. Chain-tail filters and filters followed only by NULL do not become final terms.
+A filter returns one nonempty term with `TSL_FILTER`. PostgreSQL passes it as the current input to later dictionaries. It does not run two independent pipelines for surface and stem. Rejecting Filter with Stem or English preserves that distinction. Chain-tail filters and filters followed only by NULL do not become final terms.
 
 These are [PostgreSQL Dictionary semantics](https://www.postgresql.org/docs/18/textsearch-dictionaries.html), exercised with simple, Snowball, synonym, unaccent, and controlled protocol dictionaries in [chain.py](../tests/chain.py). Tests also cover external `TSL_ADDPOS` output. Compatibility means following the protocol, not guaranteeing useful language effects for every dictionary order.
 
@@ -90,7 +136,7 @@ Native vector and query functions use the selected standard Configuration and Di
 
 `pg_ffi::plain_query_any` calls PostgreSQL plain-query analysis, checks its item/operator domain, and changes AND to OR in that fresh request-owned tree. It preserves OR alternatives, never mutates a shared query, and never analyzes final terms again. It is not a phrase/Boolean query parser.
 
-The pinned pg_textsearch uses PostgreSQL configuration-based vector analysis for index and query terms. It implements BM25 bag-of-terms retrieval separately from native AND and phrase semantics. Surface/stem alternatives can change its term frequencies, document lengths, scores, and storage size. Candidate consistency and ranking quality therefore need separate judgments.
+The pinned pg_textsearch uses PostgreSQL configuration-based vector analysis for index and query terms. It implements BM25 bag-of-terms retrieval separately from native AND and phrase semantics. Native/English surface/stem alternatives can change its term frequencies, document lengths, scores, and storage size. Candidate consistency and ranking quality therefore need separate judgments.
 
 pg_textsearch's metapage configuration OID supports runtime analysis. Build and REINDEX resolve the stored `text_config` string again. This explains its rename/rebuild and dependency limitations, which are covered in [bm25.py](../tests/bm25.py) and [config.py](../tests/config.py). Required maintenance is in the [README](../README.md#analysis-changes-and-index-maintenance).
 
@@ -108,7 +154,7 @@ Core matching and repeated-entry allocation happen before the callback. Its outp
 
 ## Ownership and errors
 
-Rust owns analysis vectors, strings, FSTs, and stemmers. PostgreSQL owns callback arrays, strings returned to core, and headline scratch memory. PG allocation and pointer conversion stay in `pg_ffi.rs`.
+Rust owns analysis vectors, strings, and stemmers. FST views borrow static library bytes, which Dictionary resets never free. PostgreSQL owns callback arrays, strings returned to core, and headline scratch memory. PG allocation and pointer conversion stay in `pg_ffi.rs`.
 
 `pg_ffi::owned_state` preserves a Box owner while allocating and initializing the reset callback in the original CurrentMemoryContext. After callback registration, it immediately uses `Box::into_raw` and installs that canonical pointer. No fallible operation or PG call can occur during that handoff. The guarded callback drops exactly that Box. Drop must not call PostgreSQL or panic.
 
@@ -122,7 +168,7 @@ Registration-before/after failures, INIT failures, repeated calls, ERROR/panic/c
 
 ## Dictionary initialization and invalidation
 
-PostgreSQL owns the per-backend cache keyed by Dictionary OID. INIT reads that object's merged catalog options and creates its state. LEXIZE performs no SPI configuration lookup or language detection. The only derived stopword cache belongs to the Dictionary state.
+PostgreSQL owns the per-backend cache keyed by Dictionary OID. INIT reads that object's merged catalog options and creates its state. LEXIZE performs no SPI configuration lookup or language detection. The Dictionary state only binds shared static resource views and its small options/stemmers.
 
 Catalog changes mark the PG text-search cache invalid. A later lookup resets the dictionary context and reruns INIT. A failed INIT never becomes valid for LEXIZE. Registration-before failures release Rust ownership immediately. A registered state from failed cached INIT can remain until the next dictCtx reset. Transaction abort does not necessarily destroy that cache context.
 
@@ -138,7 +184,7 @@ See PostgreSQL's [ts_cache.c](https://github.com/postgres/postgres/blob/REL_18_6
 | Source rows and stored vectors | Table storage and core WAL for logged relations. |
 | Native GIN | PostgreSQL index pages and GIN WAL/redo. |
 | BM25 | Upstream index pages plus its WAL-backed memtable chain and segments. Shared-memory caches are reconstructed. |
-| Parser state, dictCtx, FST, stemmer, headline scratch | Process/request state. New backends rebuild what they need from restored catalogs and installed resources. |
+| Parser state, dictCtx, FST views, stemmers, headline scratch | Process/request state. New backends rebuild small state from restored catalogs and installed resources. Static FST bytes belong to the exact library. |
 | Library, control/SQL files, dependencies, external dictionary rules | Installation resources outside database WAL. Embedded dictionaries are part of the exact library. |
 | Server/restore configuration and environment | Files and external settings. A base backup can include files inside PGDATA, but later configuration-file edits are not replayed as catalog WAL. |
 
@@ -154,7 +200,7 @@ The retained [recovery test](../tests/recovery.py) exercises online backup, arch
 
 - Fixed model mappings and default segmentation avoid per-token detection and configuration-dependent Parser state. Short-query language errors remain possible.
 - Independent Dictionary preparation is necessary for direct calls and earlier filters. Chains can repeat that preparation, but headline does not repeat it.
-- Surface retention improves some matches but changes BM25 statistics. It does not repair stopword deletion or guarantee all word-form/phrase recall.
+- English alternatives preserve some words discarded by the original language. They also retain cross-language homographs and change BM25 statistics. They do not guarantee word-form or phrase recall.
 - Standard Parser/Dictionary interfaces preserve index reuse and arbitrary native composition. They cannot carry private Parser metadata to Dictionary callbacks.
 - Standard headline preserves raw source and PG matching. It is a presentation step, not a phrase or Boolean match decision.
 

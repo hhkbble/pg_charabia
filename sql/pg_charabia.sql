@@ -39,7 +39,7 @@ DECLARE l jsonb; d jsonb;
 BEGIN
  FOR l IN SELECT value FROM pg_catalog.jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
   d := l->'defaults';
-  EXECUTE pg_catalog.format('CREATE TEXT SEARCH DICTIONARY charabia.%I (TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize=true,Filter=false)',l->>'language',l->>'language',d->>'discard',d->>'stem');
+  EXECUTE pg_catalog.format('CREATE TEXT SEARCH DICTIONARY charabia.%I (TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize=true,Filter=false,English=%s)',l->>'language',l->>'language',d->>'discard',d->>'stem',d->>'english');
   EXECUTE pg_catalog.format('ALTER TEXT SEARCH CONFIGURATION public.charabia ADD MAPPING FOR %I WITH charabia.%I',l->>'language',l->>'language');
  END LOOP;
 END

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pure checks for suite selection, quality classification and release refusal."""
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -13,7 +14,7 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import ARCHIVE_SUITES, FORMAT, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, SUITES, digest, frozen_quality_cases, isolated_pg_environment, quality_case, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -181,12 +182,12 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
 
     def test_exact_quality_failures_are_separate(self):
         frozen = frozen_quality_cases()
-        cases = [quality_case(case_id, **values, known_signature=values) for case_id, values in frozen.items()]
+        cases = [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen.items()]
         summary = validate_quality({"format": FORMAT, "cases": cases})
-        self.assertEqual(summary["counts"], {"passed": 0, "known-failure": 3, "regression": 0})
+        self.assertEqual(summary["counts"], {"passed": 2, "known-failure": 1, "regression": 0})
         self.assertEqual(verified_status(summary), "verified-with-known-quality-failures")
         values = frozen["english-den"]
-        for field, changed in (("actual", True), ("input", "different document"), ("query", "different query"), ("config", "other.config"), ("expected", False), ("actual", 0)):
+        for field, changed in (("actual", False), ("input", "different document"), ("query", "different query"), ("config", "other.config"), ("expected", False), ("actual", 0)):
             case = quality_case("english-den", **dict(values, **{field: changed}), known_signature=values)
             self.assertEqual(case["status"], "regression", field)
             self.assertEqual(verified_status(validate_quality({"format": FORMAT, "cases": [case]})), "failed")
@@ -204,6 +205,10 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         del case["known_signature"]
         with self.assertRaises(ValueError):
             validate_quality({"format": FORMAT, "cases": [case]})
+        self.assertEqual(quality_case("english-den",**values,known_signature=values)["status"],"regression")
+        phrase=frozen["english-short-phrase"]
+        self.assertEqual(quality_case("english-short-phrase",**phrase,known_signature=phrase)["status"],"known-failure")
+        self.assertEqual(quality_case("english-short-phrase",**dict(phrase,actual=True),known_signature=phrase)["status"],"regression")
         self.assertEqual(quality_case("new-passing-case", **dict(values, actual=True))["status"], "passed")
         self.assertEqual(quality_case("new-failing-case", **values)["status"], "regression")
         with self.assertRaises(ValueError):
@@ -211,31 +216,36 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             require_known_quality_cases(validate_quality({"format": FORMAT, "cases": []}))
 
     def report(self):
-        labels = ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract")
+        labels = ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract", "word-generator-contract", "resource-verification", "normal-cargo-tree")
         return {"format": FORMAT, "status": "verified-with-known-quality-failures", "platform": "linux-amd64", "build_profile": "release", "test_hooks": False,
                 "suites": list(SUITES), "suite_results": {suite: {"status": "passed"} for suite in SUITES},
                 "cleanup": {key: True for key in ("marker_matches", "cluster_stopped", "directory_removed")},
-                "quality": {"format": FORMAT, "cases": [quality_case(case_id, **values, known_signature=values) for case_id, values in frozen_quality_cases().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
+                "quality": {"format": FORMAT, "cases": [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen_quality_cases().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
                 "analysis_info": self.info(), "public_api_abi_verified": True, "default_objects_verified": True,
+                "default_objects": self.default_objects(),
                 "loaded_library_sha256": "f" * 64,
                 "recovery": {"format": FORMAT, "status": "passed", "loaded_library_sha256": "f" * 64, "cleanup": {key: True for key in ("marker_matches", "clusters_stopped", "directory_removed")}},
                 "pg_textsearch": {"loaded_backend_verified": True},
                 "commands": [{"label": label, "exit_code": 0} for label in labels] + [{"label": f"suite-{suite}-python", "exit_code": 0} for suite in SUITES if suite != "unit"]}
 
     def info(self):
-        languages = []
-        for index in range(71):
-            alias = "und" if index == 70 else "a" + chr(97 + index // 26) + chr(97 + index % 26)
-            languages.append({"language": alias, "script": "Latin", "has_stopwords": index < 52, "stemmer": "English" if index < 19 else None,
-                              "defaults": {"discard": index < 52, "stem": index < 19, "normalize": True, "filter": False}})
         return {"extension": RELEASE_VERSION, "pgrx": "0.19.3", "charabia": "0.10.0", "target": "x86_64-unknown-linux-gnu", "cargo_lock_sha256": "a" * 64,
-                "resource_manifest_sha256": "b" * 64, "analysis_revision": "static-contract-test", "resource_fingerprint": "c" * 64,
-                "language_count": 71, "languages": languages, "resources": {}}
+                "resource_manifest_sha256": "b" * 64, "analysis_revision": ANALYSIS_REVISION, "resource_fingerprint": "c" * 64,
+                "language_count": 16, "languages": language_capabilities(), "resources": {}}
+
+    def default_objects(self):
+        return {"parser": {"schema": "charabia", "name": "parser"},
+                "types": [{"id": index, "alias": alias} for index, alias in enumerate((*LANGUAGE_CODES, "blank", "display_only"), 1)],
+                "dictionaries": sorted(LANGUAGE_CODES),
+                "dictionary_options": [{"dictionary": row["language"], "template_schema": "charabia", "template": "template",
+                                        "options": ", ".join(f"{key} = '{value}'" for key, value in {"language": row["language"], **{key: str(value).lower() for key, value in row["defaults"].items()}}.items())}
+                                       for row in sorted(language_capabilities(), key=lambda item: item["language"])],
+                "mappings": [{"type": index, "order": 1, "dictionary_schema": "charabia", "dictionary": alias} for index, alias in enumerate(LANGUAGE_CODES, 1)]}
 
     def test_static_info_rejects_old_configuration_state(self):
         info = self.info()
         require_static_info(info, {"extension": RELEASE_VERSION, "target": "x86_64-unknown-linux-gnu"})
-        for changed in (dict(info, extension="0.2.0"), dict(info, settings={}), dict(info, test_hooks=False), dict(info, language_count=70), dict(info, resource_fingerprint="invalid")):
+        for changed in (dict(info, extension="0.2.0"), dict(info, settings={}), dict(info, test_hooks=False), dict(info, language_count=71), dict(info, language_count=16.0), dict(info, analysis_revision="native-dictionary-0.3.0"), dict(info, resource_fingerprint="invalid")):
             with self.assertRaises(ValueError):
                 require_static_info(changed, {})
         duplicate = copy.deepcopy(info)
@@ -246,6 +256,64 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         wrong_default["languages"][0]["defaults"]["filter"] = True
         with self.assertRaisesRegex(ValueError, "defaults"):
             require_static_info(wrong_default, {})
+        for field, value in (("language", "dan"), ("script", "Other"), ("stemmer", "French"), ("english_eligible", True), ("english_eligible", 0)):
+            changed = copy.deepcopy(info)
+            changed["languages"][0][field] = value
+            with self.assertRaises(ValueError, msg=field):
+                require_static_info(changed, {})
+        swapped = copy.deepcopy(info)
+        swapped["languages"][:2] = swapped["languages"][:2][::-1]
+        with self.assertRaisesRegex(ValueError, "order"):
+            require_static_info(swapped, {})
+        rows = info["languages"]
+        self.assertEqual(sum(row["has_stopwords"] for row in rows), 15)
+        self.assertEqual(sum(row["stemmer"] is not None for row in rows), 10)
+        self.assertEqual(sum(row["defaults"]["discard"] for row in rows), 15)
+        self.assertEqual(sum(row["defaults"]["stem"] for row in rows), 11)
+        self.assertEqual(sum(row["defaults"]["english"] for row in rows), 8)
+
+    def test_installed_default_catalog_requires_routes_and_explicit_options(self):
+        defaults = self.default_objects()
+        require_default_objects(defaults, self.info())
+        quoted=copy.deepcopy(defaults)
+        for row in quoted["dictionary_options"]:
+            row["options"]=row["options"].replace("normalize =", '"normalize" =')
+        require_default_objects(quoted,self.info())
+        # PG quotes its NORMALIZE keyword in dictinitoption output.
+        for field in defaults:
+            missing = copy.deepcopy(defaults)
+            del missing[field]
+            with self.assertRaises(ValueError, msg=field):
+                require_default_objects(missing, self.info())
+        for field in ("types", "dictionaries", "dictionary_options", "mappings"):
+            changed = copy.deepcopy(defaults)
+            changed[field].pop()
+            with self.assertRaises(ValueError, msg=field):
+                require_default_objects(changed, self.info())
+        changed = copy.deepcopy(defaults)
+        changed["parser"]["schema"] = "public"
+        with self.assertRaisesRegex(ValueError, "Configuration"):
+            require_default_objects(changed, self.info())
+        changed = copy.deepcopy(defaults)
+        changed["mappings"][0]["dictionary_schema"] = "public"
+        with self.assertRaisesRegex(ValueError, "mappings"):
+            require_default_objects(changed, self.info())
+        changed = copy.deepcopy(defaults)
+        changed["types"][:2] = changed["types"][:2][::-1]
+        with self.assertRaisesRegex(ValueError, "Parser types"):
+            require_default_objects(changed, self.info())
+        for changed_option in ("language = 'ara'", defaults["dictionary_options"][0]["options"].replace("english = 'false'", "english = 'true'"),
+                               defaults["dictionary_options"][0]["options"] + ", english = 'false'",
+                               defaults["dictionary_options"][0]["options"].replace("english = 'false'", "english = false")):
+            changed = copy.deepcopy(defaults)
+            changed["dictionary_options"][0]["options"] = changed_option
+            with self.assertRaises(ValueError, msg=changed_option):
+                require_default_objects(changed, self.info())
+        for field, value in (("template_schema", "public"), ("template", "simple"), ("dictionary", "und")):
+            changed = copy.deepcopy(defaults)
+            changed["dictionary_options"][0][field] = value
+            with self.assertRaisesRegex(ValueError, "template"):
+                require_default_objects(changed, self.info())
 
     def test_recovery_cleanup_and_loaded_library_are_required(self):
         recovery = self.report()["recovery"]
@@ -262,7 +330,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
     def test_release_refuses_incomplete_identity_or_checks(self):
         report = self.report()
         require_release_report(report)
-        for key, value in (("format", 1), ("status", "passed"), ("build_profile", "debug"), ("test_hooks", True), ("suites", list(SUITES[:-1])), ("suite_results", {}), ("commands", []), ("analysis_info_verified", False), ("public_api_abi_verified", False), ("default_objects_verified", False), ("recovery", {}), ("cleanup", {})):
+        for key, value in (("format", 1), ("status", "passed"), ("build_profile", "debug"), ("test_hooks", True), ("suites", list(SUITES[:-1])), ("suite_results", {}), ("commands", []), ("analysis_info_verified", False), ("public_api_abi_verified", False), ("default_objects_verified", False), ("default_objects", {}), ("recovery", {}), ("cleanup", {})):
             invalid = dict(report, **{key: value})
             with self.assertRaises(ValueError, msg=key):
                 require_release_report(invalid)
@@ -329,12 +397,19 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             names = ("scripts/package-release", "scripts/report_contract.py", "LICENSE", "README.md",
-                     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "pg_charabia.control",
+                     "Cargo.toml", "Cargo.lock", "build.rs", "AGENTS.md", ".gitattributes", "rust-toolchain.toml", "pg_charabia.control", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz",
                      "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json")
             for name in names:
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, target)
+            # Freeze the synthetic archive identities before committing this fixture.
+            fixture_path=root/"resources/manifest.json"
+            fixture_manifest=json.loads(fixture_path.read_text())
+            payload=b"Synthetic source-copy archive fixture. Never compile this.\n"
+            for source in fixture_manifest["rebuild_source_archives"]:
+                source["sha256"]=hashlib.sha256(payload).hexdigest()
+            fixture_path.write_text(json.dumps(fixture_manifest))
             nested = root / "docs/nested/source.md"
             nested.parent.mkdir(parents=True)
             nested.write_bytes(b"Tracked nested documentation.\n")
@@ -358,7 +433,15 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             library = package / "extension/pg_charabia.so"
             library.write_bytes(b"Synthetic assembly fixture. Never load this file.\n")
             library_hash = digest(library)
-            (package / "SHA256SUMS").write_text(f"{library_hash}  extension/pg_charabia.so\n")
+            # These are source-copy assembly fixtures, never runtime/release evidence.
+            resource_path=root/"resources/manifest.json"
+            fixture_resources=json.loads(resource_path.read_text())
+            for source in fixture_resources["rebuild_source_archives"]:
+                path=package/source["package_path"]
+                path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_bytes(b"Synthetic source-copy archive fixture. Never compile this.\n")
+                self.assertEqual(source["sha256"],digest(path))
+            (package/"SHA256SUMS").write_text("".join(f"{digest(path)}  {path.relative_to(package)}\n" for path in sorted(package.rglob("*")) if path.is_file() and path.name!="SHA256SUMS"))
             report = self.report()
             report["quality"] = validate_quality(report["quality"])
             report.update(run_id="fixture-inner", git_commit=commit, git_status="",

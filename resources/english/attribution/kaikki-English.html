@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>English dictionary</title>
+  <link rel="canonical" href="https://kaikki.org/dictionary/English/index.html"/>
+  <link rel="shortcut icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABmJLR0QA/wD/AP+gvaeTAAAAmElEQVQ4y7WSSw4CQQhECxYuZjRcwftfyjO00YUby40khBkcHCOr/tCPohrg16CBNHArp7rTTgEZkAqiXZW7FQCADEgCnkoADVOs6I8T5LoA0HB8L++dFmiYaWBUoJ6YJRdxkwGJgPHFY/jP6J7Zib5oPsz90iBrqjxP18gJ8nRQaw6KamcHtQeJhkPYXipz9YNJj+w4/hEvzrs/aYZwHLoAAAAASUVORK5CYII=">
+  
+  <style>
+body {
+   margin-left: 20px;
+   margin-right: 20px;
+   font-family: "Times New Roman", Times, serif;
+   font-size: 20px;
+   font-weight: 400;
+}
+
+.formsandsounds {
+  padding-left: 20px;
+  font-size: 18px;
+}
+
+li {
+  padding-bottom: 3px;
+}
+
+ol>li {
+  padding-bottom: 10px;
+}
+
+.formsandsounds li {
+  padding: 0;
+}
+
+.gloss {
+  font-weight: 600;
+  font-size: 110%;
+}
+
+.info {
+  display: block;
+  padding-bottom: 5px;
+}
+
+.infolabel {
+}
+
+.infodetail {
+  font-style: italic;
+}
+
+.glossinfo {
+  display: block;
+  padding-left: 10px;
+  font-size: 18px;
+}
+
+.glossinfo li {
+  padding-bottom: 0;
+}
+
+.trlang {
+  font-weight: 600;
+}
+
+.inaccurate {
+  font-size: 75%;
+}
+
+:target .glosses {
+  color: red;
+}
+
+.nondisambiguated {
+  padding-left: 20px;
+  font-size: 18px;
+}
+
+.nondisambiguatedh {
+  font-weight: 600;
+  font-size: 18px;
+}
+
+.nondisambiguatedb {
+  padding-left: 20px;
+}
+
+ul.breadcrumb {
+  /* padding: 10px 16px; */
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  /* background-color: #eee; */
+}
+
+ul.breadcrumb li {
+  display: inline;
+  font-size: 18px;
+}
+
+ul.breadcrumb li+li:before {
+  padding: 8px;
+  color: black;
+  content: "\00bb";
+}
+
+ul.breadcrumb li a {
+  color: #0275d8;
+  text-decoration: none;
+}
+
+ul.breadcrumb li a:hover {
+  color: #01447e;
+  text-decoration: underline;
+}
+
+.indented {
+  margin-left: 40px;
+  padding-bottom: 10px;
+}
+
+.search {
+    float: right;
+    max-width: 180px;
+}
+
+.search form {
+    position: relative;
+    padding: 0px;
+    margin: 0px;
+    border-radius: 3px;
+}
+
+.searchField {
+    width: 100%;
+}
+
+.searchButton {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    right: 2px;
+    min-width: 28px;
+    width: 28px;
+    height: auto;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+    z-index: 1;
+}
+
+.searchResults {
+    display: none;
+    position: relative;
+    top: 0px;
+    padding: 5px;
+    border: 1px solid #888;
+    border-radius: 3px;
+}
+
+.searchResultItem {
+    background-color: white;
+    color: black;
+    text-decoration: initial;
+    width: 100%;
+    display: block;
+}
+
+.searchResultSelected {
+    background-color: black;
+    color: white;
+    text-decoration: initial;
+    width: 100%;
+    display: block;
+}
+
+.stacktrace {
+    font-size: 18px;
+}
+
+.errorpath {
+    display: block;
+    font-size: 18px;
+    padding-top: 0;
+    margin-top: 0;
+}
+
+.hideable {
+    padding-top: 3px;
+    padding-bottom: 3px;
+}
+
+.close-ck, .close-content, .close-hide {
+    display: none;
+}
+
+.close-ck:checked ~ .close-content {
+    display: block;
+}
+
+.close-ck:checked ~ .close-hide {
+    display: inline;
+}
+
+.close-ck:checked ~ .close-show {
+    display: none;
+}
+
+.close-show, .close-hide {
+    background-color: #e0e0e0;
+}
+
+.audio-play {
+    border: 0;
+    padding: 0;
+    background-color: transparent;
+}
+
+th {
+    text-align: left;
+    background: #cccccc;
+}
+
+tr:nth-child(odd) {
+    background: #e8e8e8;
+}
+
+tr:nth-child(even) {
+    background: #ffffff;
+}
+
+.inflections td {
+    padding-right: 10px;
+}
+
+.inflections_lang_list table {
+    border: none;
+}
+
+div.jsonpadding div.jsonpadding {
+    padding-left: 40px;
+}
+
+div.jsonfont {
+   font-family: monospace, sans-serif;
+   font-size: 18px;
+   font-weight: 400;
+}
+
+div.jsonfont a {
+    text-decoration: none;
+    font-weight: bold;
+}
+
+div.jsonfont strong.field a{
+    color: light-blue;
+    font-weight: normal;
+    }
+
+div.jsonfont a.tag {
+    color: green;
+    }
+
+div.jsonfont em.lang {
+    }
+
+
+span.overflow {
+    background: #bbbbff;
+}
+
+tr :nth-child(1) {
+    text-align: right;
+    padding-right: 10px;
+}
+
+tr :nth-child(3) {
+    text-align: right;
+    padding-right: 10px;
+}
+
+tr :nth-child(5) {
+    text-align: right;
+    padding-right: 10px;
+}
+
+td.errors {
+    background: #ffaaaa;
+}
+
+.de-edition h1 {
+    background: #aaffaa;
+}
+
+.ru-edition h1 {
+    background: #ffaaff;
+}
+
+.fr-edition h1 {
+    background: #aaaaff;
+}
+
+.es-edition h1 {
+    background: #ffffaa;
+}
+
+.zh-edition h1 {
+    background: #aaffff;
+}
+
+  </style>
+</head>
+<body class="en-edition">
+<div class="search">
+  <form>
+      <input id="searchField" class="searchField" type="search" name="search"
+             placeholder="Search enwiktionary"
+             autocapitalize="none" disabled
+             title="Search the dictionary [Alt+Shift+f]"
+             accesskey="f" autocomplete="off">
+      <input type="submit" name="Go" value="Go"
+             id="searchButton" class="searchButton" disabled
+             title="Go to a page with this exact name">
+  </form>
+  <div id="searchResults" class="searchResults">
+  </div>
+</div>
+
+<h1>English machine-readable dictionary</h1>
+<ul class="breadcrumb"><li><a href="https://kaikki.org/index.html">Home</a></li><li><a href="../index.html">English edition</a></li><li>English</li></ul>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+  {
+     "@type": "ListItem",
+     "position": 1,
+     "item": { "@id": "https://kaikki.org/index.html", "name": "Home" }
+  },
+  {
+     "@type": "ListItem",
+     "position": 2,
+     "item": { "@id": "../index.html", "name": "English%20edition" }
+  },
+  {
+     "@type": "ListItem",
+     "position": 3,
+     "item": { "@id": "index.html", "name": "English" }
+  }
+  ]
+}
+</script>
+<p>Use the search box on the top right corner to find a particular word.  You can also browse words by following the links below.</p>
+<ul>
+<li><a href="words/index.html">All word forms (1396111 distinct words)</a></li>
+<li><a href="categories-topical/index.html">Senses by topical category (2 distinct categories)</a></li>
+<li><a href="categories-lifeform/index.html">Senses by lifeform category (1 distinct categories)</a></li>
+<li><a href="categories-place/index.html">Senses by place category (7161 distinct categories)</a></li>
+<li><a href="categories-other/index.html">Senses by other category (17870 distinct categories)</a></li>
+<li><a href="topics/index.html">Senses by topic (721 distinct topics)</a></li>
+<li><a href="tags/index.html">Senses by tag (618 distinct tags)</a></li>
+<li><a href="pos-adj/index.html">Senses with part-of-speech Adjective (220282)</a></li>
+<li><a href="pos-adv/index.html">Senses with part-of-speech Adverb (31012)</a></li>
+<li><a href="pos-adv_phrase/index.html">Senses with part-of-speech Adverbial phrase (1)</a></li>
+<li><a href="pos-article/index.html">Senses with part-of-speech Article (55)</a></li>
+<li><a href="pos-character/index.html">Senses with part-of-speech Character (268)</a></li>
+<li><a href="pos-circumfix/index.html">Senses with part-of-speech Circumfix (3)</a></li>
+<li><a href="pos-conj/index.html">Senses with part-of-speech Conjunction (554)</a></li>
+<li><a href="pos-contraction/index.html">Senses with part-of-speech Contraction (1102)</a></li>
+<li><a href="pos-det/index.html">Senses with part-of-speech Determiner (479)</a></li>
+<li><a href="pos-infix/index.html">Senses with part-of-speech Infix (59)</a></li>
+<li><a href="pos-interfix/index.html">Senses with part-of-speech Interfix (41)</a></li>
+<li><a href="pos-intj/index.html">Senses with part-of-speech Interjection (5748)</a></li>
+<li><a href="pos-name/index.html">Senses with part-of-speech Proper name (279055)</a></li>
+<li><a href="pos-noun/index.html">Senses with part-of-speech Noun (970758)</a></li>
+<li><a href="pos-num/index.html">Senses with part-of-speech Numeral (689)</a></li>
+<li><a href="pos-particle/index.html">Senses with part-of-speech Particle (191)</a></li>
+<li><a href="pos-phrase/index.html">Senses with part-of-speech Phrase (5958)</a></li>
+<li><a href="pos-postp/index.html">Senses with part-of-speech Postposition (4)</a></li>
+<li><a href="pos-prefix/index.html">Senses with part-of-speech Prefix (3426)</a></li>
+<li><a href="pos-prep/index.html">Senses with part-of-speech Preposition (1531)</a></li>
+<li><a href="pos-prep_phrase/index.html">Senses with part-of-speech Prepositional phrase (4016)</a></li>
+<li><a href="pos-pron/index.html">Senses with part-of-speech Pronoun (1319)</a></li>
+<li><a href="pos-proverb/index.html">Senses with part-of-speech Proverb (1662)</a></li>
+<li><a href="pos-punct/index.html">Senses with part-of-speech Punctuation (72)</a></li>
+<li><a href="pos-suffix/index.html">Senses with part-of-speech Suffix (2197)</a></li>
+<li><a href="pos-symbol/index.html">Senses with part-of-speech Symbol (583)</a></li>
+<li><a href="pos-verb/index.html">Senses with part-of-speech Verb (263983)</a></li>
+</ul>
+<h2>Download</h2>
+<p><a href="kaikki.org-dictionary-English.jsonl" download target="_blank">Download</a> <strong>postprocessed</strong> JSONL data for all word senses in the English dictionary (3.2GB). <strong><a href="https://github.com/tatuylonen/wiktextract/issues/1178">DEPRECATED</a></strong>, will be removed in the near future.  This is the data used specifically when building this website, and if you wish to process the data yourself use the data found on <a href='../rawdata.html'>this page.</a></p>
+<h2>Extraction errors and warnings</h2>
+<p><a href="errors/errors.html">Extraction errors and warnings</a></p>
+<hr/>
+<div>
+
+<p>This page is a part of the kaikki.org machine-readable English dictionary.  This dictionary is based on structured data extracted on 2026-10-21 from the enwiktionary dump dated 2026-10-01 using <a href="https://github.com/tatuylonen/wiktextract">wiktextract</a> (<a href="https://github.com/tatuylonen/wiktextract/commit/c1bb342f3f3afb42e2200dea4dfc8bdc9fb0a4f4">c1bb342</a> and <a href="https://github.com/tatuylonen/wikitextprocessor/commit/6f96ddf5f3466707f1869fe6618390fd77dfd109">6f96ddf</a>).
+The data shown on this site has been post-processed and various details (e.g., extra categories) removed, some information disambiguated, and additional data merged from other sources.  See the <a href="../rawdata.html">raw data download page</a> for the unprocessed wiktextract data.
+<p>If you use this data in academic research, please cite Tatu Ylonen: <a href="http://www.lrec-conf.org/proceedings/lrec2022/pdf/2022.lrec-1.140.pdf">Wiktextract: Wiktionary as Machine-Readable Structured Data</a>, Proceedings of the 13th Conference on Language Resources and Evaluation (LREC), pp. 1317-1325, Marseille, 20-25 June 2022.  Linking to the relevant page(s) under https://kaikki.org would also be greatly appreciated.</p>
+</p>
+</div>
+
+<script >
+var search_cache = null;
+var search_selection = 0;
+var search_query = null;
+
+var wikt_edition = "en";
+
+String.prototype.isUpper = function () {
+    var char = this[0];
+    var ret = false;
+    if (char == char.toUpperCase()) {
+        ret = true;
+    }
+    return ret;
+}
+String.prototype.isLower = function () {
+    var char = this[0];
+    var ret = false;
+    if (char == char.toLowerCase()) {
+        ret = true;
+    }
+    return ret;
+}
+
+function add_result(results, v, url, i) {
+    var a = document.createElement("a");
+    if (results.childElementCount == search_selection) {
+        a.setAttribute("class", "searchResultSelected");
+    } else {
+        a.setAttribute("class", "searchResultItem");
+    }
+    a.href = url;
+    a.textContent = v;
+    function enter() {
+        results.children.item(search_selection).setAttribute(
+            "class", "searchResultItem");
+        search_selection = i;
+        results.children.item(i).setAttribute(
+            "class", "searchResultSelected");
+    }
+    a.onmouseenter = enter;
+    results.appendChild(a);
+}
+
+function finalize_search(results, query, lst, api_search=null) {
+    /*console.log("finalize_search", query, lst); */
+    var max_cnt = 10;
+    var lcq = query.toLowerCase();
+    var matches = [];
+    for (var i = 0; i < lst.length; i++) {
+        var title = lst[i][0];
+        if (title.toLowerCase().substring(0, lcq.length) == lcq) {
+            var url = lst[i][1];
+            matches.push([lcq, results, title, url, i]);
+        }
+    }
+    function cmp_lowercase_first(a, b) {
+        var ret = a[0][0].localeCompare(b[0][0]);
+        if (ret != 0) {
+             return ret;
+        }
+        if (a[2][0].isLower() && b[2][0].isUpper()) {
+            return -1;
+        } else if (a[2][0].isUpper() && b[2][0].isLower()) {
+            return 1;
+        }
+        return 0;
+    }
+    function cmp_uppercase_first(a, b) {
+        var ret = a[0][0].localeCompare(b[0][0]);
+        if (ret != 0) {
+             return ret;
+        }
+        if (a[2][0].isLower() && b[2][0].isUpper()) {
+            return 1;
+        } else if (a[2][0].isUpper() && b[2][0].isLower()) {
+            return -1;
+        }
+        return 0;
+    }
+    var cmp_fn;
+    if (query[0].isUpper()) {
+        cmp_fn = cmp_uppercase_first;
+    } else {
+        cmp_fn = cmp_lowercase_first;
+    }
+
+    matches.sort(cmp_fn);
+    if (matches.length > 0 && typeof(api_search) == "string") {
+        window.location.href = matches[0][3]
+    }
+    var cnt = 0;
+    for (var i = 0; i < matches.length; i++) {
+        var item = matches[i];
+        add_result(item[1], item[2], item[3], item[4]);
+        cnt += 1;
+        if (cnt >= max_cnt) {
+            break;
+        }
+    }
+
+    results.style.display = "block";
+}
+
+function search_fill(api_search=null) {
+    var query_field = document.getElementById("searchField");
+    var results = document.getElementById("searchResults");
+    var query;
+    // if doing an api search, use api_search
+    // otherwise use field value
+    if (typeof(api_search) == "string") {
+        query = api_search;
+    } else {
+        query = query_field.value;
+    }
+
+    if (query != search_query) {
+        search_selection = 0;
+        search_query = query;
+    }
+    results.style.display = "none";
+    results.innerHTML = "";
+
+    if (query == "") {
+        return;
+    }
+    var prefix_len;
+    if (search_cache && search_cache[2]) {
+        prefix_len = 3;
+    } else {
+        prefix_len = 2;
+    }
+
+    var prefix = query.toLowerCase().substring(0, prefix_len);
+    if (search_cache && search_cache[0] == prefix) {
+        /*console.log("from cache"); */
+        finalize_search(results, query, search_cache[1], api_search);
+    } else {
+        var fn = prefix;
+        fn = fn.replace("/", "_slash_");
+        fn = fn.replace("\\", "_backslash_");
+        fn = fn.replace("*", "_star_");
+        fn = fn.replace("?", "_ques_");
+        fn = fn.replace("#", "_hash_");
+        fn = fn.replace(".", "_dot_");
+        fn = encodeURIComponent(fn) + ".json";
+        var url;
+        if (wikt_edition == "en") {
+            url = "/dictionary/search/start/" + fn;
+        } else {
+            url = "/" + wikt_edition + "wiktionary/search/start/" + fn;
+        }
+        fetch(url)
+            .then(function(resp) {
+                if (resp.ok) {
+                    resp.json().then(function(data) {
+                        var three_char = data[0];
+                        var lst = data[1];
+                        /* console.log("from fetch, three_char: ", three_char);*/
+
+                        search_cache = [prefix, lst, three_char];
+                        finalize_search(results, query, lst, api_search);
+                    });
+                }
+            })
+            .catch(function(resp) {
+                var li = document.createElement("div");
+                li.style.color = "red";
+                li.textContent = "Search failed due to network error";
+                results.appendChild(li);
+            });
+    }
+}
+
+function initialize() {
+    /*console.log("initialize"); */
+    var query_field = document.getElementById("searchField");
+    var query_button = document.getElementById("searchButton");
+    var results = document.getElementById("searchResults");
+    function keydown(e) {
+        e = e || window.event;
+        var key = e.key;
+        if (!key) {
+            var charCode = e.keyCode || e.which;
+            key = String.fromCharCode(charCode);
+        }
+        if (key == "ArrowUp") {
+            if (search_selection > 0) {
+                search_selection -= 1;
+            }
+        } else if (key == "ArrowDown") {
+            if (search_selection + 1 < results.childElementCount) {
+                search_selection += 1;
+            }
+        } else if (key == "Enter") {
+            if (search_cache && search_cache[1].length > 0) {
+                results.children.item(search_selection).click();
+                return false;
+            }
+        }
+    }
+    q = new URLSearchParams(window.location.search);
+    if (q.has("q")) {
+        search_fill(q.get("q"));
+    }
+    results.onkeydown = keydown;
+    query_field.removeAttribute("disabled");
+    query_button.removeAttribute("disabled");
+    query_field.onkeydown = keydown;
+    query_field.onkeyup = search_fill;
+    query_field.onpaste = function() { setTimeout(search_fill, 100); };
+    query_button.onsubmit = function(e) {
+        if (search_cache && search_cache[1].length > 0) {
+            results.children.item(search_selection).click();
+            return false;
+        }
+    };
+}
+document.addEventListener("DOMContentLoaded", initialize);
+
+</script>
+</body>
+</html>

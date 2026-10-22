@@ -18,20 +18,24 @@ test-hooks = []
 [dependencies]
 pgrx = { version = "=0.19.3", default-features = false }
 charabia = { version = "=0.10.0", default-features = false, features = [
-    "chinese", "hebrew", "japanese", "thai", "korean", "greek", "khmer",
-    "vietnamese", "turkish",
+    "chinese", "japanese", "korean", "thai", "vietnamese", "turkish",
+    "german-segmentation", "latin-camelcase",
 ] }
 fst = "=0.4.7"
 whatlang = "=0.18.0"
 unicode-normalization = "=0.1.26"
 qdrant-rust-stemmers = "=1.2.2"
-stop-words = { version = "=0.10.1", default-features = false, features = ["iso", "nltk"] }
 sha2 = "0.10"
 serde = "1.0"
 serde_json = "1.0"
 
 [build-dependencies]
 sha2 = "0.10"
+charabia = { version = "=0.10.0", default-features = false }
+stop-words = { version = "=0.10.1", default-features = false, features = ["iso", "nltk"] }
+fst = "=0.4.7"
+unicode-normalization = "=0.1.26"
+serde_json = "1.0"
 
 # Keep detection fast in debug workloads without disabling its checks.
 [profile.dev.package.whatlang]

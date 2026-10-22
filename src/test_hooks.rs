@@ -17,6 +17,8 @@ static STATE_RELEASED: AtomicU64 = AtomicU64::new(0);
 static DICTIONARY_LIVE_FST_BYTES: AtomicU64 = AtomicU64::new(0);
 static DICTIONARY_LAST_LEXIZED: AtomicU64 = AtomicU64::new(0);
 static DICTIONARY_LAST_CREATED_FST_BYTES: AtomicU64 = AtomicU64::new(0);
+static DICTIONARY_LIVE_REFERENCED_FST_BYTES: AtomicU64 = AtomicU64::new(0);
+static DICTIONARY_LAST_REFERENCED_FST_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn parser_created() {
     PARSER_CREATED.fetch_add(1, Ordering::Relaxed);
@@ -24,12 +26,15 @@ pub fn parser_created() {
 pub fn parser_dropped() {
     PARSER_DROPPED.fetch_add(1, Ordering::Relaxed);
 }
-pub fn dictionary_created(bytes: usize) -> u64 {
+pub fn dictionary_created(bytes: usize, referenced: usize) -> u64 {
+    DICTIONARY_LAST_REFERENCED_FST_BYTES.store(referenced as u64, Ordering::Relaxed);
+    DICTIONARY_LIVE_REFERENCED_FST_BYTES.fetch_add(referenced as u64, Ordering::Relaxed);
     DICTIONARY_LAST_CREATED_FST_BYTES.store(bytes as u64, Ordering::Relaxed);
     DICTIONARY_LIVE_FST_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
     DICTIONARY_CREATED.fetch_add(1, Ordering::Relaxed) + 1
 }
-pub fn dictionary_dropped(bytes: usize) {
+pub fn dictionary_dropped(bytes: usize, referenced: usize) {
+    DICTIONARY_LIVE_REFERENCED_FST_BYTES.fetch_sub(referenced as u64, Ordering::Relaxed);
     DICTIONARY_DROPPED.fetch_add(1, Ordering::Relaxed);
     DICTIONARY_LIVE_FST_BYTES.fetch_sub(bytes as u64, Ordering::Relaxed);
 }
@@ -128,5 +133,9 @@ fn test_stats() -> JsonB {
         "dictionary_last_created":DICTIONARY_CREATED.load(Ordering::Relaxed),
         "dictionary_last_lexized":DICTIONARY_LAST_LEXIZED.load(Ordering::Relaxed),
         "dictionary_last_created_fst_bytes":DICTIONARY_LAST_CREATED_FST_BYTES.load(Ordering::Relaxed),
+        "dictionary_live_referenced_fst_bytes":DICTIONARY_LIVE_REFERENCED_FST_BYTES.load(Ordering::Relaxed),
+        "dictionary_last_referenced_fst_bytes":DICTIONARY_LAST_REFERENCED_FST_BYTES.load(Ordering::Relaxed),
+        "embedded_stop_fst_bytes":crate::resources::STOP_DATA.iter().flatten().map(|data|data.bytes.len()).sum::<usize>(),
+        "embedded_english_fst_bytes":crate::resources::ENGLISH_BYTES.len(),
     }))
 }

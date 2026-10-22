@@ -9,14 +9,17 @@ mod benchmark_tests;
 mod dictionary;
 mod headline;
 mod language;
+mod language_data;
 mod parser;
 mod pg_ffi;
+mod prepare;
+mod resources;
 mod routes;
 mod stopwords;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
 
-const ANALYSIS_REVISION: &str = "native-dictionary-0.3.0";
+const ANALYSIS_REVISION: &str = "route16-english-shared-fst-1";
 
 #[pg_extern(sql = false)]
 fn analysis_info() -> JsonB {
@@ -29,13 +32,14 @@ fn analysis_info() -> JsonB {
     let languages = routes::LanguageId::ALL.map(|language| serde_json::json!({
         "language":language.alias(),"script":format!("{:?}",language.script()),
         "has_stopwords":language.has_stopwords(),"stemmer":language.algorithm().map(|a|format!("{a:?}")),
-        "defaults":{"discard":language.has_stopwords(),"stem":language.algorithm().is_some(),"normalize":true,"filter":false}
+        "english_eligible":language.english_eligible(),
+        "defaults":{"discard":language.has_stopwords(),"stem":language.default_stem(language.default_english(false)),"english":language.default_english(false),"normalize":true,"filter":false}
     }));
     JsonB(serde_json::json!({
         "extension":env!("CARGO_PKG_VERSION"),"pgrx":"0.19.3","charabia":"0.10.0","target":env!("PG_CHARABIA_TARGET"),
         "cargo_lock_sha256":env!("PG_CHARABIA_LOCK_SHA256"),"resource_manifest_sha256":env!("PG_CHARABIA_RESOURCES_SHA256"),
         "analysis_revision":ANALYSIS_REVISION,"resource_fingerprint":format!("{:x}",Sha256::digest(fingerprint.as_bytes())),
-        "language_count":71,"languages":languages.as_slice(),
+        "language_count":routes::LanguageId::ALL.len(),"languages":languages.as_slice(),
         "resources":serde_json::from_str::<serde_json::Value>(include_str!("../resources/manifest.json")).expect("fixed resource manifest")
     }))
 }

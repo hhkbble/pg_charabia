@@ -153,7 +153,7 @@ def repeated_requests():
 def cache_invalidation():
     state = results["cache_invalidation"]
     state.update({"builtin_language": "eng", "sentinel": "the", "warmup": [], "control": [], "measurement": [],
-                  "basis": "Pinned NLTK English stoplist contains the; Discard=false owns no FST"})
+                  "basis": "Pinned NLTK English stoplist contains the; Discard=false references no stop FST; all FST bytes are static"})
     # This test measures one real dictionary lifecycle, independent of automatic
     # language quality. All lexical types deliberately map to the same English
     # dictionary; blank/display types remain unmapped.
@@ -190,12 +190,12 @@ END $map$;""")
         baseline = initial.get("hooks")
         if baseline is not None:
             state["initial_active_dictionary_count"] = baseline["dictionary_created"] - baseline["dictionary_dropped"]
-            assert baseline["dictionary_last_created_fst_bytes"] == 0, baseline
+            assert baseline["dictionary_last_referenced_fst_bytes"] == 0, baseline
             state["baseline_other_dictionary_live"] = (
                 baseline["dictionary_created"] - baseline["dictionary_dropped"] - 1
             )
             state["baseline_other_fst_bytes"] = (
-                baseline["dictionary_live_fst_bytes"] - baseline["dictionary_last_created_fst_bytes"]
+                baseline["dictionary_live_referenced_fst_bytes"] - baseline["dictionary_last_referenced_fst_bytes"]
             )
             state["baseline_callbacks_live"] = baseline["state_registered"] - baseline["state_released"]
 
@@ -203,12 +203,15 @@ END $map$;""")
             if not HAS_HOOKS:
                 return
             current = sample["hooks"]
+            assert current["dictionary_live_fst_bytes"] == 0 and current["dictionary_last_created_fst_bytes"] == 0, sample
+            assert current["embedded_stop_fst_bytes"] == 30190, sample
+            assert current["embedded_english_fst_bytes"] > 0, sample
             assert current["dictionary_last_created"] == current["dictionary_last_lexized"], sample
             assert current["dictionary_created"] - current["dictionary_dropped"] == (
                 state["baseline_other_dictionary_live"] + 1
             ), sample
-            assert current["dictionary_live_fst_bytes"] == (
-                state["baseline_other_fst_bytes"] + current["dictionary_last_created_fst_bytes"]
+            assert current["dictionary_live_referenced_fst_bytes"] == (
+                state["baseline_other_fst_bytes"] + current["dictionary_last_referenced_fst_bytes"]
             ), sample
             assert current["state_registered"] - current["state_released"] == state["baseline_callbacks_live"], sample
             assert current["parser_created"] == current["parser_dropped"], sample
@@ -229,7 +232,7 @@ END $map$;""")
             checkpoint()
             assert (("'the':" in value) == (selection == 0)) and "'alpha':" in value and "'beta':" in value, sample
             if HAS_HOOKS:
-                fst_bytes = sample["hooks"]["dictionary_last_created_fst_bytes"]
+                fst_bytes = sample["hooks"]["dictionary_last_referenced_fst_bytes"]
                 assert (fst_bytes > 0) if selection else (fst_bytes == 0), sample
             check_state(sample, before, replaced)
 

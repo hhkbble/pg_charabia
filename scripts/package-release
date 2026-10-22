@@ -19,8 +19,8 @@ def require(condition, message):
 
 def copy_committed_sources(delivery, commit):
     """Copy the tested Git snapshot without ignored or local-only descendants."""
-    paths = ("LICENSE", "README.md", "scripts", "tests", "docs", "Cargo.toml",
-             "rust-toolchain.toml", "pg_charabia.control", "docker/environment.lock.json")
+    paths = ("LICENSE", "README.md", "AGENTS.md", ".gitattributes", ".gitignore", "scripts", "tests", "docs", "src", "sql", "resources", "docker",
+             "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "pg_charabia.control")
     entries = subprocess.check_output(["git", "ls-tree", "-rz", "--full-tree", commit, "--", *paths], cwd=ROOT)
     copied = set()
     for entry in entries.split(b"\0"):
@@ -30,12 +30,14 @@ def copy_committed_sources(delivery, commit):
         mode, kind, object_id = metadata.decode("ascii").split()
         relative = filename.decode("utf-8")
         require(mode in ("100644", "100755") and kind == "blob", f"Refusing non-regular source input: {relative}")
-        target = delivery / ("environment.lock.json" if relative == "docker/environment.lock.json" else relative)
+        target = delivery / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(subprocess.check_output(["git", "cat-file", "blob", object_id], cwd=ROOT))
         target.chmod(0o755 if mode == "100755" else 0o644)
         copied.add(relative)
-    require(set(paths) - {"scripts", "tests", "docs"} <= copied, "Required delivery source files are not committed")
+    for relative in ("src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "docker/environment.lock.json", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz"):
+        require(relative in copied, f"Required rebuild/relink source file is not committed: {relative}")
+    require(set(paths) - {"scripts", "tests", "docs", "src", "sql", "resources", "docker"} <= copied, "Required delivery source files are not committed")
 
 
 def main():
@@ -62,6 +64,9 @@ def main():
     package = inner_dir / "package"
     try:
         verify_checksums(package)
+        resources=json.loads((ROOT/"resources/manifest.json").read_text())
+        for source in resources["rebuild_source_archives"]:
+            require(digest(package/source["package_path"])==source["sha256"], "Missing or changed corresponding source archive")
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     libraries = list((package / "extension").glob("pg_charabia.so"))

@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Check English extraction with independent, small source fixtures."""
+import gzip
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+SPEC = importlib.util.spec_from_file_location("generate_english", Path(__file__).with_name("generate-english.py"))
+GENERATOR = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(GENERATOR)
+
+
+class EnglishGeneratorTests(unittest.TestCase):
+    def setUp(self):
+        self.owned = tempfile.TemporaryDirectory(prefix="pg-charabia-english-test-")
+        self.addCleanup(self.owned.cleanup)
+        self.root = Path(self.owned.name)
+        rows = [
+            {"lang_code": "en", "word": "Running Shoes", "forms": [
+                {"form": "RUNS"}, {"form": "child-like"}, {"form": "café"},
+                {"form": "can't"}, {"form": "Foo_bar"}, {"form": "A\u001cB"},
+            ], "senses": [{"glosses": ["NEVERDEFINITION"]}],
+             "translations": [{"word": "NEVERTRANSLATION"}]},
+            {"lang_code": "de", "word": "NEVERGERMAN", "forms": [{"form": "ALSONEVER"}]},
+            {"lang_code": "en", "word": "Cats", "forms": [{"form": "cats"}]},
+            {"lang_code": "en", "word": "Café", "forms": [{"form": "CAFES"}]},
+        ]
+        self.kaikki = self.root / "tiny.jsonl.gz"
+        self.kaikki.write_bytes(gzip.compress(("\n".join(json.dumps(row) for row in rows) + "\n").encode(), mtime=0))
+        self.esdb = self.root / "tiny.txt"
+        self.esdb.write_bytes(b"Shoes\ndogs\nside-effect\nZEBRA\n")
+        self.manifest = {"format": 1, "inputs": [self.row(self.kaikki, "kaikki"), self.row(self.esdb, "esdb")]}
+        self.manifest_path = self.root / "sources.json"
+        self.save_manifest()
+
+    def row(self, path, kind):
+        data = path.read_bytes()
+        return {"file": path.name, "kind": kind, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "compression": "gzip" if path.suffix == ".gz" else "none"}
+
+    def save_manifest(self):
+        self.manifest_path.write_text(json.dumps(self.manifest), encoding="utf-8")
+
+    def generate(self, name):
+        return GENERATOR.generate(self.manifest_path, self.root, self.root / name)
+
+    def test_exact_words_and_parent_attribution(self):
+        result = self.generate("one")
+        self.assertEqual((self.root / "one/words.txt").read_bytes(), b"a\nb\ncafes\ncats\ndogs\nrunning\nruns\nshoes\nzebra\n")
+        self.assertEqual(gzip.decompress((self.root / "one/attribution/headword-pages.txt.gz").read_bytes()), b"https://en.wiktionary.org/wiki/Caf%C3%A9\nhttps://en.wiktionary.org/wiki/Cats\nhttps://en.wiktionary.org/wiki/Running_Shoes\n")
+        self.assertEqual(result["words"], 9)
+        self.assertEqual(result["parent_pages"], 3)
+        self.assertEqual(result["counts"]["english_records"], 3)
+        self.assertEqual(result["counts"]["rejected_parts"], 6)
+
+    def test_deterministic_files(self):
+        self.generate("one")
+        self.generate("two")
+        for name in ("words.txt", "attribution/headword-pages.txt.gz", "generation.json"):
+            self.assertEqual((self.root / "one" / name).read_bytes(), (self.root / "two" / name).read_bytes())
+
+    def test_all_hashes_checked_before_any_output(self):
+        self.manifest["inputs"][1]["sha256"] = "0" * 64
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+            self.generate("failed")
+        self.assertFalse((self.root / "failed").exists())
+
+    def test_expected_output_identity_is_required_when_pinned(self):
+        self.manifest["expected_words"] = {"sha256": "0" * 64, "bytes": 1, "entries": 1}
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, "generated words differ"):
+            self.generate("failed")
+        self.assertFalse((self.root / "failed").exists())
+
+    def test_rejects_input_traversal_and_ambiguous_sources(self):
+        self.manifest["inputs"][0]["file"] = "../tiny.jsonl.gz"
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, "plain filename"):
+            self.generate("failed")
+        self.manifest["inputs"][0]["file"] = self.kaikki.name
+        self.manifest["inputs"].append(self.manifest["inputs"][0].copy())
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, "duplicate input"):
+            self.generate("failed")
+
+    def test_does_not_overwrite_source(self):
+        self.esdb.rename(self.root / "words.txt")
+        self.esdb = self.root / "words.txt"
+        self.manifest["inputs"][1] = self.row(self.esdb, "esdb")
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, "overwrite an input"):
+            GENERATOR.generate(self.manifest_path, self.root, self.root)
+        self.assertEqual(self.esdb.read_bytes(), b"Shoes\ndogs\nside-effect\nZEBRA\n")
+
+    def test_does_not_overwrite_manifest(self):
+        for filename in ("generation.json", "words.txt"):
+            with self.subTest(filename=filename):
+                self.manifest_path=self.root/filename
+                self.save_manifest()
+                before=self.manifest_path.read_bytes()
+                with self.assertRaisesRegex(ValueError,"overwrite an input"):
+                    GENERATOR.generate(self.manifest_path,self.root,self.root)
+                self.assertEqual(self.manifest_path.read_bytes(),before)
+
+    def test_invalid_source_schema_fails_before_output(self):
+        self.kaikki.write_bytes(gzip.compress(b'{"lang_code":"en","word":"Good","forms":[{"form":null}]}\n', mtime=0))
+        self.manifest["inputs"][0] = self.row(self.kaikki, "kaikki")
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, "word/form must be a string"):
+            self.generate("failed")
+        self.assertFalse((self.root / "failed").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

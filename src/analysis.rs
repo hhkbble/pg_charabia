@@ -1,51 +1,17 @@
 //! One-pass raw segmentation and independent, bounded dictionary analysis.
-use std::borrow::Cow;
 use std::fmt;
 
-use charabia::normalizer::{
-    Classifier, ClassifierOption, CompatibilityDecompositionNormalizer, ControlCharNormalizer,
-    Normalizer, NormalizerOption,
-};
-use charabia::{Normalize, Script, Token, TokenKind, TokenizerBuilder};
+use charabia::{Script, TokenKind, TokenizerBuilder};
 use qdrant_rust_stemmers::Stemmer;
 use unicode_normalization::UnicodeNormalization;
 
 pub use crate::language::LanguageSource;
+use crate::prepare::finalize;
+pub use crate::prepare::{
+    AnalysisError, ErrorKind, MAX_INPUT_BYTES, MAX_RAW_TOKEN_BYTES, MAX_STEM_BYTES, Prepared,
+    check_input, is_word, prepare,
+};
 use crate::routes::{LanguageId, TokenType};
-
-pub const MAX_INPUT_BYTES: usize = 262_144;
-pub const MAX_RAW_TOKEN_BYTES: usize = 2_046;
-pub const MAX_STEM_BYTES: usize = 1_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    InvalidInput,
-    Limit,
-    Internal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnalysisError {
-    pub kind: ErrorKind,
-    pub message: String,
-}
-
-impl AnalysisError {
-    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for AnalysisError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for AnalysisError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -66,8 +32,11 @@ pub struct Options {
     stem: bool,
     normalize: bool,
     filter: bool,
-    stops: Option<crate::stopwords::EffectiveStops>,
+    english: bool,
+    stops: Option<&'static crate::resources::StopSet>,
+    english_stops: Option<&'static crate::resources::StopSet>,
     stemmer: Option<Stemmer>,
+    english_stemmer: Option<Stemmer>,
 }
 
 impl fmt::Debug for Options {
@@ -78,7 +47,9 @@ impl fmt::Debug for Options {
             .field("stem", &self.stem)
             .field("normalize", &self.normalize)
             .field("filter", &self.filter)
-            .field("fst_bytes", &self.fst_bytes())
+            .field("english", &self.english)
+            .field("owned_fst_bytes", &self.fst_bytes())
+            .field("referenced_fst_bytes", &self.referenced_fst_bytes())
             .field("effective_stopwords", &self.effective_stopwords())
             .field("excluded_builtin_count", &self.excluded_builtin_count())
             .finish()
@@ -92,17 +63,12 @@ impl Options {
         stem: bool,
         normalize: bool,
         filter: bool,
+        english: bool,
     ) -> Result<Self, AnalysisError> {
-        if discard && !language.has_stopwords() {
+        if english && (!language.english_eligible() || filter) {
             return Err(AnalysisError::new(
                 ErrorKind::InvalidInput,
-                "language has no builtin stopword table",
-            ));
-        }
-        if stem && language.algorithm().is_none() {
-            return Err(AnalysisError::new(
-                ErrorKind::InvalidInput,
-                "language has no stemming algorithm",
+                "English requires an eligible Latin language and Filter=false",
             ));
         }
         if filter && stem {
@@ -111,49 +77,116 @@ impl Options {
                 "Filter requires Stem=false",
             ));
         }
+        if discard && !language.has_stopwords() {
+            return Err(AnalysisError::new(
+                ErrorKind::InvalidInput,
+                "language has no builtin stopword table",
+            ));
+        }
+        if stem && language.algorithm().is_none() && !english {
+            return Err(AnalysisError::new(
+                ErrorKind::InvalidInput,
+                "language has no active stemming algorithm",
+            ));
+        }
         Ok(Self {
             language,
             discard,
             stem,
             normalize,
             filter,
+            english,
             stops: discard
-                .then(|| crate::stopwords::build(language))
-                .transpose()?,
+                .then(|| crate::stopwords::stop_set(language))
+                .flatten(),
+            english_stops: (discard && english)
+                .then(|| crate::stopwords::stop_set(LanguageId::ENG))
+                .flatten(),
             stemmer: stem
                 .then(|| language.algorithm().map(Stemmer::create))
                 .flatten(),
+            english_stemmer: (stem && english)
+                .then(|| Stemmer::create(qdrant_rust_stemmers::Algorithm::English)),
         })
     }
 
     pub fn language(&self) -> LanguageId {
         self.language
     }
+    /// Dictionary states borrow immutable FST bytes; reset owns none of them.
     pub fn fst_bytes(&self) -> usize {
-        self.stops
-            .as_ref()
-            .map_or(0, |s| s.fst.as_fst().as_bytes().len())
+        0
+    }
+    pub fn referenced_fst_bytes(&self) -> usize {
+        [self.stops, self.english_stops]
+            .into_iter()
+            .flatten()
+            .map(|set| set.fst.as_fst().as_bytes().len())
+            .sum()
     }
     pub fn effective_stopwords(&self) -> usize {
-        self.stops.as_ref().map_or(0, |s| s.fst.len())
+        [self.stops, self.english_stops]
+            .into_iter()
+            .flatten()
+            .map(|set| set.fst.len())
+            .sum()
     }
     pub fn excluded_builtin_count(&self) -> usize {
-        self.stops.as_ref().map_or(0, |s| s.excluded_builtin_count)
+        [self.stops, self.english_stops]
+            .into_iter()
+            .flatten()
+            .map(|set| set.excluded_builtin_count)
+            .sum()
     }
 }
 
+/// One to four distinct, nonempty alternatives at a single PG position.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prepared {
-    pub kind: TokenKind,
-    pub key: String,
+pub struct Terms {
+    terms: [String; 4],
+    len: usize,
+}
+
+impl Terms {
+    fn new(first: String) -> Option<Self> {
+        if first.is_empty() {
+            return None;
+        }
+        Some(Self {
+            terms: [first, String::new(), String::new(), String::new()],
+            len: 1,
+        })
+    }
+    fn add(&mut self, term: String) {
+        if !term.is_empty() && !self.iter().any(|existing| existing == term) {
+            // Only two branches, each with surface plus one stem, reach here.
+            assert!(
+                self.len < self.terms.len(),
+                "more than four dictionary terms"
+            );
+            self.terms[self.len] = term;
+            self.len += 1;
+        }
+    }
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.terms[..self.len].iter().map(String::as_str)
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl IntoIterator for Terms {
+    type Item = String;
+    type IntoIter = std::iter::Take<std::array::IntoIter<String, 4>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.terms.into_iter().take(self.len)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LexizeOutcome {
-    Terms {
-        first: String,
-        second: Option<String>,
-    },
+    Terms(Terms),
     Filter(String),
     Stop,
     Ignore,
@@ -163,13 +196,7 @@ impl LexizeOutcome {
     #[cfg(test)]
     pub fn into_terms(self) -> Vec<String> {
         match self {
-            Self::Terms { first, second } => {
-                let mut terms = vec![first];
-                if let Some(second) = second {
-                    terms.push(second);
-                }
-                terms
-            }
+            Self::Terms(terms) => terms.into_iter().collect(),
             Self::Filter(term) => vec![term],
             Self::Stop | Self::Ignore => Vec::new(),
         }
@@ -183,29 +210,15 @@ pub struct TokenAnalysis {
     pub outcome: LexizeOutcome,
 }
 
-pub fn check_input(input: &str) -> Result<(), AnalysisError> {
-    if input.len() > MAX_INPUT_BYTES {
-        return Err(AnalysisError::new(
-            ErrorKind::Limit,
-            "Charabia input exceeds 262144 bytes",
-        ));
-    }
-    if input.contains('\0') {
-        return Err(AnalysisError::new(
-            ErrorKind::InvalidInput,
-            "Charabia input contains NUL",
-        ));
-    }
-    Ok(())
-}
-
 pub fn segment(input: &str) -> Result<Vec<Span>, AnalysisError> {
     segment_counted(input).map(|(spans, _)| spans)
 }
 
 pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), AnalysisError> {
     check_input(input)?;
+    let allowed = crate::language_data::LANGUAGES.map(|row| row.0);
     let mut builder = TokenizerBuilder::default();
+    builder.allow_list(&allowed);
     let tokenizer = builder.build();
     let mut spans = Vec::new();
     let mut previous_byte = 0;
@@ -246,10 +259,19 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
         ));
     }
     let calls = crate::language::complete(input, &mut spans)?;
-    let mut bounded = Vec::with_capacity(spans.len());
-    for mut span in spans {
+    // Classify each upstream span once. The merge and type assignment reuse it.
+    let classified = spans
+        .into_iter()
+        .map(|span| {
+            let word = is_word(&input[span.start..span.end]);
+            (span, word)
+        })
+        .collect();
+    let restored = restore_english(input, classified, crate::resources::english_contains);
+    let mut bounded = Vec::with_capacity(restored.len());
+    for (mut span, word) in restored {
         if span.end - span.start <= MAX_RAW_TOKEN_BYTES {
-            span.token_type = if is_word(&input[span.start..span.end]) {
+            span.token_type = if word {
                 TokenType::Language(span.route)
             } else {
                 TokenType::Blank
@@ -282,6 +304,58 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
     Ok((bounded, calls))
 }
 
+/// Restore only a complete split ASCII envelope; never search its substrings.
+fn restore_english(
+    input: &str,
+    spans: Vec<(Span, bool)>,
+    mut contains: impl FnMut(&str) -> bool,
+) -> Vec<(Span, bool)> {
+    let mut output = Vec::with_capacity(spans.len());
+    let mut first = 0;
+    while first < spans.len() {
+        let mut end = first + 1;
+        if spans[first].1 {
+            while end < spans.len() && spans[end].1 && spans[end - 1].0.end == spans[end].0.start {
+                end += 1;
+            }
+        }
+        let span = spans[first].0;
+        let last = spans[end - 1].0;
+        let raw = &input[span.start..last.end];
+        let same_metadata = spans[first..end].iter().all(|(current, _)| {
+            current.script == span.script && current.charabia_language == span.charabia_language
+        });
+        let attached =
+            |c: char| c.is_alphanumeric() || unicode_normalization::char::is_combining_mark(c);
+        let is_attached = input[..span.start]
+            .chars()
+            .next_back()
+            .is_some_and(attached)
+            || input[last.end..].chars().next().is_some_and(attached);
+        if end - first >= 2
+            && same_metadata
+            && !is_attached
+            && raw.bytes().all(|byte| byte.is_ascii_alphabetic())
+            && contains(&raw.to_ascii_lowercase())
+        {
+            output.push((
+                Span {
+                    end: last.end,
+                    char_end: last.char_end,
+                    route: LanguageId::ENG,
+                    language_source: LanguageSource::EnglishMerge,
+                    ..span
+                },
+                true,
+            ));
+        } else {
+            output.extend_from_slice(&spans[first..end]);
+        }
+        first = end;
+    }
+    output
+}
+
 fn checked_span(
     input: &str,
     start: usize,
@@ -302,85 +376,6 @@ fn checked_span(
     })
 }
 
-fn normalizer(lossy: bool) -> NormalizerOption<'static> {
-    NormalizerOption {
-        create_char_map: false,
-        lossy,
-        classifier: ClassifierOption {
-            stop_words: None,
-            separators: None,
-        },
-    }
-}
-
-pub fn prepare(raw: &str, route: LanguageId) -> Result<Prepared, AnalysisError> {
-    check_input(raw)?;
-    let token = Token {
-        lemma: Cow::Borrowed(raw),
-        script: route.script(),
-        language: route.language(),
-        ..Token::default()
-    }
-    .normalize(&normalizer(false));
-    if matches!(token.kind, TokenKind::Unknown | TokenKind::StopWord) {
-        return Err(AnalysisError::new(
-            ErrorKind::Internal,
-            "unexpected Charabia classification without a stop set",
-        ));
-    }
-    let nfc: String = token.lemma.nfc().collect();
-    let lowered = if route.language() == Some(charabia::Language::Tur) {
-        let mut text = String::with_capacity(nfc.len());
-        for character in nfc.chars() {
-            match character {
-                'I' => text.push('ı'),
-                'İ' => text.push('i'),
-                other => text.extend(other.to_lowercase()),
-            }
-        }
-        text
-    } else {
-        nfc.to_lowercase()
-    };
-    Ok(Prepared {
-        kind: token.kind,
-        key: lowered.nfc().collect(),
-    })
-}
-
-fn finalize(key: &str, route: LanguageId) -> String {
-    Token {
-        kind: TokenKind::Word,
-        lemma: Cow::Borrowed(key),
-        script: route.script(),
-        language: route.language(),
-        ..Token::default()
-    }
-    .normalize(&normalizer(true))
-    .lemma
-    .into_owned()
-}
-
-/// The Parser needs classification only, and must not prepare a dictionary key.
-/// This prefix is language independent for the locked feature set.
-pub fn is_word(raw: &str) -> bool {
-    let mut token = Token {
-        lemma: Cow::Borrowed(raw),
-        ..Token::default()
-    };
-    let options = normalizer(false);
-    for step in [
-        &CompatibilityDecompositionNormalizer as &dyn Normalizer,
-        &ControlCharNormalizer,
-        &Classifier,
-    ] {
-        if step.should_normalize(&token) {
-            token = step.normalize(token, &options);
-        }
-    }
-    token.kind == TokenKind::Word && !token.lemma.is_empty()
-}
-
 pub fn stem_eligible(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= MAX_STEM_BYTES
@@ -389,19 +384,13 @@ pub fn stem_eligible(key: &str) -> bool {
             .all(|c| c.is_alphabetic() || unicode_normalization::char::is_combining_mark(c))
 }
 
-pub fn inspect(
+fn branch(
     raw: &str,
     language: LanguageId,
     options: &Options,
+    stops: Option<&crate::resources::StopSet>,
+    stemmer: Option<&Stemmer>,
 ) -> Result<TokenAnalysis, AnalysisError> {
-    if language != options.language {
-        return Err(AnalysisError::new(
-            ErrorKind::Internal,
-            "dictionary options belong to another language",
-        ));
-    }
-    // This independent prepare is necessary: direct LEXIZE and earlier filters
-    // can supply bytes which never passed through this Parser.
     let Prepared { kind, key } = prepare(raw, language)?;
     if kind != TokenKind::Word || key.is_empty() {
         return Ok(TokenAnalysis {
@@ -410,26 +399,13 @@ pub fn inspect(
             outcome: LexizeOutcome::Ignore,
         });
     }
-    if options
-        .stops
-        .as_ref()
-        .is_some_and(|stops| stops.fst.contains(&key))
-    {
+    if stops.is_some_and(|set| set.fst.contains(&key)) {
         return Ok(TokenAnalysis {
             prepared: Some(key),
             kind: TokenKind::StopWord,
             outcome: LexizeOutcome::Stop,
         });
     }
-    let finish = |key: &str| {
-        if options.normalize {
-            finalize(key, language)
-        } else {
-            key.nfc().collect()
-        }
-    };
-    // prepare already guarantees NFC; only the independently returned stem
-    // needs NFC work when the finalizer is disabled.
     let surface = if options.normalize {
         finalize(&key, language)
     } else {
@@ -443,29 +419,85 @@ pub fn inspect(
             LexizeOutcome::Filter(surface)
         }
     } else {
-        let stem = options
-            .stemmer
-            .as_ref()
-            .filter(|_| stem_eligible(&key))
-            .map(|stemmer| finish(&stemmer.stem(&key)));
-        let stem = stem.filter(|term| !term.is_empty() && *term != surface);
-        if surface.is_empty() {
-            stem.map_or(LexizeOutcome::Ignore, |first| LexizeOutcome::Terms {
-                first,
-                second: None,
-            })
-        } else {
-            LexizeOutcome::Terms {
-                first: surface,
-                second: stem,
+        let stem = stemmer.filter(|_| stem_eligible(&key)).map(|stemmer| {
+            let stem = stemmer.stem(&key);
+            if options.normalize {
+                finalize(&stem, language)
+            } else {
+                stem.nfc().collect()
+            }
+        });
+        let mut terms = Terms::new(surface);
+        if let Some(stem) = stem {
+            if let Some(terms) = &mut terms {
+                terms.add(stem);
+            } else {
+                terms = Terms::new(stem);
             }
         }
+        terms.map_or(LexizeOutcome::Ignore, LexizeOutcome::Terms)
     };
     Ok(TokenAnalysis {
         prepared: Some(key),
         kind,
         outcome,
     })
+}
+
+pub fn inspect(
+    raw: &str,
+    language: LanguageId,
+    options: &Options,
+) -> Result<TokenAnalysis, AnalysisError> {
+    if language != options.language {
+        return Err(AnalysisError::new(
+            ErrorKind::Internal,
+            "dictionary options belong to another language",
+        ));
+    }
+    // Direct LEXIZE and earlier filters may supply bytes never seen by Parser.
+    let mut native = branch(
+        raw,
+        language,
+        options,
+        options.stops,
+        options.stemmer.as_ref(),
+    )?;
+    if options.english
+        && !raw.is_empty()
+        && raw.bytes().all(|byte| byte.is_ascii_alphabetic())
+        && crate::resources::english_contains(&raw.to_ascii_lowercase())
+    {
+        let english = branch(
+            raw,
+            LanguageId::ENG,
+            options,
+            options.english_stops,
+            options.english_stemmer.as_ref(),
+        )?;
+        match english.outcome {
+            LexizeOutcome::Terms(english_terms) => {
+                match &mut native.outcome {
+                    LexizeOutcome::Terms(native_terms) => {
+                        for term in english_terms {
+                            native_terms.add(term);
+                        }
+                    }
+                    _ => native.outcome = LexizeOutcome::Terms(english_terms),
+                }
+                native.kind = TokenKind::Word;
+            }
+            LexizeOutcome::Stop if !matches!(native.outcome, LexizeOutcome::Terms(_)) => {
+                native.kind = TokenKind::StopWord;
+                native.outcome = LexizeOutcome::Stop;
+            }
+            LexizeOutcome::Stop => {}
+            LexizeOutcome::Ignore | LexizeOutcome::Filter(_) => {
+                unreachable!("an active ASCII English branch is Terms or Stop")
+            }
+        }
+    }
+    Ok(native)
 }
 
 pub fn normalize(
@@ -484,12 +516,22 @@ mod tests {
     fn route(language: Language) -> LanguageId {
         LanguageId::from_language(Some(language)).unwrap()
     }
+    fn options(
+        language: LanguageId,
+        discard: bool,
+        stem: bool,
+        normalize: bool,
+        filter: bool,
+        english: bool,
+    ) -> Options {
+        Options::new(language, discard, stem, normalize, filter, english).unwrap()
+    }
     fn terms(raw: &str, language: Language, stemming: bool) -> Vec<String> {
-        let route = route(language);
+        let language = route(language);
         normalize(
             raw,
-            route,
-            &Options::new(route, false, stemming, true, false).unwrap(),
+            language,
+            &options(language, false, stemming, true, false, false),
         )
         .unwrap()
         .into_terms()
@@ -497,49 +539,61 @@ mod tests {
 
     #[test]
     fn fixed_language_capabilities_bound_the_boolean_state_space() {
-        // This verifies the finite option contract, not statistical language quality.
-        let mut groups = [0usize; 3];
+        // The independent conditions enumerate option validity, not detector quality.
+        let mut groups = [0usize; 5];
         let mut legal = 0;
+        let mut defaults = [0usize; 3];
         for language in LanguageId::ALL {
-            let stops = language.has_stopwords();
-            let stems = language.algorithm().is_some();
-            assert!(
-                !stems || stops,
-                "the fixed resources have no stem-only language"
-            );
-            groups[if stems {
-                0
-            } else if stops {
-                1
-            } else {
-                2
-            }] += 1;
-            for bits in 0..16 {
-                let (d, s, n, f) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
-                let expected = (!d || stops) && (!s || stems) && !(s && f);
-                let actual = Options::new(language, d, s, n, f);
+            let stop = language.has_stopwords();
+            let stem = language.algorithm().is_some();
+            let eligible = language.english_eligible();
+            let group = match (eligible, stop, stem) {
+                (true, true, true) => 0,
+                (true, true, false) => 1,
+                (false, true, true) => 2,
+                (false, true, false) => 3,
+                (false, false, false) => 4,
+                _ => panic!("unreachable capability combination"),
+            };
+            groups[group] += 1;
+            defaults[0] += usize::from(stop);
+            defaults[1] += usize::from(language.default_stem(language.default_english(false)));
+            defaults[2] += usize::from(language.default_english(false));
+            for bits in 0..32 {
+                let (d, s, n, f, e) = (
+                    bits & 1 != 0,
+                    bits & 2 != 0,
+                    bits & 4 != 0,
+                    bits & 8 != 0,
+                    bits & 16 != 0,
+                );
+                let expected =
+                    (!e || eligible) && !(e && f) && !(s && f) && (!d || stop) && (!s || stem || e);
+                let actual = Options::new(language, d, s, n, f, e);
                 assert_eq!(actual.is_ok(), expected, "{}: {bits}", language.alias());
                 legal += usize::from(expected);
                 if let Ok(options) = actual {
                     assert_eq!(options.stops.is_some(), d);
+                    assert_eq!(options.english_stops.is_some(), d && e);
+                    assert_eq!(options.fst_bytes(), 0);
                 }
             }
         }
-        assert_eq!(groups, [19, 33, 19]);
-        assert_eq!(legal, 568);
+        assert_eq!(groups, [7, 1, 3, 4, 1]);
+        assert_eq!(defaults, [15, 11, 8]);
+        assert_eq!(legal, 228);
     }
 
     #[test]
     fn independent_algorithm_goldens_preserve_pre_stem_unicode() {
-        // English is the crate's documented example; the accented examples are
-        // preserved real upstream API runs in general-language/probes records.
+        // English is the crate's documented sample. Accented French/Turkish
+        // outputs are retained direct upstream runs, not generated expectations.
         assert_eq!(
             terms("fruitlessly", Language::Eng, true),
             ["fruitlessly", "fruitless"]
         );
         assert_eq!(terms("aimées", Language::Fra, true), ["aimees", "aim"]);
         assert_eq!(terms("IŞIKLAR", Language::Tur, true), ["isiklar", "isik"]);
-        assert_eq!(terms("hästarna", Language::Swe, true), ["hastarna", "hast"]);
         assert_eq!(
             prepare("AIME\u{301}ES", route(Language::Fra)).unwrap().key,
             "aimées"
@@ -551,11 +605,11 @@ mod tests {
 
     #[test]
     fn independent_switches_preserve_surface_and_stop_order() {
-        let r = route(Language::Eng);
-        let on = Options::new(r, true, true, true, false).unwrap();
-        let no_stem = Options::new(r, true, false, true, false).unwrap();
-        let no_stop = Options::new(r, false, true, true, false).unwrap();
-        let no_fold = Options::new(r, true, true, false, false).unwrap();
+        let r = LanguageId::ENG;
+        let on = options(r, true, true, true, false, false);
+        let no_stem = options(r, true, false, true, false, false);
+        let no_stop = options(r, false, true, true, false, false);
+        let no_fold = options(r, true, true, false, false, false);
         for options in [&on, &no_stem, &no_fold] {
             assert_eq!(normalize("THE", r, options).unwrap(), LexizeOutcome::Stop);
         }
@@ -568,9 +622,10 @@ mod tests {
             normalize("running", r, &on).unwrap().into_terms(),
             ["running", "run"]
         );
-        assert_eq!(no_stop.fst_bytes(), 0);
+        assert_eq!(on.fst_bytes(), 0);
+        assert!(on.referenced_fst_bytes() > 0);
+        assert_eq!(no_stop.referenced_fst_bytes(), 0);
         assert_eq!(no_stop.effective_stopwords(), 0);
-        assert!(on.fst_bytes() > 0);
         assert_eq!(terms("run", Language::Eng, true), ["run"]);
         assert_eq!(terms("123", Language::Eng, true), ["123"]);
         assert_eq!(terms("foo_bar", Language::Eng, true), ["foo_bar"]);
@@ -581,20 +636,28 @@ mod tests {
         for (language, raw, expected) in [
             (Language::Fra, "aimées", ["aimées", "aim"]),
             (Language::Tur, "IŞIKLAR", ["ışıklar", "ışık"]),
-            (Language::Swe, "hästarna", ["hästarna", "häst"]),
         ] {
             let r = route(language);
-            let options = Options::new(r, false, true, false, false).unwrap();
-            assert_eq!(normalize(raw, r, &options).unwrap().into_terms(), expected);
+            assert_eq!(
+                normalize(raw, r, &options(r, false, true, false, false, false))
+                    .unwrap()
+                    .into_terms(),
+                expected
+            );
         }
         for (language, raw, plain, folded) in [
             (LanguageId::UND, "CAFÉ", "café", "cafe\u{301}"),
             (route(Language::Jpn), "ダメ", "ダメ", "た\u{3099}め"),
         ] {
             for (fold, expected) in [(false, plain), (true, folded)] {
-                let options = Options::new(language, false, false, fold, false).unwrap();
                 assert_eq!(
-                    normalize(raw, language, &options).unwrap().into_terms(),
+                    normalize(
+                        raw,
+                        language,
+                        &options(language, false, false, fold, false, false)
+                    )
+                    .unwrap()
+                    .into_terms(),
                     [expected]
                 );
             }
@@ -602,11 +665,95 @@ mod tests {
     }
 
     #[test]
+    fn english_branch_preserves_native_terms_and_aggregates_stops() {
+        let r = route(Language::Deu);
+        let with_english = options(r, true, true, true, false, true);
+        let native = options(r, true, true, true, false, false);
+        assert_eq!(normalize("die", r, &native).unwrap(), LexizeOutcome::Stop);
+        // This is the explicit parallel-branch contract, not a claim that the
+        // corresponding German-domain false positive has been fixed.
+        assert_eq!(
+            normalize("die", r, &with_english).unwrap().into_terms(),
+            ["die"]
+        );
+        assert_eq!(
+            normalize("in", r, &with_english).unwrap(),
+            LexizeOutcome::Stop
+        );
+        assert_eq!(
+            normalize("the", r, &with_english).unwrap().into_terms(),
+            ["the"]
+        );
+        assert_eq!(
+            normalize(" ", r, &with_english).unwrap(),
+            LexizeOutcome::Ignore
+        );
+        let r = route(Language::Vie);
+        let e = options(r, false, true, true, false, true);
+        assert_eq!(
+            normalize("running", r, &e).unwrap().into_terms(),
+            ["running", "run"]
+        );
+        assert!(Options::new(r, false, true, true, false, false).is_err());
+        let r = route(Language::Tur);
+        let e = options(r, true, false, true, false, true);
+        assert_eq!(normalize("i", r, &e).unwrap().into_terms(), ["i"]);
+    }
+
+    #[test]
+    fn four_alternatives_have_native_then_english_order_and_final_deduplication() {
+        let r = route(Language::Tur);
+        let raw = "ABBREVIATE";
+        assert!(crate::resources::english_contains("abbreviate"));
+        let outcome = normalize(raw, r, &options(r, false, true, false, false, true)).unwrap();
+        if let LexizeOutcome::Terms(terms) = &outcome {
+            assert_eq!(terms.len(), 4);
+            assert_eq!(
+                terms.iter().collect::<Vec<_>>(),
+                ["abbrevıate", "abbrevıa", "abbreviate", "abbrevi"]
+            );
+        } else {
+            panic!("expected four independent alternatives");
+        }
+        assert_eq!(
+            outcome.into_terms(),
+            ["abbrevıate", "abbrevıa", "abbreviate", "abbrevi"]
+        );
+        assert_eq!(
+            normalize(raw, r, &options(r, false, true, true, false, true))
+                .unwrap()
+                .into_terms(),
+            ["abbreviate", "abbrevia", "abbrevi"]
+        );
+        let r = route(Language::Fra);
+        assert_eq!(
+            normalize("running", r, &options(r, false, false, true, false, true))
+                .unwrap()
+                .into_terms(),
+            ["running"]
+        );
+    }
+
+    #[test]
+    fn english_gate_uses_current_raw_ascii_bytes_and_not_prepared_ascii() {
+        let r = route(Language::Tur);
+        let native = options(r, false, true, false, false, false);
+        let english = options(r, false, true, false, false, true);
+        for raw in ["İSTANBUL", "ﬃ", "two words", "running_", "running42", ""] {
+            assert_eq!(
+                normalize(raw, r, &native).unwrap(),
+                normalize(raw, r, &english).unwrap(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
     fn filter_replaces_one_term_and_stop_remains_terminal() {
-        let r = route(Language::Eng);
-        assert!(Options::new(r, false, true, true, true).is_err());
-        let folded = Options::new(r, true, false, true, true).unwrap();
-        let prepared = Options::new(r, false, false, false, true).unwrap();
+        let r = LanguageId::ENG;
+        assert!(Options::new(r, false, true, true, true, false).is_err());
+        let folded = options(r, true, false, true, true, false);
+        let prepared = options(r, false, false, false, true, false);
         assert_eq!(
             normalize("CAFÉ", r, &folded).unwrap(),
             LexizeOutcome::Filter("cafe".into())
@@ -617,16 +764,16 @@ mod tests {
         );
         assert_eq!(normalize("the", r, &folded).unwrap(), LexizeOutcome::Stop);
         assert_eq!(normalize(" ", r, &folded).unwrap(), LexizeOutcome::Ignore);
-        let unsupported = route(Language::Kat);
-        assert!(Options::new(unsupported, true, false, true, false).is_err());
-        assert!(Options::new(unsupported, false, true, true, false).is_err());
-        assert!(Options::new(unsupported, false, false, true, true).is_ok());
+        assert!(Options::new(route(Language::Fra), false, false, true, true, true).is_err());
+        assert!(Options::new(LanguageId::UND, true, false, true, false, false).is_err());
+        assert!(Options::new(LanguageId::UND, false, true, true, false, false).is_err());
+        assert!(Options::new(LanguageId::UND, false, false, true, true, false).is_ok());
     }
 
     #[test]
     fn actual_prepared_stem_input_is_bounded() {
-        let r = route(Language::Eng);
-        let options = Options::new(r, false, true, false, false).unwrap();
+        let r = LanguageId::ENG;
+        let options = options(r, false, true, false, false, false);
         let at_limit = format!("{}ies", "a".repeat(MAX_STEM_BYTES - 3));
         let beyond_limit = format!("{}ies", "a".repeat(MAX_STEM_BYTES - 2));
         assert_eq!(
@@ -640,11 +787,9 @@ mod tests {
             normalize(&beyond_limit, r, &options).unwrap().into_terms(),
             [beyond_limit]
         );
-        // NFKD expands this compatibility ligature before the budget is tested.
         let expanded = "ﬃ".repeat(334);
-        let prepared = prepare(&expanded, r).unwrap();
-        assert_eq!(prepared.key.len(), 1002);
-        assert!(!stem_eligible(&prepared.key));
+        assert_eq!(prepare(&expanded, r).unwrap().key.len(), 1002);
+        assert!(!stem_eligible(&prepare(&expanded, r).unwrap().key));
         for invalid in ["", "123", "word_part", "two words"] {
             assert!(!stem_eligible(invalid));
         }
@@ -652,8 +797,8 @@ mod tests {
 
     #[test]
     fn empty_keys_and_separators_are_ignore_before_stop() {
-        let r = route(Language::Eng);
-        let options = Options::new(r, true, true, true, false).unwrap();
+        let r = LanguageId::ENG;
+        let options = options(r, true, true, true, false, false);
         for raw in ["", " ", ".", "\u{1}", "\u{301}"] {
             assert_eq!(
                 normalize(raw, r, &options).unwrap(),
@@ -674,98 +819,202 @@ mod tests {
         );
     }
 
-    #[test]
-    fn segmentation_reconstructs_raw_utf8_and_supplements_only_missing_groups() {
-        let input = "PostgreSQL 中文 café 日本語 한국어 Русский язык";
-        let (spans, calls) = segment_counted(input).unwrap();
-        assert_eq!(
-            spans
-                .iter()
-                .map(|s| &input[s.start..s.end])
-                .collect::<String>(),
-            input
-        );
-        for span in &spans {
-            assert_eq!(input[..span.start].chars().count(), span.char_start);
-            assert_eq!(input[..span.end].chars().count(), span.char_end);
-            if span.charabia_language.is_some() {
-                assert_eq!(span.language_source, LanguageSource::Charabia);
-            }
-            assert_eq!(span.route.script(), span.script);
-        }
-        let groups = spans
+    fn classified(pieces: &[&str]) -> (String, Vec<(Span, bool)>) {
+        let input = pieces.concat();
+        let mut start = 0;
+        let mut char_start = 0;
+        let spans = pieces
             .iter()
-            .enumerate()
-            .filter(|(i, s)| {
-                matches!(
-                    s.script,
-                    Script::Latin | Script::Cyrillic | Script::Hebrew | Script::Devanagari
-                ) && (*i == 0 || spans[*i - 1].script != s.script)
+            .map(|raw| {
+                let span = Span {
+                    start,
+                    end: start + raw.len(),
+                    char_start,
+                    char_end: char_start + raw.chars().count(),
+                    route: route(Language::Nld),
+                    token_type: TokenType::Blank,
+                    script: Script::Latin,
+                    charabia_language: Some(Language::Nld),
+                    language_source: LanguageSource::Charabia,
+                };
+                start = span.end;
+                char_start = span.char_end;
+                (span, is_word(raw))
             })
-            .count();
-        assert_eq!(calls, groups);
-        let (korean, calls) = segment_counted("한국어 검색").unwrap();
-        assert_eq!(calls, 0);
-        assert!(
-            korean
-                .iter()
-                .all(|s| s.route.language() == Some(Language::Kor))
-        );
-        let (latin, calls) = segment_counted("these cats were running in the garden").unwrap();
-        assert_eq!(calls, 1);
-        assert!(
-            latin
-                .iter()
-                .all(|s| s.language_source == LanguageSource::Supplement)
-        );
-        assert_eq!(segment_counted("1234 !").unwrap().1, 0);
+            .collect();
+        (input, spans)
     }
 
     #[test]
-    fn language_completion_preserves_overlap_boundaries_without_extra_detection() {
-        // Charabia 0.10.0 Script::from tests Latin before Cyrillic. Both
-        // predicates include U+1D2B/U+1D78, so these form Latin/Cyrillic/Latin
-        // raw groups. Do not merge the two Latin groups across the Cyrillic one.
-        let input = "a\u{1D2B}Бb\u{1D78}";
-        let (spans, calls) = segment_counted(input).unwrap();
+    fn whole_envelope_gate_has_one_lookup_and_never_forces_an_unsplit_word() {
+        for pieces in [
+            vec!["Postgre", "SQL"],
+            vec!["camel", "Case"],
+            vec!["CAMEL", "Case"],
+        ] {
+            let (input, spans) = classified(&pieces);
+            let original = spans[0].0;
+            let mut calls = 0;
+            let merged = restore_english(&input, spans, |key| {
+                calls += 1;
+                assert_eq!(key, input.to_ascii_lowercase());
+                true
+            });
+            assert_eq!(calls, 1);
+            assert_eq!(merged.len(), 1);
+            assert_eq!((merged[0].0.start, merged[0].0.end), (0, input.len()));
+            assert_eq!(merged[0].0.char_end, input.chars().count());
+            assert_eq!(merged[0].0.route, LanguageId::ENG);
+            assert_eq!(merged[0].0.language_source, LanguageSource::EnglishMerge);
+            assert_eq!(merged[0].0.charabia_language, original.charabia_language);
+            assert_eq!(merged[0].0.script, original.script);
+        }
+        let (input, spans) = classified(&["postgresql"]);
+        let expected = spans.clone();
         assert_eq!(
-            spans
-                .iter()
-                .map(|span| &input[span.start..span.end])
-                .collect::<Vec<_>>(),
-            ["a\u{1D2B}", "Б", "b\u{1D78}"]
+            restore_english(&input, spans, |_| panic!("unsplit words do not look up")),
+            expected
         );
+        let (input, spans) = classified(&["database", "API"]);
+        let expected = spans.clone();
+        let mut calls = 0;
         assert_eq!(
-            spans.iter().map(|span| span.script).collect::<Vec<_>>(),
-            [Script::Latin, Script::Cyrillic, Script::Latin]
+            restore_english(&input, spans, |_| {
+                calls += 1;
+                false
+            }),
+            expected
         );
-        assert_eq!(calls, 3);
-        assert!(spans.iter().all(|span| {
-            span.charabia_language.is_none()
-                && span.language_source == LanguageSource::Supplement
-                && span.route.script() == span.script
-        }));
+        assert_eq!(calls, 1);
+    }
 
-        // Armenian is Other in Charabia's character grouping but is counted by
-        // whatlang's whole-group script detector. It dominates each group here.
-        // Adjacent Armenian detections may merge for singleton completion; no
-        // statistical detection or exact natural-language prediction is needed.
-        let input = "aաաաБաաա";
-        let (spans, calls) = segment_counted(input).unwrap();
+    #[test]
+    fn whole_envelope_gate_never_deletes_nonletters_or_searches_substrings() {
+        for pieces in [
+            vec!["post", " ", "gre", "SQL"],
+            vec!["post", "-", "gre", "SQL"],
+            vec!["Postgre", "SQL", "42"],
+            vec!["é", "Postgre", "SQL"],
+            vec!["e", "\u{301}", "Postgre", "SQL"],
+            vec!["Postgre", "SQL", "\u{301}"],
+            vec!["unknown", "Postgre", "SQL", "suffix"],
+        ] {
+            let (input, spans) = classified(&pieces);
+            let expected = spans.clone();
+            let mut keys = Vec::new();
+            let actual = restore_english(&input, spans, |key| {
+                keys.push(key.to_owned());
+                key == "postgresql"
+            });
+            assert_eq!(actual, expected, "{input:?}, looked up {keys:?}");
+            assert!(!keys.iter().any(|key| key == "postgresql"));
+        }
+        let (input, mut spans) = classified(&["Postgre", "SQL"]);
+        spans[1].0.charabia_language = Some(Language::Eng);
+        let expected = spans.clone();
+        assert_eq!(
+            restore_english(&input, spans, |_| panic!("metadata mismatch")),
+            expected
+        );
+    }
+
+    #[test]
+    fn segmentation_reconstructs_raw_utf8_without_supplementary_detection() {
+        for input in [
+            "PostgreSQL 中文 café 日本語 한국어 Русский язык ภาษาไทย",
+            "a\u{1D2B}Бb\u{1D78}",
+            "aաաաБաաա",
+            "Ελληνικά עברית বাংলা हिन्दी",
+            "1234 !",
+        ] {
+            let (spans, calls) = segment_counted(input).unwrap();
+            assert_eq!(calls, 0);
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|s| &input[s.start..s.end])
+                    .collect::<String>(),
+                input
+            );
+            for span in spans {
+                assert_eq!(input[..span.start].chars().count(), span.char_start);
+                assert_eq!(input[..span.end].chars().count(), span.char_end);
+                assert!(
+                    span.route == LanguageId::UND
+                        || span.route == LanguageId::ENG
+                            && span.language_source == LanguageSource::EnglishMerge
+                        || span.route.script() == span.script
+                );
+            }
+        }
+        for (input, language) in [
+            ("한국어 검색", Language::Kor),
+            ("Русский язык", Language::Rus),
+            ("ภาษาไทย", Language::Tha),
+        ] {
+            let spans = segment(input).unwrap();
+            assert!(
+                spans
+                    .iter()
+                    .filter(|span| span.token_type.is_language())
+                    .all(|span| span.route == route(language))
+            );
+        }
+    }
+
+    #[test]
+    fn actual_camel_segmentation_and_fixed_lexicon_restore_only_the_full_word() {
+        for raw in ["PostgreSQL", "postgreSQL", "camelCase"] {
+            let spans = segment(raw).unwrap();
+            assert_eq!(spans.len(), 1, "{raw:?}");
+            assert_eq!((spans[0].start, spans[0].end), (0, raw.len()));
+            assert_eq!(spans[0].route, LanguageId::ENG);
+            assert_eq!(spans[0].language_source, LanguageSource::EnglishMerge);
+        }
+        for raw in ["postgresql", "POSTGRESQL"] {
+            let spans = segment(raw).unwrap();
+            assert!(
+                spans
+                    .iter()
+                    .all(|span| span.language_source != LanguageSource::EnglishMerge)
+            );
+        }
+        assert!(!crate::resources::english_contains("databaseapi"));
+        let raw = "databaseAPI";
+        let spans = segment(raw).unwrap();
         assert_eq!(
             spans
                 .iter()
-                .map(|span| &input[span.start..span.end])
+                .map(|span| &raw[span.start..span.end])
                 .collect::<Vec<_>>(),
-            ["aաաա", "Бաաա"]
+            ["database", "API"]
         );
-        assert_eq!(calls, 0);
-        assert!(spans.iter().all(|span| {
-            span.script == Script::Armenian
-                && span.charabia_language.is_none()
-                && span.route.language() == Some(Language::Hye)
-                && span.language_source == LanguageSource::Script
-        }));
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.language_source != LanguageSource::EnglishMerge)
+        );
+    }
+
+    #[test]
+    fn pinned_feature_map_has_exactly_the_proved_missing_paths() {
+        use charabia::segmenter::SEGMENTERS;
+        let expected = [
+            (Script::Latin, None),
+            (Script::Latin, Some(Language::Deu)),
+            (Script::Cj, Some(Language::Cmn)),
+            (Script::Cj, Some(Language::Zho)),
+            (Script::Cj, Some(Language::Jpn)),
+            (Script::Hangul, Some(Language::Kor)),
+            (Script::Thai, Some(Language::Tha)),
+            (Script::Arabic, Some(Language::Ara)),
+            (Script::Arabic, Some(Language::Pes)),
+        ];
+        assert_eq!(SEGMENTERS.len(), expected.len());
+        for key in expected {
+            assert!(SEGMENTERS.contains_key(&key), "{key:?}");
+        }
+        assert!(!SEGMENTERS.keys().any(|key| key.0 == Script::Cyrillic));
     }
 
     #[test]
@@ -806,15 +1055,13 @@ mod tests {
 
     #[test]
     fn a_long_separator_run_retains_the_original_small_spans() {
-        // The locked segmenter returns 4096 separate one-byte spaces, not a
-        // single oversized raw token (preserved boundary-inspection evidence).
         let input = " ".repeat(4096);
         let spans = segment(&input).unwrap();
         assert_eq!(spans.len(), 4096);
         assert!(
             spans
                 .iter()
-                .all(|span| span.end - span.start == 1 && span.token_type != TokenType::Display)
+                .all(|span| span.end - span.start == 1 && span.token_type == TokenType::Blank)
         );
         assert_eq!(
             spans
@@ -841,35 +1088,5 @@ mod tests {
                 ErrorKind::Internal
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod resource_identity_tests {
-    use super::*;
-    use sha2::{Digest, Sha256};
-    fn identities() -> serde_json::Value {
-        let mut data = serde_json::Map::new();
-        for route in LanguageId::ALL {
-            let stops = crate::stopwords::build(route).unwrap();
-            let mut hash = Sha256::new();
-            for key in stops.fst.stream().into_strs().unwrap() {
-                hash.update((key.len() as u64).to_le_bytes());
-                hash.update(key.as_bytes());
-            }
-            data.insert(route.alias().to_owned(),serde_json::json!({"entries":stops.fst.len(),"excluded_builtin_entries":stops.excluded_builtin_count,"sha256":format!("{:x}",hash.finalize())}));
-        }
-        serde_json::Value::Object(data)
-    }
-    #[test]
-    #[ignore = "explicit resource identity generation; not a semantic golden"]
-    fn print_builtin_resource_identity() {
-        println!("PGCB_RESOURCE_ID={}", identities());
-    }
-    #[test]
-    fn builtin_resource_identity_matches_locked_manifest() {
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../resources/manifest.json")).unwrap();
-        assert_eq!(identities(), manifest["canonical_stop_sets"]);
     }
 }

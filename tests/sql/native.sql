@@ -9,34 +9,31 @@ BEGIN
 END
 $fn$;
 
--- The 70-language whatlang 0.18.0 enum order is the published fixed route table.
+-- Fixed selected-language contract. IDs do not follow the full whatlang enum.
 CREATE TEMP TABLE native_routes(id integer PRIMARY KEY, alias text UNIQUE);
 INSERT INTO native_routes SELECT ord::integer,alias FROM unnest(ARRAY[
- 'epo','eng','rus','cmn','spa','por','ita','ben','fra','deu','ukr','kat','ara','hin','jpn','heb','yid','pol',
- 'amh','jav','kor','nob','dan','swe','fin','tur','nld','hun','ces','ell','bul','bel','mar','kan','ron','slv',
- 'hrv','srp','mkd','lit','lav','est','tam','vie','urd','tha','guj','uzb','pan','aze','ind','tel','pes','mal',
- 'ori','mya','nep','sin','khm','tuk','aka','zul','sna','afr','lat','slk','cat','tgl','hye','cym','und','blank','display_only'
+ 'eng','deu','nld','rus','spa','fra','por','ita','ara','tur','cmn','jpn','kor','vie','tha','und','blank','display_only'
 ]) WITH ORDINALITY AS r(alias,ord);
 SELECT pg_temp.assert_true(NOT EXISTS(
  (SELECT tokid,alias FROM ts_token_type('charabia.parser') EXCEPT SELECT id,alias FROM native_routes)
  UNION ALL (SELECT id,alias FROM native_routes EXCEPT SELECT tokid,alias FROM ts_token_type('charabia.parser'))),
- '73 fixed token IDs and aliases');
-SELECT pg_temp.assert_true((SELECT count(*)=71 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),
- 'default has exactly 71 mappings');
-SELECT pg_temp.assert_true((SELECT (i->>'language_count')::integer=71
- AND jsonb_array_length(i->'languages')=71
- AND (SELECT count(*)=52 FROM jsonb_array_elements(i->'languages') l WHERE (l->>'has_stopwords')::boolean)
- AND (SELECT count(*)=19 FROM jsonb_array_elements(i->'languages') l WHERE l->>'stemmer' IS NOT NULL)
+ '18 fixed token IDs and aliases');
+SELECT pg_temp.assert_true((SELECT count(*)=16 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),
+ 'default has exactly 16 mappings');
+SELECT pg_temp.assert_true((SELECT (i->>'language_count')::integer=16
+ AND jsonb_array_length(i->'languages')=16
+ AND (SELECT count(*)=15 FROM jsonb_array_elements(i->'languages') l WHERE (l->>'has_stopwords')::boolean)
+ AND (SELECT count(*)=10 FROM jsonb_array_elements(i->'languages') l WHERE l->>'stemmer' IS NOT NULL)
  AND NOT (i ? 'settings') FROM (SELECT charabia.analysis_info() AS i) s),
  'analysis_info reports static resources and capabilities without a configuration snapshot');
 SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM native_routes r LEFT JOIN pg_ts_config_map m
- ON m.mapcfg='public.charabia'::regconfig AND m.maptokentype=r.id WHERE r.id<=71 AND
+ ON m.mapcfg='public.charabia'::regconfig AND m.maptokentype=r.id WHERE r.id<=16 AND
  (m.mapseqno IS DISTINCT FROM 1 OR m.mapdict IS DISTINCT FROM (SELECT d.oid FROM pg_ts_dict d WHERE d.dictnamespace='charabia'::regnamespace AND d.dictname=r.alias))),
  'every language route has exactly its terminal dictionary');
-SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig AND maptokentype IN(72,73)),
+SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig AND maptokentype IN(17,18)),
  'blank and display-only have no default dictionary mapping');
 SELECT pg_temp.assert_true((SELECT bool_and(d.dicttemplate=(SELECT oid FROM pg_ts_template WHERE tmplnamespace='charabia'::regnamespace AND tmplname='template'))
- FROM native_routes r JOIN pg_ts_dict d ON d.dictnamespace='charabia'::regnamespace AND d.dictname=r.alias WHERE r.id<=71),
+ FROM native_routes r JOIN pg_ts_dict d ON d.dictnamespace='charabia'::regnamespace AND d.dictname=r.alias WHERE r.id<=16),
  'all default dictionaries use the parameterized template');
 
 CREATE TEMP TABLE native_abi(signature text,result text,symbol text);
@@ -65,8 +62,8 @@ SELECT pg_temp.assert_true((SELECT cfgparser=(SELECT oid FROM pg_ts_parser WHERE
  'public default uses charabia parser');
 SELECT pg_temp.assert_true((SELECT bool_and(proparallel<>'s') FROM pg_proc WHERE pronamespace='charabia'::regnamespace),
  'no unverified PARALLEL SAFE declaration');
-SELECT pg_temp.assert_true((SELECT count(*)=71 FROM pg_ts_dict WHERE dictnamespace='charabia'::regnamespace),
- 'extension installs exactly the seventy-one language dictionaries');
+SELECT pg_temp.assert_true((SELECT count(*)=16 FROM pg_ts_dict WHERE dictnamespace='charabia'::regnamespace),
+ 'extension installs exactly the sixteen language dictionaries');
 SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace='charabia'::regnamespace
  AND proname IN('create_config','alter_config','drop_config')),
  'no proprietary configuration management or compatibility functions remain');
@@ -86,7 +83,7 @@ CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.stable(PARSER=charabia.parser);
 DO $map$
 DECLARE types text;
 BEGIN
- SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=71;
+ SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=16;
  EXECUTE 'ALTER TEXT SEARCH CONFIGURATION pgcb_native_sql.stable ADD MAPPING FOR '||types||' WITH pg_catalog.simple';
 END $map$;
 SELECT pg_temp.assert_true((SELECT count(*)=0 FROM ts_parse('charabia.parser','')), 'empty parser EOF');
@@ -121,7 +118,7 @@ CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.stop(PARSER=charabia.parser);
 DO $map$
 DECLARE types text;
 BEGIN
- SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=71;
+ SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=16;
  EXECUTE 'ALTER TEXT SEARCH CONFIGURATION pgcb_native_sql.stop ADD MAPPING FOR '||types||' WITH pgcb_native_sql.eng_stop';
 END $map$;
 SELECT pg_temp.assert_true(to_tsvector('pgcb_native_sql.stop','alpha THE beta')=$v$'alpha':1 'beta':3$v$::tsvector,
@@ -158,7 +155,7 @@ CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.arabic(PARSER=charabia.parser);
 DO $map$
 DECLARE types text;
 BEGIN
- SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=71;
+ SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=16;
  EXECUTE 'ALTER TEXT SEARCH CONFIGURATION pgcb_native_sql.arabic ADD MAPPING FOR '||types||' WITH pgcb_native_sql.ara';
 END $map$;
 CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.eng_boundary(TEMPLATE=charabia.template,
@@ -179,7 +176,7 @@ BEGIN
   raw:=repeat('a',n);
   PERFORM pg_temp.assert_true((SELECT string_agg(token,'' ORDER BY ord)=raw AND bool_and(octet_length(token)<=2046)
    FROM ts_parse('charabia.parser',raw) WITH ORDINALITY t(id,token,ord)), 'raw reconstruction and bounded span '||n);
-  PERFORM pg_temp.assert_true((SELECT bool_and(CASE WHEN n>=2047 THEN tokid=73 ELSE tokid<>73 END)
+  PERFORM pg_temp.assert_true((SELECT bool_and(CASE WHEN n>=2047 THEN tokid=18 ELSE tokid<>18 END)
    FROM ts_parse('charabia.parser',raw)), 'display-only boundary '||n);
   PERFORM pg_temp.assert_true(octet_length((ts_lexize('charabia.und',raw))[1])=n, 'direct lexize raw byte boundary '||n);
   SELECT length(to_tsvector('pgcb_native_sql.stable',raw)) INTO actual;
