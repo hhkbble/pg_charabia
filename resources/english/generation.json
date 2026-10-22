@@ -2,7 +2,7 @@
   "format": 1,
   "rule": "lang_code=en; word/forms[].form only; Python str.split; ASCII fullmatch; ASCII lowercase; byte-sort unique; LF",
   "python": "3.14.7",
-  "generator_sha256": "991b016dbbdd1899e3d5229aef393b49ae4f42db8afa52df738c514f5907e1aa",
+  "generator_sha256": "ca3ac3f8393b0a4fc1f39bd6b7d3753c41216c61d2e0a5717ed821e586381ca9",
   "sources_sha256": "7beeda4dcbf1b32bde98e5e934f4b57c708667f73870a241790f8a96ee0b9c6d",
   "words": 1012224,
   "parent_pages": 1396111,

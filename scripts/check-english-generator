@@ -4,7 +4,10 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -104,6 +107,50 @@ class EnglishGeneratorTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"overwrite an input"):
                     GENERATOR.generate(self.manifest_path,self.root,self.root)
                 self.assertEqual(self.manifest_path.read_bytes(),before)
+
+    def test_does_not_overwrite_hardlinked_input(self):
+        output = self.root / "hardlinked-input"
+        output.mkdir()
+        os.link(self.esdb, output / "words.txt")
+        before = self.esdb.read_bytes()
+        with self.assertRaisesRegex(ValueError, "overwrite an input"):
+            GENERATOR.generate(self.manifest_path, self.root, output)
+        self.assertEqual(self.esdb.read_bytes(), before)
+
+    def test_does_not_overwrite_hardlinked_manifest(self):
+        output = self.root / "hardlinked-manifest"
+        output.mkdir()
+        os.link(self.manifest_path, output / "generation.json")
+        before = self.manifest_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "overwrite an input"):
+            GENERATOR.generate(self.manifest_path, self.root, output)
+        self.assertEqual(self.manifest_path.read_bytes(), before)
+
+    def test_german_rebuild_rejects_hardlinked_source_before_cargo(self):
+        source = self.root / "german.txt"
+        source.write_bytes(b"Haus\n")
+        output = self.root / "german.fst"
+        os.link(source, output)
+        marker = self.root / "cargo-attempted"
+        commands = self.root / "bin"
+        commands.mkdir()
+        cargo = commands / "cargo"
+        cargo.write_text(
+            f"#!{sys.executable}\nfrom pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('attempted')\nraise SystemExit(77)\n",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        result = subprocess.run(
+            [sys.executable, Path(__file__).with_name("rebuild-german"),
+             "--source", source, "--output", output, "--allow-modified-source"],
+            env=dict(os.environ, PATH=str(commands) + os.pathsep + os.environ.get("PATH", "")),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("output must differ from the source", result.stderr)
+        self.assertFalse(marker.exists(), "Cargo must not run for an aliased source")
+        self.assertEqual(source.read_bytes(), b"Haus\n")
 
     def test_invalid_source_schema_fails_before_output(self):
         self.kaikki.write_bytes(gzip.compress(b'{"lang_code":"en","word":"Good","forms":[{"form":null}]}\n', mtime=0))

@@ -63,7 +63,9 @@ def generate(manifest_path, input_dir, output_dir):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     checked = check_sources(manifest, input_dir)
     destinations = {output_dir / "words.txt", output_dir / "generation.json", output_dir / "attribution/headword-pages.txt.gz"}
-    if any(path.resolve() in {target.resolve() for target in destinations} for path in [manifest_path, *(path for _, path in checked)]):
+    protected = [manifest_path, *(path for _, path in checked)]
+    if any(path.resolve() == target.resolve() or (target.exists() and path.samefile(target))
+           for path in protected for target in destinations):
         raise ValueError("output must not overwrite an input")
     words = set()
     pages = set()

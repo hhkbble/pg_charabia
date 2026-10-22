@@ -35,7 +35,7 @@ def main():
     args = parser.parse_args()
     source = args.source.resolve()
     output = args.output.resolve()
-    if source == output:
+    if source == output or (output.exists() and source.samefile(output)):
         parser.error("output must differ from the source")
     source_sha = sha(source)
     if not args.allow_modified_source and source_sha != PINNED_SOURCE:
