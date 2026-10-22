@@ -17,6 +17,8 @@ First builds need network access for dependencies, model archives, and notices, 
 
 ## Build and test
 
+Debug builds leave the extension unoptimized. [Cargo.toml](../Cargo.toml) optimizes only `whatlang`, with debug assertions, overflow checks, and debug information retained. This targets measured language-detection cost without changing release compilation or test budgets.
+
 ### macOS ARM64
 
 Set explicit paths for the installed packages. This example requires Homebrew packages `postgresql@18` and `llvm`:
