@@ -83,258 +83,6 @@
       "bytes": 5124
     },
     {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "LICENSE-APACHE",
-      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-      "bytes": 10849
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "LICENSE.md",
-      "sha256": "3e5c8474b4b47979289f1d086deee42dd25a2cc62169963089dd0845dd628d0f",
-      "bytes": 1069
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/iso/stopwords-iso.json",
-      "sha256": "337af4d57d5fa1fecc2ffcae532e9b9f05db51c74ff18d3dde9572185a3cdae4",
-      "bytes": 207291
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/albanian",
-      "sha256": "859d62fe39637d302674ebe782cf7c69c5aaa07dd281fe4c7421f7e436d89776",
-      "bytes": 1274
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/arabic",
-      "sha256": "d57c6e59d41cdd75ca7076d9489d73bdeb12ef247ae0ce282cef3b787e565603",
-      "bytes": 6349
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/azerbaijani",
-      "sha256": "79fa359ae8c021f86c6fe6e56853396da7be9c8c7a30de45cda311ed199b26ae",
-      "bytes": 967
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/basque",
-      "sha256": "6285e4424de3fd2791dbbe2bc3ff23ed009bac3bfced3ea4b927b5b63d246bf0",
-      "bytes": 2202
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/belarusian",
-      "sha256": "67e22b619220fcd520def174dd070a5ab1c868ac4684914a94c613737e352434",
-      "bytes": 2108
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/bengali",
-      "sha256": "a137280568f4d3e1570491bd589e6dcd351810d93823ca5103efc54304c64f55",
-      "bytes": 5444
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/catalan",
-      "sha256": "9aa871d034cb7bd2149c6ebaabe90ac3d2a8276d9621ae9a441a20a03148b49e",
-      "bytes": 1559
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/chinese",
-      "sha256": "1d4460e24f29b27460a845ead1652bac94d10c4fc2d26926e615e6a715f177ce",
-      "bytes": 5560
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/danish",
-      "sha256": "2a877f646a593c959c2c65dfcc0863f62bca9de9d3197814c50a6757fdca6271",
-      "bytes": 423
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/dutch",
-      "sha256": "bbe6657cb30595a17aec4b75f2a94793b62d4063461468ac97c9e93861f7182d",
-      "bytes": 452
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/english",
-      "sha256": "f6d005956f407dbc6ea32e5ff0c7e8e6f71488d3239b9023efdc7fc139d6375b",
-      "bytes": 1048
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/finnish",
-      "sha256": "3185014dec618ba56feaad54f4a00f57e67c5a93f486565d752cca63f63cd6e3",
-      "bytes": 1578
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/french",
-      "sha256": "f82f424af0bfb7aeca75f88abf17b9522b97206454bad9fc986bdf279fe2bc80",
-      "bytes": 812
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/german",
-      "sha256": "5b7f8e916da41b1c6e8c52932e376d7036133964d3978ea90a7882cfa5d72bea",
-      "bytes": 1361
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/greek",
-      "sha256": "c90815060c12eb8d5b21ae04e247a3d7c939ccaa4db4ef2a149e573909483c9d",
-      "bytes": 2166
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/hebrew",
-      "sha256": "f8614c07e75711fcfe29416dfe3314aee6b83ee32cb2f5cd51360ef6d07252e2",
-      "bytes": 1837
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/hinglish",
-      "sha256": "0c88c0952998450c27270ea9c9a55f3f0d1fa787236212ce69a8fcc7bae1389d",
-      "bytes": 5958
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/hungarian",
-      "sha256": "29aead9ea569357bdcd982f06fa1867c7a48675c131bace4d79e125549fe81d0",
-      "bytes": 1226
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/indonesian",
-      "sha256": "127b5c39ef7456965b15905277e49a8936e39b3c0d67ceda1b7757ea4d913b57",
-      "bytes": 6446
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/italian",
-      "sha256": "98207aef1e7e933aef64166721347858073ce1568a85dec6dc240fa2ddfe0b7d",
-      "bytes": 1653
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/kazakh",
-      "sha256": "251dcd739e861114779aa0f26e62c06cb2939a3923798955c8f040607d6768b6",
-      "bytes": 3879
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/nepali",
-      "sha256": "866321e2fe1bcf7d34814464e25eaf365e70b0de40aebee98d761b78b7936b3d",
-      "bytes": 3610
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/norwegian",
-      "sha256": "11267dd6e200c452b77843a38892b81077b5e8ef2065071a96c00ce6a2416025",
-      "bytes": 850
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/portuguese",
-      "sha256": "6e7b98378c6b728266a83ebf035d927abf16b9e0d815d6204d81d90d896bcc9b",
-      "bytes": 1286
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/romanian",
-      "sha256": "0ab53d21cbde00c6bf367706a0243c646140ba564cce7e83ac33d80f8923e957",
-      "bytes": 1910
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/russian",
-      "sha256": "25c6374145b058b1507d223aff6736d829c19126b30b5be921975f92ce5d58b3",
-      "bytes": 1234
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/slovenian",
-      "sha256": "65d95c97bdddaf5c719c8069eb242cccdf135826ad2e676038ade33835b50042",
-      "bytes": 15980
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/spanish",
-      "sha256": "fd2fc47baab75d3985ec36ab502aeffbc720d9474d2e2f72190b9bebba1013e2",
-      "bytes": 2175
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/swedish",
-      "sha256": "566c6bf8521e0f0bb6f2b33a5a129a764ffb250f2c397ffb9dd3f38722e1b472",
-      "bytes": 558
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/tajik",
-      "sha256": "9fb8e95452b1ca28f77d4779e0705eccd681dc6e51e5216002a42129cd9a4238",
-      "bytes": 1818
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/tamil",
-      "sha256": "0a4cb7b8e7a071465b72158b4517b6e57cdc69820be13834915e7f91ec110698",
-      "bytes": 1964
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/turkish",
-      "sha256": "77222e30a31b4c1386dbbc126d78b2f53351dc61a940f4422ac322a985eba117",
-      "bytes": 259
-    },
-    {
-      "crate": "stop-words",
-      "version": "0.10.1",
-      "path": "src/nltk/uzbek",
-      "sha256": "d26cf170a141a6302acbf98e0984769587269715d42a44c608b016f2131ef9c6",
-      "bytes": 2359
-    },
-    {
       "crate": "charabia",
       "version": "0.10.0",
       "path": "dictionaries/fst/german/words.fst",
@@ -796,5 +544,106 @@
       "sha256": "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a",
       "package_path": "dependency-sources/fst-0.4.7.crate"
     }
-  ]
+  ],
+  "build_source_files": [
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "bytes": 10849
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "LICENSE.md",
+      "sha256": "3e5c8474b4b47979289f1d086deee42dd25a2cc62169963089dd0845dd628d0f",
+      "bytes": 1069
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/iso/stopwords-iso.json",
+      "sha256": "337af4d57d5fa1fecc2ffcae532e9b9f05db51c74ff18d3dde9572185a3cdae4",
+      "bytes": 207291
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/arabic",
+      "sha256": "d57c6e59d41cdd75ca7076d9489d73bdeb12ef247ae0ce282cef3b787e565603",
+      "bytes": 6349
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/chinese",
+      "sha256": "1d4460e24f29b27460a845ead1652bac94d10c4fc2d26926e615e6a715f177ce",
+      "bytes": 5560
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/dutch",
+      "sha256": "bbe6657cb30595a17aec4b75f2a94793b62d4063461468ac97c9e93861f7182d",
+      "bytes": 452
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/english",
+      "sha256": "f6d005956f407dbc6ea32e5ff0c7e8e6f71488d3239b9023efdc7fc139d6375b",
+      "bytes": 1048
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/french",
+      "sha256": "f82f424af0bfb7aeca75f88abf17b9522b97206454bad9fc986bdf279fe2bc80",
+      "bytes": 812
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/german",
+      "sha256": "5b7f8e916da41b1c6e8c52932e376d7036133964d3978ea90a7882cfa5d72bea",
+      "bytes": 1361
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/italian",
+      "sha256": "98207aef1e7e933aef64166721347858073ce1568a85dec6dc240fa2ddfe0b7d",
+      "bytes": 1653
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/portuguese",
+      "sha256": "6e7b98378c6b728266a83ebf035d927abf16b9e0d815d6204d81d90d896bcc9b",
+      "bytes": 1286
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/russian",
+      "sha256": "25c6374145b058b1507d223aff6736d829c19126b30b5be921975f92ce5d58b3",
+      "bytes": 1234
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/spanish",
+      "sha256": "fd2fc47baab75d3985ec36ab502aeffbc720d9474d2e2f72190b9bebba1013e2",
+      "bytes": 2175
+    },
+    {
+      "crate": "stop-words",
+      "version": "0.10.1",
+      "path": "src/nltk/turkish",
+      "sha256": "77222e30a31b4c1386dbbc126d78b2f53351dc61a940f4422ac322a985eba117",
+      "bytes": 259
+    }
+  ],
+  "compiled_resource_policy": "Runtime embeds only the selected Charabia data and the 15 stop FSTs plus English FST. build_source_files are checksum-verified inputs, not linked raw arrays."
 }

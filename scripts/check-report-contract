@@ -242,6 +242,16 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                                        for row in sorted(language_capabilities(), key=lambda item: item["language"])],
                 "mappings": [{"type": index, "order": 1, "dictionary_schema": "charabia", "dictionary": alias} for index, alias in enumerate(LANGUAGE_CODES, 1)]}
 
+    def test_manifest_separates_build_sources_from_runtime_data(self):
+        manifest=json.loads((ROOT/"resources/manifest.json").read_text())
+        self.assertEqual({row["crate"] for row in manifest["embedded_data"]},{"charabia"})
+        self.assertEqual({row["path"] for row in manifest["embedded_data"]}, {
+            "dictionaries/fst/thai/words.fst", "dictionaries/fst/german/words.fst",
+            "dictionaries/bin/nonspacing_mark/marks.bin"})
+        nltk={row["path"].split("/")[-1] for row in manifest["build_source_files"] if row["path"].startswith("src/nltk/")}
+        self.assertEqual(nltk,{"arabic","chinese","dutch","english","french","german","italian","korean","portuguese","russian","spanish","turkish"})
+        self.assertEqual(set(manifest["compiled_stop_sets"]),set(LANGUAGE_CODES)-{"und"})
+
     def test_static_info_rejects_old_configuration_state(self):
         info = self.info()
         require_static_info(info, {"extension": RELEASE_VERSION, "target": "x86_64-unknown-linux-gnu"})

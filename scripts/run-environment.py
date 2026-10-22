@@ -198,6 +198,14 @@ def main():
                 raise RuntimeError(f"Embedded resource hash mismatch: {data_path}")
             actual_resources.append(dict(item, verified_sha256=actual_hash))
         (evidence / "embedded-resources.json").write_text(json.dumps(actual_resources, indent=2) + "\n")
+        build_sources=[]
+        for item in resource_manifest["build_source_files"]:
+            package_metadata=next(p for p in metadata["packages"] if p["name"]==item["crate"] and p["version"]==item["version"])
+            data_path=Path(package_metadata["manifest_path"]).parent/item["path"]
+            if sha256(data_path)!=item["sha256"]:
+                raise RuntimeError("Build-only source identity mismatch: "+str(data_path))
+            build_sources.append(dict(item,verified_sha256=sha256(data_path)))
+        (evidence/"build-source-files.json").write_text(json.dumps(build_sources,indent=2)+"\n")
         # Keep the exact corresponding upstream source in the binary delivery.
         source_archives=[]
         for entry in resource_manifest["rebuild_source_archives"]:
