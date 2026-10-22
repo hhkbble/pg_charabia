@@ -36,6 +36,7 @@ if args[0]=='create':
  evidence=Path(mount.split('src=',1)[1].rsplit(',dst=',1)[0])
  run=next(a.split('=',1)[1]for a in args if a.startswith('PGCB_RUN_ID='))
  state.write_text(json.dumps({'evidence':str(evidence),'run':run,'removed':False}))
+ if case.startswith('create-probe-'):sys.exit(1)
  print('owned-policy-container');sys.exit()
 value=json.loads(state.read_text())
 if args[0]=='start':
@@ -59,9 +60,22 @@ if args[0]=='start':
  if case in ('safe-failure','recovery-safe-failure'):report['status']='failed'
  (out/'run.json').write_text(json.dumps(report))
  sys.exit(0 if report['status']=='verified'else 1)
+if args[:2]==['volume','inspect']:
+ if case=='volume-probe-daemon':print('Cannot connect to the Docker daemon',file=sys.stderr);sys.exit(1)
+ if case=='volume-probe-permission':print('permission denied while connecting to Docker',file=sys.stderr);sys.exit(1)
+ print('Error response from daemon: get '+args[-1]+': no such volume',file=sys.stderr);sys.exit(1)
 if args[0]=='inspect':
- if value['removed']:print('No such container',file=sys.stderr);sys.exit(1)
- print(json.dumps([{'State':{'Running':False,'ExitCode':0},'Mounts':[]}]))
+ if case=='create-probe-daemon':print('Cannot connect to the Docker daemon',file=sys.stderr);sys.exit(1)
+ if case=='create-probe-permission':print('permission denied while connecting to Docker',file=sys.stderr);sys.exit(1)
+ if case=='create-probe-absent':print('Error: No such object: '+args[-1],file=sys.stderr);sys.exit(1)
+ if value['removed']:
+  if case=='container-probe-daemon':print('Cannot connect to the Docker daemon',file=sys.stderr);sys.exit(1)
+  if case=='container-probe-permission':print('permission denied while connecting to Docker',file=sys.stderr);sys.exit(1)
+  if case=='container-probe-other-object':print('Error: No such object: another-container',file=sys.stderr);sys.exit(1)
+  if case=='container-probe-malformed':print('not-json');sys.exit()
+  print('error: no such object: '+args[-1],file=sys.stderr);sys.exit(1)
+ mounts=[{'Type':'volume','Name':'owned-policy-volume'}] if case.startswith('volume-probe-') else []
+ print(json.dumps([{'State':{'Running':False,'ExitCode':0},'Mounts':mounts}]))
  sys.exit()
 if args[0]=='rm':value['removed']=True;state.write_text(json.dumps(value));sys.exit()
 if args[0]in('logs','stop'):sys.exit()
@@ -69,7 +83,10 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
 """
         cases = ("success", "safe-failure", "recovery-safe-failure", "missing", "malformed",
                  "wrong-run", "cleanup-failed", "unstopped", "truthy-flag",
-                 "recovery-unproven", "recovery-missing", "recovery-failed")
+                 "recovery-unproven", "recovery-missing", "recovery-failed",
+                 "container-probe-daemon", "container-probe-permission", "container-probe-other-object",
+                 "container-probe-malformed", "volume-probe-daemon", "volume-probe-permission",
+                 "volume-probe-absent", "create-probe-daemon", "create-probe-permission", "create-probe-absent")
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -89,18 +106,24 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                                         env=env, text=True, capture_output=True)
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
                 removed = any(call[0] == "rm" for call in calls)
-                safe = case in ("success", "safe-failure", "recovery-safe-failure")
-                self.assertEqual(removed, safe, {"case": case, "calls": calls,
+                safe = case in ("success", "safe-failure", "recovery-safe-failure", "volume-probe-absent")
+                attempted_removal = safe or case.startswith(("container-probe-", "volume-probe-"))
+                self.assertEqual(removed, attempted_removal, {"case": case, "calls": calls,
                                                 "stdout": result.stdout, "stderr": result.stderr})
                 report = json.loads(next((root / "artifacts").glob("*/outer-run.json")).read_text())
-                if not safe:
+                cleanup_proven = safe or case == "create-probe-absent"
+                if not cleanup_proven:
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(report["status"], "cleanup-failed")
-                    self.assertTrue(report["cleanup"]["container_retained"])
-                    self.assertFalse(report["cleanup"]["container_removed"])
+                    self.assertFalse(report["cleanup"]["container_removed"] and report["cleanup"].get("volumes_removed", True))
+                    if not attempted_removal and not case.startswith("create-probe-"):
+                        self.assertTrue(report["cleanup"]["container_retained"])
+                    if case.startswith(("container-probe-", "volume-probe-", "create-probe-")):
+                        self.assertIn("error", report["cleanup"])
                 else:
                     self.assertTrue(report["cleanup"]["container_removed"])
-                    self.assertEqual(result.returncode == 0, case == "success")
+                    self.assertTrue(report["cleanup"].get("volumes_removed", True))
+                    self.assertEqual(result.returncode == 0, case in ("success", "volume-probe-absent"))
 
     def test_connection_defaults_cannot_escape_owned_cluster(self):
         allowed={"PATH":"/tools", "PG_CONFIG":"/explicit/pg_config", "PGRX_HOME":"/private/pgrx", "PGCB_RUN_ID":"owned"}

@@ -16,6 +16,27 @@ from report_contract import FORMAT, VERIFIED, digest, require_container_cleanup,
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "pg-charabia-verify:pg18-pgrx0193"
 
+
+def inspect_resource(kind, name, observations):
+    """Return the object, or None only when Docker explicitly reports absence."""
+    argv = ["docker", "inspect", name] if kind == "container" else ["docker", "volume", "inspect", name]
+    probe = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    observations.append({"argv": argv, "exit_code": probe.returncode,
+                         "stdout": probe.stdout, "stderr": probe.stderr})
+    if probe.returncode == 0:
+        value = json.loads(probe.stdout)
+        if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+            raise ValueError(f"Invalid Docker {kind} inspection for {name}")
+        return value[0]
+    missing = (f"error: no such object: {name}",
+               f"error: no such container: {name}",
+               f"error response from daemon: no such container: {name}") if kind == "container" else (
+               f"error response from daemon: get {name}: no such volume",)
+    if probe.returncode == 1 and probe.stdout.strip() in ("", "[]") and probe.stderr.strip().casefold() in {message.casefold() for message in missing}:
+        return None
+    raise RuntimeError(f"Cannot establish Docker {kind} state for {name}: exit {probe.returncode}; {probe.stderr.strip()}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", action="append")
@@ -139,15 +160,19 @@ def main():
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         # A signal can arrive after Docker creates the container but before the ID
         # reaches Python. Recover only the exact name with this run's ownership label.
-        cleanup = {"container_removed": cid is None, "volumes": []}
+        cleanup = {"container_removed": cid is None and not create_attempted,
+                   "volumes": [], "inspection_probes": []}
         if cid is None and create_attempted:
             try:
-                probe = subprocess.run(["docker", "inspect", name], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                if probe.returncode == 0:
-                    candidate = json.loads(probe.stdout)[0]
+                candidate = inspect_resource("container", name, cleanup["inspection_probes"])
+                if candidate is None:
+                    cleanup["container_removed"] = True
+                else:
                     if candidate.get("Config", {}).get("Labels", {}).get("pg_charabia.run_id") == run_id:
                         cid = candidate["Id"]
                         result["container_id"] = cid
+                    else:
+                        raise RuntimeError("Refusing cleanup of a container without this run's ownership label")
             except BaseException as exc:
                 cleanup["container_removed"] = False
                 cleanup["error"] = str(exc)
@@ -156,6 +181,7 @@ def main():
                 state = json.loads(subprocess.check_output(["docker", "inspect", cid], text=True))[0]
                 volumes = [m["Name"] for m in state.get("Mounts", []) if m.get("Type") == "volume"]
                 cleanup["volumes"] = volumes
+                cleanup["volumes_removed"] = not volumes
                 if state["State"]["Running"]:
                     subprocess.run(["docker", "stop", "--time", "65", cid], stdout=subprocess.DEVNULL, check=True)
                 run(["docker", "logs", cid], "container-final", check=False)
@@ -168,8 +194,9 @@ def main():
                     cleanup["volumes_removed"] = not volumes
                 else:
                     subprocess.run(["docker", "rm", "--volumes", cid], stdout=subprocess.DEVNULL, check=True)
-                    cleanup["container_removed"] = subprocess.run(["docker", "inspect", cid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
-                    cleanup["volumes_removed"] = all(subprocess.run(["docker", "volume", "inspect", v], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0 for v in volumes)
+                    cleanup["container_removed"] = inspect_resource("container", cid, cleanup["inspection_probes"]) is None
+                    volume_absence = [inspect_resource("volume", v, cleanup["inspection_probes"]) is None for v in volumes]
+                    cleanup["volumes_removed"] = all(volume_absence)
             except BaseException as exc:
                 cleanup["error"] = str(exc)
                 result["status"] = "cleanup-failed"
