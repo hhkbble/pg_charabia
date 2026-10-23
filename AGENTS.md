@@ -10,6 +10,7 @@
 | Public SQL, configuration, installation, limits, maintenance, or backup requirements | [README.md](README.md). It owns the user contract. |
 | Analysis, dictionary chains, headline, FFI, ownership, caching, or WAL mechanisms | [Architecture](docs/architecture.md), then the linked source and tests. |
 | Build, debug, tests, failure diagnosis, cleanup, recovery rehearsal, or packaging | [Development](docs/development.md). |
+| ASCII recognition, component groups, or symbol changes | [ASCII architecture](docs/architecture.md#ascii-recognition-and-atomic-symbols), then the linked implementation and native symbol tests. |
 | README examples | [tests/examples.py](tests/examples.py). Preserve its three ordered SQL blocks and independent assertions. |
 
 Read versions and features from [Cargo.toml](Cargo.toml), [Cargo.lock](Cargo.lock), and [rust-toolchain.toml](rust-toolchain.toml). Read resource identities from [resources/manifest.json](resources/manifest.json), environment pins from [docker/environment.lock.json](docker/environment.lock.json), and suites/report rules from [report_contract.py](scripts/report_contract.py).

@@ -85,10 +85,10 @@ $capture$;
     try:
         sql(f"CREATE DATABASE {install_database} TEMPLATE template0;", "install-create-database", False)
         sql("CREATE EXTENSION pg_charabia;", "install-create-extension", False, install_database)
-        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.parser'))=18 AND "
-                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=16);",
+        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.parser'))=23 AND "
+                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=21);",
                   "install-catalog", database=install_database) is True,
-              "clean CREATE EXTENSION installs 18 types and 16 public default mappings")
+              "clean CREATE EXTENSION installs 23 types and 21 public default mappings")
         sql("DROP EXTENSION pg_charabia;", "install-drop-extension", False, install_database)
         uninstalled = sql("SELECT jsonb_build_object('extension_gone',NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_charabia'),"
             "'default_gone',NOT EXISTS(SELECT 1 FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname='public' AND c.cfgname='charabia'),"
@@ -166,7 +166,11 @@ WITH inputs(id,body) AS(VALUES {values}) SELECT jsonb_agg(jsonb_build_object(
                           f"input {item['id']} language mapping selects its default dictionary")
                     check(token["language"] == token["token_type"],
                           f"input {item['id']} selected Parser language matches lexical type")
+                elif token["kind"] in ("url", "host", "email", "file", "numword"):
+                    check(debug["dictionaries"] == ["charabia." + token["kind"]] and token["language"] is None,
+                          f"input {item['id']} symbol mapping selects its own terminal with no selected language")
                 else:
+                    check(token["kind"] in ("blank", "display_only"), f"input {item['id']} has a recognized diagnostic kind")
                     check(debug["dictionaries"] == [] and debug["lexemes"] is None and token["language"] is None,
                           f"input {item['id']} blank/display remains unmapped and has no selected Dictionary language")
                 # This checks adapter position accounting only. These dictionary

@@ -40,6 +40,10 @@ No resource is downloaded at PostgreSQL runtime.
   is made. The fixed features choose the NLTK whole table first, with ISO
   covering missing languages.
 
+- linkify 0.11.0 and iri-string 0.7.14 offer MIT or Apache-2.0. This
+  distribution selects MIT and keeps both copyright notices in
+  `linkify-LICENSE-MIT.txt` and `iri-string-LICENSE-MIT.txt`.
+
 The Cargo dependency license inventory accompanies release packages. These
 resource notices must remain in every binary distribution; a crate metadata
 license string does not replace them. `notice_files` in the manifest locks

@@ -58,6 +58,8 @@ run("CREATE SCHEMA errors_runtime")
 run(native_config_sql("errors_runtime.healthy", stem=False, discard=False))
 HEALTHY = "SELECT to_tsvector('errors_runtime.healthy'," + literal(DOCUMENT) + ")"
 HEADLINE = "SELECT ts_headline('errors_runtime.healthy'," + literal(DOCUMENT) + ",'running'::tsquery,'HighlightAll=true')"
+SYMBOL_HEALTHY = "SELECT to_tsvector('public.charabia','Running100') @@ 'run'::tsquery"
+SYMBOL_HEADLINE = "SELECT ts_headline('public.charabia','alpha Running100 beta','run'::tsquery,'HighlightAll=true')"
 
 # Exercise the direct dictionary entry, independently of START and analyze.
 # Oversized ASCII cannot fail UTF8 conversion in core before reaching LEXIZE.
@@ -87,22 +89,24 @@ def callback_live(value):
 
 def registration_failures(session):
     results["registration_faults"]=[]
-    for role in ("parser", "dictionary"):
+    for role in ("parser", "dictionary", "symbol_dictionary"):
         for point,modes in (("register_alloc",("error","panic","allocation_error")),("register_link",("error","panic","allocation_error"))):
             for mode in modes:
                 before=stats(session)
                 session.value(f"SELECT charabia.test_set_fault({literal(point)},{literal(mode)})")
                 sql=(HEALTHY if role=="parser" else
+                     "CREATE TEXT SEARCH DICTIONARY public.registration_fault(TEMPLATE=charabia.symbol_template,Kind='numword',Discard=true,Stem=true,Normalize=true)" if role=="symbol_dictionary" else
                      "CREATE TEXT SEARCH DICTIONARY public.registration_fault(TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=false,Normalize=true,Filter=false)")
                 output=session.query(sql)
                 after=stats(session)
-                record={"role":role,"point":point,"mode":mode,"output":output,"before":before,"after":after}
+                counter="dictionary" if role=="symbol_dictionary" else role
+                record={"role":role,"point":point,"mode":mode,"sql":sql,"output":output,"before":before,"after":after}
                 results["registration_faults"].append(record)
                 save("errors-results.json",results)
                 expected="invalid memory alloc request size" if mode=="allocation_error" else "injected pg_charabia"
                 assert "ERROR:" in output and "XX000" in output and expected in output,record
-                assert after[role+"_created"]-before[role+"_created"]==1,record
-                assert after[role+"_dropped"]-before[role+"_dropped"]==1,record
+                assert after[counter+"_created"]-before[counter+"_created"]==1,record
+                assert after[counter+"_dropped"]-before[counter+"_dropped"]==1,record
                 assert after["state_registered"]==before["state_registered"],record
                 assert after["state_released"]==before["state_released"],record
                 assert after["dictionary_live_fst_bytes"]==before["dictionary_live_fst_bytes"]==0,record
@@ -127,7 +131,7 @@ def registration_failures(session):
     results["registration_savepoint"]={"output":output,"before":before,"after":after}
 
 
-def interrupt(session,reason,cleanup_failure=False,point="gettoken"):
+def interrupt(session,reason,cleanup_failure=False,point="gettoken",symbol=False):
     import threading
     session.value("SET application_name='pgcb_errors_ready'")
     session.value("SET statement_timeout='300ms'" if reason=="timeout" else "SET statement_timeout=0")
@@ -136,7 +140,8 @@ def interrupt(session,reason,cleanup_failure=False,point="gettoken"):
     outcome=[]
     def query():
         try:
-            outcome.append(session.query(HEADLINE if point.startswith("headline_") else HEALTHY))
+            statement=(SYMBOL_HEADLINE if point.startswith("headline_") else SYMBOL_HEALTHY) if symbol else (HEADLINE if point.startswith("headline_") else HEALTHY)
+            outcome.append(session.query(statement))
         except BaseException as error:
             outcome.append(error)
     worker=threading.Thread(target=query,name="pgcb-interrupt-"+reason)
@@ -162,7 +167,10 @@ def interrupt(session,reason,cleanup_failure=False,point="gettoken"):
         assert after["parser_created"]-before["parser_created"]==after["parser_dropped"]-before["parser_dropped"]==1,(before,after)
         assert callback_live(after)==callback_live(before),(before,after)
         assert "running" in session.value(HEALTHY)
-        results.setdefault("interrupts",[]).append({"reason":reason,"point":point,"output":outcome[0],"before":before,"after":after,"pid":session.pid})
+        if symbol:
+            assert session.value(SYMBOL_HEALTHY)=="t"
+            assert session.value(SYMBOL_HEADLINE)=="alpha <b>Running100</b> beta"
+        results.setdefault("interrupts",[]).append({"reason":reason,"point":point,"symbol":symbol,"output":outcome[0],"before":before,"after":after,"pid":session.pid})
     finally:
         primary_error=sys.exception()
         cleanup_errors=[]
@@ -202,14 +210,18 @@ def interrupt(session,reason,cleanup_failure=False,point="gettoken"):
             primary_error.add_note(message)
 
 
-def real_interrupt(reason):
+def real_interrupt(reason,symbol=False):
     """Exercise release callbacks under a real statement timeout/user cancel."""
     import threading
     with Session() as session:
         session.value(HEALTHY)
         session.value(HEADLINE)
+        if symbol:
+            assert session.value(SYMBOL_HEALTHY)=="t"
+            assert session.value(SYMBOL_HEADLINE)=="alpha <b>Running100</b> beta"
         session.value("SET statement_timeout='1s'" if reason == "timeout" else "SET statement_timeout=0")
-        query = "SELECT sum(length(ts_headline('errors_runtime.healthy'," + literal(DOCUMENT) + " || g::text,'running'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g"
+        query = ("SELECT sum(length(ts_headline('public.charabia','alpha Running100 beta '||g::text,'run'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g" if symbol else
+                 "SELECT sum(length(ts_headline('errors_runtime.healthy'," + literal(DOCUMENT) + " || g::text,'running'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g")
         outcome = []
         def execute():
             try:
@@ -237,7 +249,10 @@ def real_interrupt(reason):
             session.value("SET statement_timeout=0")
             assert "running" in session.value(HEALTHY)
             assert "<b>running</b>" in session.value(HEADLINE)
-            results.setdefault("release_interrupts",[]).append({"reason":reason,"query":query,"output":outcome[0],"observed_active":observed,"pid":session.pid})
+            if symbol:
+                assert session.value(SYMBOL_HEALTHY)=="t"
+                assert session.value(SYMBOL_HEADLINE)=="alpha <b>Running100</b> beta"
+            results.setdefault("release_interrupts",[]).append({"reason":reason,"symbol":symbol,"query":query,"output":outcome[0],"observed_active":observed,"pid":session.pid})
         finally:
             primary = sys.exception()
             errors = []
@@ -264,10 +279,14 @@ def real_interrupt(reason):
 try:
     real_interrupt("cancel")
     real_interrupt("timeout")
+    real_interrupt("cancel",symbol=True)
+    real_interrupt("timeout",symbol=True)
     if has_hooks:
         with Session() as session:
             session.value(HEALTHY)
             session.value(HEADLINE)
+            session.value(SYMBOL_HEALTHY)
+            session.value(SYMBOL_HEADLINE)
             for point in ("start", "gettoken", "end", "init", "lexize", "headline_selector", "headline_escape"):
                 for mode in ("error", "panic"):
                     before=stats(session)
@@ -287,6 +306,22 @@ try:
             for point in ("gettoken", "headline_selector", "headline_escape"):
                 interrupt(session,"cancel",point=point)
                 interrupt(session,"timeout",point=point)
+            for point in ("lexize","symbol_emit","symbol_emit_string","headline_selector","headline_escape"):
+                for mode in ("error","panic"):
+                    before=stats(session)
+                    session.value(f"SELECT charabia.test_set_fault({literal(point)},{literal(mode)})")
+                    statement=SYMBOL_HEADLINE if point.startswith("headline_") else SYMBOL_HEALTHY
+                    output=session.query(statement)
+                    after=stats(session)
+                    record={"point":point,"mode":mode,"symbol":True,"sql":statement,"output":output,"before":before,"after":after}
+                    results["faults"].append(record)
+                    save("errors-results.json",results)
+                    assert "ERROR:" in output and "injected pg_charabia" in output,record
+                    assert after["parser_created"]-before["parser_created"]==after["parser_dropped"]-before["parser_dropped"]==1,record
+                    assert callback_live(after)==callback_live(before),record
+                    assert session.value(SYMBOL_HEALTHY)=="t",record
+                interrupt(session,"cancel",point=point,symbol=True)
+                interrupt(session,"timeout",point=point,symbol=True)
         try:
             with Session() as probe:
                 probe_pid=probe.pid

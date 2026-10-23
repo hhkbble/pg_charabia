@@ -6,15 +6,15 @@ import re
 
 FORMAT = 2
 RELEASE_VERSION = "0.3.0"
-ANALYSIS_REVISION = "route16-english-shared-fst-1"
+ANALYSIS_REVISION = "route16-ascii-symbol-1"
 LANGUAGE_CODES = ("eng", "deu", "nld", "rus", "spa", "fra", "por", "ita", "ara", "tur", "cmn", "jpn", "kor", "vie", "tha", "und")
 ENGLISH_ELIGIBLE = frozenset(("deu", "nld", "spa", "fra", "por", "ita", "tur", "vie"))
 LANGUAGE_SCRIPTS = dict(zip(LANGUAGE_CODES, ("Latin", "Latin", "Latin", "Cyrillic", "Latin", "Latin", "Latin", "Latin", "Arabic", "Latin", "Cj", "Cj", "Hangul", "Latin", "Thai", "Other")))
 LANGUAGE_STEMMERS = dict(zip(LANGUAGE_CODES[:10], ("English", "German", "Dutch", "Russian", "Spanish", "French", "Portuguese", "Italian", "Arabic", "Turkish")))
-SUITES = ("unit", "smoke", "native", "chain", "bm25", "headline", "config", "lifecycle", "errors", "stress", "recovery", "benchmark")
-MAC_DEFAULT = ("unit", "native", "chain", "headline", "config", "lifecycle", "errors")
-ARCHIVE_SUITES = ("smoke", "chain", "headline", "config", "recovery")
-STATIC_INFO_FIELDS = frozenset(("extension", "pgrx", "charabia", "target", "cargo_lock_sha256", "resource_manifest_sha256", "analysis_revision", "resource_fingerprint", "language_count", "languages", "resources"))
+SUITES = ("unit", "smoke", "native", "symbol", "chain", "bm25", "headline", "config", "lifecycle", "errors", "stress", "recovery", "benchmark")
+MAC_DEFAULT = ("unit", "native", "symbol", "chain", "headline", "config", "lifecycle", "errors")
+ARCHIVE_SUITES = ("smoke", "symbol", "chain", "headline", "config", "recovery")
+STATIC_INFO_FIELDS = frozenset(("extension", "pgrx", "charabia", "target", "cargo_lock_sha256", "resource_manifest_sha256", "analysis_revision", "resource_fingerprint", "language_count", "languages", "symbols", "resources"))
 VERIFIED = ("verified", "verified-with-known-quality-failures")
 QUALITY_FIELDS = ("input", "query", "config", "expected", "actual")
 REQUIRED_QUALITY_CASES = frozenset(("english-den", "code-var", "english-short-phrase"))
@@ -49,42 +49,64 @@ def language_capabilities():
             for alias in LANGUAGE_CODES]
 
 
+def symbol_identity():
+    """Independent static rules and object expectations for ASCII symbols."""
+    return {"rule_revision":"ascii-atomic-full-or-component-bundle-1", "dictionary_count":5,
+            "ordinary_ascii_delimiters":["<",">","="],
+            "types":[{"id":index,"kind":kind,"defaults":{"discard":True,"stem":True,"normalize":True}}
+                     for index,kind in enumerate(("url","host","email","file","numword"),19)],
+            "limits":{"units":32,"lexemes":66,"bytes":16384},
+            "dependencies":{"linkify":"0.11.0","iri-string":"0.7.14"}}
+
+
+def default_catalog():
+    """Expected standard objects, independent of runtime installation output."""
+    symbols=symbol_identity()["types"]
+    options=[{"dictionary":row["language"],"template_schema":"charabia","template":"template",
+              "options":", ".join(f"{key} = '{value}'" for key,value in
+                 {"language":row["language"],**{key:str(value).lower() for key,value in row["defaults"].items()}}.items())}
+             for row in language_capabilities()]
+    options += [{"dictionary":row["kind"],"template_schema":"charabia","template":"symbol_template",
+                 "options":f"kind = '{row['kind']}', discard = 'true', stem = 'true', normalize = 'true'"} for row in symbols]
+    mappings=[{"type":index,"order":1,"dictionary_schema":"charabia","dictionary":alias}
+              for index,alias in enumerate(LANGUAGE_CODES,1)]
+    mappings += [{"type":row["id"],"order":1,"dictionary_schema":"charabia","dictionary":row["kind"]} for row in symbols]
+    return {"parser":{"schema":"charabia","name":"parser"},
+            "types":[{"id":index,"alias":alias} for index,alias in enumerate((*LANGUAGE_CODES,"blank","display_only"),1)] +
+                    [{"id":row["id"],"alias":row["kind"]} for row in symbols],
+            "dictionaries":sorted((*LANGUAGE_CODES,*(row["kind"] for row in symbols))),
+            "dictionary_options":sorted(options,key=lambda row:row["dictionary"]),"mappings":mappings}
+
+
 def require_default_objects(document, info):
-    """Check the real installed catalog, including all six explicit options."""
-    require_static_info(info, {})
-    if not isinstance(document, dict) or set(document) != {"parser", "types", "dictionaries", "dictionary_options", "mappings"}:
+    """Check all installed types, mappings, templates and explicit defaults."""
+    require_static_info(info,{})
+    expected=default_catalog()
+    if not isinstance(document,dict) or set(document)!=set(expected):
         raise ValueError("Missing default Parser/Dictionary/Configuration catalog evidence")
-    if not same_json(document["parser"], {"schema": "charabia", "name": "parser"}):
-        raise ValueError("Default Configuration must use charabia.parser")
-    expected_types = [{"id": index, "alias": alias} for index, alias in enumerate((*LANGUAGE_CODES, "blank", "display_only"), 1)]
-    if not same_json(document["types"], expected_types):
-        raise ValueError("Installed Parser types differ from the 16 ordered languages + blank + display_only contract")
-    if not same_json(document["dictionaries"], sorted(LANGUAGE_CODES)):
-        raise ValueError("Expected exactly the 16 default language dictionaries")
-    expected_mappings = [{"type": index, "order": 1, "dictionary_schema": "charabia", "dictionary": alias} for index, alias in enumerate(LANGUAGE_CODES, 1)]
-    if not same_json(document["mappings"], expected_mappings):
-        raise ValueError("Default mappings must use each language dictionary once, with blank/display_only unmapped")
-    rows = document["dictionary_options"]
-    if not isinstance(rows, list) or len(rows) != len(LANGUAGE_CODES):
-        raise ValueError("Missing default Dictionary option rows")
-    for actual, expected in zip(rows, sorted(info["languages"], key=lambda item: item["language"])):
-        if not isinstance(actual, dict) or set(actual) != {"dictionary", "template_schema", "template", "options"} or actual["dictionary"] != expected["language"] or actual["template_schema"] != "charabia" or actual["template"] != "template":
-            raise ValueError("Default dictionaries require the charabia.template template")
-        # dictinitoption is PostgreSQL's text serialization of DefElem entries,
-        # not the text[] consumed by pg_options_to_table. Installed defaults are
-        # deliberately only lowercase language codes and quoted Boolean values.
-        options = {}
-        for entry in actual["options"].split(",") if isinstance(actual["options"], str) else ():
-            match = re.fullmatch(r'\s*(?:"([a-z]+)"|([a-z]+))\s*=\s*\'([a-z]+)\'\s*', entry)
-            if match is None:
-                raise ValueError("Invalid explicit default Dictionary option")
+    for key,message in (("parser","Default Configuration must use charabia.parser"),
+                        ("types","Installed Parser types differ from the 23 ordered types"),
+                        ("dictionaries","Expected exactly the 21 default dictionaries"),
+                        ("mappings","Default mappings must use language and symbol dictionaries, blank/display unmapped")):
+        if not same_json(document[key],expected[key]):raise ValueError(message)
+    def parse_options(raw):
+        if not isinstance(raw,str):raise ValueError("Missing Dictionary options")
+        options={}
+        for entry in raw.split(","):
+            match=re.fullmatch(r"\s*(?:\"([a-z]+)\"|([a-z]+))\s*=\s*'([a-z]+)'\s*",entry)
+            if match is None:raise ValueError("Invalid explicit default Dictionary option")
             name=match[1] or match[2]
-            if name in options:
-                raise ValueError("Duplicate explicit default Dictionary option")
-            options[name] = match[3]
-        wanted = {"language": expected["language"], **{key: str(value).lower() for key, value in expected["defaults"].items()}}
-        if options != wanted:
-            raise ValueError("Default dictionaries require six explicit Language/Boolean defaults")
+            if name in options:raise ValueError("Duplicate explicit default Dictionary option")
+            options[name]=match[3]
+        return options
+    rows=document["dictionary_options"]
+    if not isinstance(rows,list) or len(rows)!=21:raise ValueError("Missing default Dictionary option rows")
+    for actual,wanted in zip(rows,expected["dictionary_options"]):
+        if not isinstance(actual,dict) or set(actual)!=set(wanted):raise ValueError("Invalid default Dictionary row")
+        if any(actual[key]!=wanted[key] for key in ("dictionary","template_schema","template")):
+            raise ValueError("Default Dictionary template or identity mismatch")
+        if parse_options(actual["options"])!=parse_options(wanted["options"]):
+            raise ValueError("Default Dictionary options differ from explicit defaults")
 
 
 def isolated_pg_environment(source):
@@ -164,6 +186,8 @@ def require_static_info(info, expected):
         value = info[field]
         if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
             raise ValueError(f"analysis_info contains an invalid {field}")
+    if not same_json(info["symbols"], symbol_identity()):
+        raise ValueError("Symbol types, defaults, dependencies or limits differ from the fixed contract")
     languages = info["languages"]
     if not isinstance(languages, list) or len(languages) != len(LANGUAGE_CODES):
         raise ValueError("analysis_info requires exactly 16 language capability rows")
@@ -322,6 +346,9 @@ def require_release_report(report):
         raise ValueError("Cluster cleanup did not pass")
     quality = validate_quality(report.get("quality", {}))
     require_known_quality_cases(quality)
+    costs=report.get("symbol_quality_costs")
+    if not isinstance(costs,list) or not any(isinstance(item,dict) and item.get("input")=="100 ms" and item.get("query")=="100ms" and item.get("domain_expected") is False and item.get("native_actual") is True for item in costs):
+        raise ValueError("Missing explicit non-PASS symbol precision-cost evidence")
     if report["status"] != verified_status(quality):
         raise ValueError("Quality failures and report status disagree")
     if not report.get("analysis_info_verified") or not report.get("fts_callback_abi_verified"):

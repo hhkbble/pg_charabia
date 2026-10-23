@@ -259,11 +259,16 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
         ));
     }
     let calls = crate::language::complete(input, &mut spans)?;
+    let spans = overlay_symbols(input, spans, &crate::symbols::recognition::scan(input))?;
+    let spans = split_literal_delimiters(input, spans);
     // Classify each upstream span once. The merge and type assignment reuse it.
     let classified = spans
         .into_iter()
         .map(|span| {
-            let word = is_word(&input[span.start..span.end]);
+            let raw = &input[span.start..span.end];
+            let word = !matches!(raw, "<" | ">" | "=")
+                && !matches!(span.token_type, TokenType::Symbol(_))
+                && is_word(&input[span.start..span.end]);
             (span, word)
         })
         .collect();
@@ -271,7 +276,9 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
     let mut bounded = Vec::with_capacity(restored.len());
     for (mut span, word) in restored {
         if span.end - span.start <= MAX_RAW_TOKEN_BYTES {
-            span.token_type = if word {
+            span.token_type = if matches!(span.token_type, TokenType::Symbol(_)) {
+                span.token_type
+            } else if word {
                 TokenType::Language(span.route)
             } else {
                 TokenType::Blank
@@ -302,6 +309,109 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
         }
     }
     Ok((bounded, calls))
+}
+
+fn split_literal_delimiters(input: &str, spans: Vec<Span>) -> Vec<Span> {
+    if !input.contains(['<', '>', '=']) {
+        return spans;
+    }
+    let mut output = Vec::with_capacity(spans.len());
+    for span in spans {
+        if matches!(span.token_type, TokenType::Symbol(_)) {
+            output.push(span);
+            continue;
+        }
+        let raw = &input[span.start..span.end];
+        let (mut byte, mut scalar) = (span.start, span.char_start);
+        for (offset, character) in raw.char_indices() {
+            if !matches!(character, '<' | '>' | '=') {
+                continue;
+            }
+            let delimiter = span.start + offset;
+            if byte < delimiter {
+                let char_end = scalar + input[byte..delimiter].chars().count();
+                output.push(Span {
+                    start: byte,
+                    end: delimiter,
+                    char_start: scalar,
+                    char_end,
+                    ..span
+                });
+                scalar = char_end;
+            }
+            output.push(Span {
+                start: delimiter,
+                end: delimiter + 1,
+                char_start: scalar,
+                char_end: scalar + 1,
+                ..span
+            });
+            byte = delimiter + 1;
+            scalar += 1;
+        }
+        if byte < span.end {
+            output.push(Span {
+                start: byte,
+                char_start: scalar,
+                ..span
+            });
+        }
+    }
+    output
+}
+
+fn overlay_symbols(
+    input: &str,
+    spans: Vec<Span>,
+    candidates: &[crate::symbols::Candidate],
+) -> Result<Vec<Span>, AnalysisError> {
+    if candidates.is_empty() {
+        return Ok(spans);
+    }
+    let mut output = Vec::with_capacity(spans.len() + candidates.len());
+    let (mut byte, mut scalar, mut upstream, mut candidate) = (0, 0, 0, 0);
+    while byte < input.len() {
+        while upstream < spans.len() && spans[upstream].end <= byte {
+            upstream += 1;
+        }
+        let span = *spans.get(upstream).ok_or_else(|| {
+            AnalysisError::new(ErrorKind::Internal, "symbol overlay lost the original span")
+        })?;
+        let next = candidates.get(candidate);
+        let symbol = next.filter(|item| item.start == byte);
+        let end = if let Some(item) = symbol {
+            item.end
+        } else {
+            next.map_or(span.end, |item| span.end.min(item.start))
+        };
+        let raw = checked_span(input, byte, end, byte)?;
+        let char_end = scalar + raw.chars().count();
+        let mut clipped = Span {
+            start: byte,
+            end,
+            char_start: scalar,
+            char_end,
+            ..span
+        };
+        if let Some(item) = symbol {
+            clipped.token_type = TokenType::Symbol(item.kind);
+            clipped.route = LanguageId::UND;
+            clipped.language_source = LanguageSource::None;
+            // A structure may cover several upstream metadata records.
+            clipped.charabia_language = None;
+            candidate += 1;
+        }
+        output.push(clipped);
+        byte = end;
+        scalar = char_end;
+    }
+    if candidate != candidates.len() {
+        return Err(AnalysisError::new(
+            ErrorKind::Internal,
+            "invalid symbol overlay range",
+        ));
+    }
+    Ok(output)
 }
 
 /// Restore only a complete split ASCII envelope; never search its substrings.
@@ -441,6 +551,25 @@ fn branch(
         prepared: Some(key),
         kind,
         outcome,
+    })
+}
+
+/// Analyze an already bounded English leaf without tokenizing or detecting it.
+pub(crate) fn english_component(
+    raw: &str,
+    options: &Options,
+) -> Result<Vec<String>, AnalysisError> {
+    let result = branch(
+        raw,
+        LanguageId::ENG,
+        options,
+        options.stops,
+        options.stemmer.as_ref(),
+    )?;
+    Ok(match result.outcome {
+        LexizeOutcome::Terms(terms) => terms.into_iter().collect(),
+        LexizeOutcome::Stop | LexizeOutcome::Ignore => Vec::new(),
+        LexizeOutcome::Filter(_) => unreachable!("symbol English options are terminal"),
     })
 }
 
@@ -1015,6 +1144,29 @@ mod tests {
             assert!(SEGMENTERS.contains_key(&key), "{key:?}");
         }
         assert!(!SEGMENTERS.keys().any(|key| key.0 == Script::Cyrillic));
+    }
+
+    #[test]
+    fn markup_delimiters_do_not_hide_ordinary_words_or_split_symbols() {
+        let input = "<a href=\"https://Example.com/A?q=100ms\">search &amp; ordinary</a>";
+        let spans = segment(input).unwrap();
+        let words: Vec<_> = spans
+            .iter()
+            .filter(|s| s.token_type.is_language())
+            .map(|s| &input[s.start..s.end])
+            .collect();
+        assert!(words.contains(&"search"));
+        assert!(words.contains(&"ordinary"));
+        assert!(spans.iter().any(|s| s.token_type
+            == TokenType::Symbol(crate::symbols::SymbolKind::Url)
+            && &input[s.start..s.end] == "https://Example.com/A?q=100ms"));
+        assert_eq!(
+            spans
+                .iter()
+                .map(|s| &input[s.start..s.end])
+                .collect::<String>(),
+            input
+        );
     }
 
     #[test]

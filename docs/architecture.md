@@ -16,17 +16,21 @@ The [README](../README.md) owns public parameters, limits, installation, and req
 | [prepare.rs](../src/prepare.rs) and [language_data.rs](../src/language_data.rs) | Shared host/target preparation and the fixed language capabilities. |
 | [resources.rs](../src/resources.rs), [stopwords.rs](../src/stopwords.rs), and [build.rs](../build.rs) | Build-generated immutable English/stopword FSTs and shared views. |
 | [parser.rs](../src/parser.rs) | START/GETTOKEN/END/LEXTYPES callbacks and the standard HEADLINE callback. |
+| [symbols.rs](../src/symbols.rs) and its private modules | Bounded ASCII candidates, borrowed structure parsing, English components, and full/component groups. |
+| [symbol_dictionary.rs](../src/symbol_dictionary.rs) | Separate terminal INIT/LEXIZE state for the five symbol kinds. |
 | [dictionary.rs](../src/dictionary.rs) | INIT validates options and owns state. LEXIZE analyzes one supplied token. |
 | [headline.rs](../src/headline.rs) | Strict option parsing, HTML escaping, and output-size accounting. |
 | [pg_ffi.rs](../src/pg_ffi.rs) | PG allocation, Datum conversion, guarded calls, callback ownership, query rewriting, and headline projection. |
 | [lib.rs](../src/lib.rs) | Module registration and the diagnostic/query functions. |
 | [pg_charabia.sql](../sql/pg_charabia.sql) | Public SQL signatures, default objects, permissions, and callback registration. |
 
-The default installation has one Parser, one Template, 16 language dictionaries, and `public.charabia`. Ordinary user configurations can share these dictionaries or use other standard dictionaries. There is no configuration table, proprietary object manager, global derived Dictionary cache, or cross-dictionary private payload.
+The default installation has one Parser, two Templates, 16 language dictionaries and five symbol dictionaries, and `public.charabia`. Ordinary user configurations can share these dictionaries or use other standard dictionaries. There is no configuration table, proprietary object manager, global derived Dictionary cache, or cross-dictionary private payload.
 
 ```text
 Original UTF-8 text
-  -> Parser: segment once, complete missing language, classify raw spans
+  -> Parser: segment once and complete language on the complete original text
+       + ASCII candidate scan, validated non-overlapping raw coverage
+       + ordinary classification/English restoration and symbol type assignment
   -> PostgreSQL Configuration mapping for each token type
   -> Dictionary chain: NULL / Stop / terminal terms / filter replacement
   -> native tsvector or tsquery
@@ -65,11 +69,49 @@ keep their routes/spans. The code neither finds substrings nor deletes separator
 Original metadata remains diagnostic information rather than proof of English.
 
 Language IDs follow the fixed order in `language_data.rs`: 1 through 16, with
-und last. Blank is 17 and display-only is 18. Both stay unmapped by default.
+und last. Blank is 17 and display-only is 18. Both stay unmapped by default. Symbol IDs 19 through 23 are url, host, email, file, and numword.
 Oversized raw tokens split into bounded display fragments without indexing
 subterms. Span checks and long-token handling run on the restored result.
 
 START receives text and length, not configuration identity or Dictionary options. PostgreSQL maps types to the active chain. LEXIZE receives neither Parser type nor detected language. A Dictionary therefore uses its own `Language`, even if the mapping chooses a different language from the Parser's type.
+
+## ASCII recognition and atomic symbols
+
+The Parser completes language metadata before applying `symbols::recognition::scan`.
+It keeps the complete Charabia context. It never removes symbols before detection or re-segments leftover windows.
+The coverage merge clips ordinary spans at accepted candidate boundaries and preserves their metadata.
+Original byte/scalar coverage stays contiguous and byte-identical. Symbols prevent English restoration from merging across them.
+A symbol has no selected language. Diagnostic metadata does not become a private Dictionary payload.
+
+The recognizer scans maximal ASCII runs. It rejects candidates that cut a combining sequence.
+A single URL lane finds scheme/envelope boundaries and uses borrowed `iri_string::types::UriStr` validation.
+URL authority uses URI grammar, without applying standalone DNS restrictions to reg-names.
+Percent-host spelling stays opaque, and only DNS-shaped names supply label components.
+The email-only `LinkFinder` supplies candidates, then the finite mailbox rules validate them.
+Explicit paths and finite host/file/number rules cover the other kinds. Arbitration keeps the leftmost, longest outer structure.
+Invalid URL envelopes block internal structural retries, but leave every byte in ordinary analysis.
+Oversized candidates return to the ordinary/display path rather than supplying a truncated full term.
+No default-parser tag/entity state machine or serializer runs.
+Outside accepted symbols, the adapter splits literal `<`, `>`, and `=` boundaries.
+The upstream separator list omits them, which otherwise attaches markup delimiters to searchable words.
+The split preserves language metadata and original spans, without a second segmentation pass or tag interpretation.
+
+`symbols::terms::Options` owns ordinary English options and borrows the existing immutable FSTs.
+Each terminal call validates its current raw input again. Direct calls and preceding filters make this necessary.
+Borrowed URI fields supply a finite, non-recursive component traversal.
+Complete spelling has kind-specific rules. English leaves use the public Latin segmenter, existing whole-word restoration, and the same `analysis::english_component` branch.
+Numeric literals take priority over implicit hex. Percent triplets remain opaque.
+
+A `SymbolTerms` result privately keeps full forms and one component group.
+`pg_ffi::symbol_lexemes` emits each full form as a singleton variant, followed by components with one shared variant.
+All flags are zero. PostgreSQL plain-query construction ORs variants and ANDs entries inside a variant.
+The vector stores every distinct term at the same original position.
+Component terms equal to full terms are omitted individually. Other components remain searchable.
+
+Expansion accounting happens before stop processing, normalization and deduplication.
+Repeated leaves count toward the budget, then a bounded call-local cache reuses their English analysis.
+There is no backend parse cache or unbounded graph representation.
+The exact grammar, options, budgets and user tradeoffs belong in [ASCII symbols](../README.md#ascii-symbols) and [limits](../README.md#limits-and-known-quality-failures).
 
 ## Dictionary analysis
 
@@ -146,9 +188,9 @@ pg_textsearch's metapage configuration OID supports runtime analysis. Build and 
 
 PostgreSQL core parses and lexizes source text with the actual configuration, preserving original pointers, matched operands, positions, and repeated entries. The extension's HEADLINE callback consumes those results. It does not normalize tokens again or require all mappings to use Charabia dictionaries.
 
-`pg_ffi::headline` makes a request-owned scratch copy of core's entries. Non-repeated language entries project to the PG18 selector's word type. Blank, display, and repeated entries project to its blank type. The projection does not reinterpret Charabia IDs as default-parser IDs. It preserves original positions, query items, raw bytes, and repetition metadata.
+`pg_ffi::headline` makes a request-owned scratch copy of core's entries. Non-repeated language and symbol entries project to the PG18 selector's word type. Blank, display, and repeated entries project to its blank type. The projection does not reinterpret Charabia IDs as default-parser IDs. It preserves original positions, query items, raw bytes, and repetition metadata.
 
-The callback passes validated options to guarded `prsd_headline`, PostgreSQL's existing fragment selector. It verifies that the selector retained the scratch entry array. Then it computes escaped entry/output sizes, copies selection flags to core's original entries, and escapes only non-repeated source text. PostgreSQL renders the result once. Repeated operand matches therefore do not duplicate original source output.
+The callback passes validated options to guarded `prsd_headline`, PostgreSQL's existing fragment selector. It verifies that the selector retained the scratch entry array. Then it computes escaped entry/output sizes, copies selection flags to core's original entries, and escapes only non-repeated source text. PostgreSQL renders the result once. Symbol matching projects the whole raw token, because TSLexeme supplies no component offsets. Repeated operand matches therefore do not duplicate original source output.
 
 Source escaping and trusted markers remain separate. [headline.py](../tests/headline.py) and [chain.py](../tests/chain.py) test raw-text preservation, normalization/stem matching, positions, external chains, options, and budgets. JSON and JSONB use the same callback for each string.
 
@@ -162,7 +204,12 @@ Rust owns analysis vectors, strings, and stemmers. FST views borrow static libra
 
 Parser START registers exactly `Option<ParserState>`. The state owns spans/cursor and borrows the PG input pointer, which lives through END. GETTOKEN copies an output descriptor before any later PG operation and returns a type ID as an int32 Datum through the SQL `internal` signature. EOF uses a zero Datum. END takes the state once, releasing its large vector. Reset later drops the empty Option container, or the still-present state after an error.
 
-Dictionary INIT registers exactly `DictionaryState` in the PG dictionary or DDL-validation context. LEXIZE borrows it only during pure Rust analysis, then ends the borrow before interrupt checks and PG output allocation. Code must not retain subsidiary-cache borrows across PG calls that can invalidate them.
+Language Dictionary INIT registers exactly `DictionaryState` in the PG dictionary or DDL-validation context. LEXIZE borrows it only during pure Rust analysis, then ends the borrow before interrupt checks and PG output allocation. Code must not retain subsidiary-cache borrows across PG calls that can invalidate them.
+
+The symbol Template uses exactly `SymbolDictionaryState`, with its own paired callbacks.
+It uses the same RAII registration and reset helper, not casts between state types.
+Its bounded result owns every string before PG allocation. PG owns the zero-terminated emitted array and copied strings.
+No request slice, URI view, or Rust string escapes through a PG pointer.
 
 pgrx-generated callback wrappers and guarded PG bindings contain PG ERROR/Rust panic transitions. `pg_ffi::checked` maps invalid input, resource limits, and invariant errors to stable SQLSTATE classes. Normal Ignore and Stop use result variants, not exceptions. Interrupt checks surround analysis and occur in token/headline loops. No PG API runs on a Rust worker thread.
 
@@ -203,6 +250,7 @@ The retained [recovery test](../tests/recovery.py) exercises online backup, arch
 - Fixed model mappings and default segmentation avoid per-token detection and configuration-dependent Parser state. Short-query language errors remain possible.
 - Independent Dictionary preparation is necessary for direct calls and earlier filters. Chains can repeat that preparation, but headline does not repeat it.
 - English alternatives preserve some words discarded by the original language. They also retain cross-language homographs and change BM25 statistics. They do not guarantee word-form or phrase recall.
+- Symbols have atomic positions, not internal phrase graphs. Their component conjunction can match scattered words, and BM25 discards variant groups.
 - Standard Parser/Dictionary interfaces preserve index reuse and arbitrary native composition. They cannot carry private Parser metadata to Dictionary callbacks.
 - Standard headline preserves raw source and PG matching. It is a presentation step, not a phrase or Boolean match decision.
 

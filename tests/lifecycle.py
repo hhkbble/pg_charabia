@@ -319,6 +319,156 @@ def parallel_cached_init_faults():
             run("DROP TEXT SEARCH DICTIONARY " + name)
 
 
+def symbol_prepared_lifecycle():
+    """Real symbol INIT invalidation without repreparing parameterized plans."""
+    config = "lifecycle.symbol_config"
+    dictionary_name = "lifecycle.symbol_words"
+    run("CREATE TEXT SEARCH DICTIONARY " + dictionary_name + "("
+        "TEMPLATE=charabia.symbol_template,Kind='numword',Discard=true,Stem=true,Normalize=true);"
+        "CREATE TEXT SEARCH CONFIGURATION " + config + "(COPY=public.charabia);"
+        "ALTER TEXT SEARCH CONFIGURATION " + config + " ALTER MAPPING FOR numword WITH " + dictionary_name + ";"
+        "CREATE TABLE lifecycle.symbol_docs(id int PRIMARY KEY,body text NOT NULL);"
+        "INSERT INTO lifecycle.symbol_docs VALUES(1,'Running100'),(2,'Other200');"
+        "CREATE INDEX symbol_lifecycle_gin ON lifecycle.symbol_docs USING gin(to_tsvector('" + config + "',body))")
+    results["symbol_prepared"] = []
+    with Session() as warm, Session() as updater:
+        for suffix in ("custom", "generic"):
+            warm.value("PREPARE symbol_analysis_" + suffix + "(text) AS SELECT jsonb_build_object("
+                "'terms',tsvector_to_array(to_tsvector('" + config + "',$1)),"
+                "'query',plainto_tsquery('" + config + "',$1)::text)")
+            warm.value("PREPARE symbol_index_" + suffix + "(text) AS SELECT coalesce(jsonb_agg(id ORDER BY id),'[]') "
+                "FROM lifecycle.symbol_docs WHERE to_tsvector('" + config + "',body) @@ $1::tsquery")
+        prepared = json.loads(warm.value("SELECT jsonb_object_agg(name,prepare_time) FROM pg_prepared_statements"))
+
+        def state(label, stem, expected_ids):
+            record = {"state": label, "stem": stem, "expected_ids": expected_ids,
+                      "config_oid": warm.value("SELECT '" + config + "'::regconfig::oid"), "plans": []}
+            results["symbol_prepared"].append(record)
+            save("lifecycle-results.json", results)
+            for suffix, mode in (("custom", "force_custom_plan"), ("generic", "force_generic_plan")):
+                warm.value("SET plan_cache_mode=" + mode)
+                execute = "EXECUTE symbol_analysis_" + suffix + "('Running100')"
+                analysis = json.loads(warm.value(execute))
+                item = {"mode": mode, "execute": execute, "analysis": analysis}
+                record["plans"].append(item)
+                save("lifecycle-results.json", results)
+                assert "Running100" in analysis["terms"] and "running100" in analysis["terms"], item
+                assert ("run" in analysis["terms"]) == stem and (("'run'" in analysis["query"]) == stem), item
+                warm.value("SET enable_seqscan=off;SET enable_indexscan=off;SET enable_indexonlyscan=off;SET enable_bitmapscan=on")
+                index_sql = "EXECUTE symbol_index_" + suffix + "('run')"
+                plan = json.loads(warm.value("EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + index_sql))
+                actual = json.loads(warm.value(index_sql))
+                item.update(index_sql=index_sql, plan=plan, ids=actual)
+                save("lifecycle-results.json", results)
+                assert any(node.get("Index Name") == "symbol_lifecycle_gin" and node.get("Actual Loops", 0) > 0
+                           for node in plan_nodes(plan)), item
+                assert actual == expected_ids, item
+            current = json.loads(warm.value("SELECT jsonb_agg(jsonb_build_object('name',name,'prepare_time',prepare_time,"
+                "'custom',custom_plans,'generic',generic_plans)) FROM pg_prepared_statements"))
+            record["prepared_statements"] = current
+            save("lifecycle-results.json", results)
+            for item in current:
+                assert item["prepare_time"] == prepared[item["name"]], item
+                assert item["custom" if item["name"].endswith("_custom") else "generic"] > 0, item
+
+        state("warm", True, [1])
+        updater.value("BEGIN;ALTER TEXT SEARCH DICTIONARY " + dictionary_name + "(Stem=false);ROLLBACK")
+        state("rolled-back-alter", True, [1])
+        updater.value("ALTER TEXT SEARCH DICTIONARY " + dictionary_name + "(Stem=false)")
+        state("committed-alter-stale-postings", False, [1])
+        updater.value("REINDEX INDEX lifecycle.symbol_lifecycle_gin")
+        state("reindexed", False, [])
+        updater.value("ALTER TEXT SEARCH DICTIONARY " + dictionary_name + "(Stem)")
+        updater.value("REINDEX INDEX lifecycle.symbol_lifecycle_gin")
+        state("removed-option-default-restored", True, [1])
+        assert len({item["config_oid"] for item in results["symbol_prepared"]}) == 1
+
+
+def symbol_cached_init_faults():
+    """Generic dictionary counters also own the new exact symbol state type."""
+    results["symbol_cached_init_faults"] = []
+    manifest = json.loads((Path(__file__).resolve().parent.parent / "resources/manifest.json").read_text())
+    fst_bytes = manifest["compiled_stop_sets"]["eng"]["fst_bytes"]
+    for warmed, point, mode in ((False, "register_alloc", "allocation_error"),
+                                (False, "init", "panic"),
+                                (True, "register_link", "error"),
+                                (True, "init", "error")):
+        name = "lifecycle.symbol_failure_" + str(int(warmed)) + "_" + point
+        run("CREATE TEXT SEARCH DICTIONARY " + name + "(TEMPLATE=charabia.symbol_template,"
+            "Kind='numword',Discard=true,Stem=true,Normalize=true)")
+        try:
+            with Session() as session:
+                statement = "SELECT to_json(ts_lexize(" + literal(name) + ",'Running100'))"
+                if warmed:
+                    assert "run" in json.loads(session.value(statement))
+                    run("ALTER TEXT SEARCH DICTIONARY " + name + "(Stem=false)")
+                record = {"warmed": warmed, "point": point, "mode": mode, "sql": statement,
+                          "pid": session.pid, "attempts": [], "fst_bytes": fst_bytes}
+                results["symbol_cached_init_faults"].append(record)
+                before = json.loads(session.value("SELECT charabia.test_stats()"))
+                retained = point == "init"
+                for attempt in range(2):
+                    session.value("SELECT charabia.test_set_fault(" + literal(point) + "," + literal(mode) + ")")
+                    output = session.query(statement)
+                    after = json.loads(session.value("SELECT charabia.test_stats()"))
+                    item = {"attempt": attempt, "before": before, "after": after, "error": output}
+                    record["attempts"].append(item)
+                    save("lifecycle-results.json", results)
+                    previous = warmed if attempt == 0 else retained
+                    assert "ERROR:" in output and "XX000" in output, item
+                    assert ("invalid memory alloc request size" if mode == "allocation_error" else "injected pg_charabia") in output, item
+                    assert after["dictionary_created"] - before["dictionary_created"] == 1, item
+                    assert after["dictionary_dropped"] - before["dictionary_dropped"] == int(previous) + int(not retained), item
+                    assert after["state_registered"] - before["state_registered"] == int(retained), item
+                    assert after["state_released"] - before["state_released"] == int(previous), item
+                    assert after["dictionary_last_lexized"] == before["dictionary_last_lexized"], item
+                    assert after["dictionary_last_created"] != after["dictionary_last_lexized"], item
+                    assert after["dictionary_live_fst_bytes"] == 0 and after["dictionary_last_referenced_fst_bytes"] == fst_bytes, item
+                    assert after["dictionary_live_referenced_fst_bytes"] == int(retained) * fst_bytes, item
+                    assert after["dictionary_created"] - after["dictionary_dropped"] == int(retained), item
+                    assert session.value("SELECT 1") == "1"
+                    before = after
+                actual = json.loads(session.value(statement))
+                recovered = json.loads(session.value("SELECT charabia.test_stats()"))
+                record.update(recovered=recovered, terms=actual)
+                save("lifecycle-results.json", results)
+                assert "Running100" in actual and (("run" in actual) == (not warmed)), record
+                assert recovered["dictionary_created"] - before["dictionary_created"] == 1, record
+                assert recovered["dictionary_dropped"] - before["dictionary_dropped"] == int(retained), record
+                assert recovered["state_registered"] - before["state_registered"] == 1, record
+                assert recovered["state_released"] - before["state_released"] == int(retained), record
+                assert recovered["dictionary_last_created"] == recovered["dictionary_last_lexized"], record
+                assert recovered["dictionary_live_referenced_fst_bytes"] == fst_bytes, record
+                run("ALTER TEXT SEARCH DICTIONARY " + name + "(Stem=" + ("true" if warmed else "false") + ")")
+                session.value("BEGIN;SAVEPOINT symbol_init")
+                before = json.loads(session.value("SELECT charabia.test_stats()"))
+                session.value("SELECT charabia.test_set_fault(" + literal(point) + "," + literal(mode) + ")")
+                output = session.query(statement)
+                session.value("ROLLBACK TO SAVEPOINT symbol_init")
+                after = json.loads(session.value("SELECT charabia.test_stats()"))
+                record["savepoint"] = {"before": before, "error": output, "after_rollback": after}
+                save("lifecycle-results.json", results)
+                assert "ERROR:" in output and after["dictionary_last_lexized"] == before["dictionary_last_lexized"], record
+                assert after["dictionary_created"] - before["dictionary_created"] == 1, record
+                assert after["dictionary_dropped"] - before["dictionary_dropped"] == 1 + int(not retained), record
+                assert after["state_registered"] - before["state_registered"] == int(retained), record
+                assert after["state_released"] - before["state_released"] == 1, record
+                actual = json.loads(session.value(statement))
+                final = json.loads(session.value("SELECT charabia.test_stats()"))
+                record["savepoint"].update(recovered=final, terms=actual)
+                save("lifecycle-results.json", results)
+                assert (("run" in actual) == warmed) and "Running100" in actual, record
+                assert final["dictionary_created"] - after["dictionary_created"] == 1, record
+                assert final["dictionary_dropped"] - after["dictionary_dropped"] == int(retained), record
+                assert final["state_registered"] - after["state_registered"] == 1, record
+                assert final["state_released"] - after["state_released"] == int(retained), record
+                assert final["dictionary_created"] - final["dictionary_dropped"] == 1, record
+                assert final["dictionary_live_fst_bytes"] == 0 and final["dictionary_live_referenced_fst_bytes"] == fst_bytes, record
+                session.value("COMMIT")
+        finally:
+            run("DROP TEXT SEARCH DICTIONARY " + name)
+
+
 restore_db="pgcb_restore_"+str(os.getpid())
 drop_db="pgcb_drop_"+str(os.getpid())
 try:
@@ -369,9 +519,11 @@ try:
         refreshed = warm.value("EXECUTE lifecycle_literal")
         assert "'run'" not in refreshed, refreshed
         results["constant_literal"]["after_reprepare"] = refreshed
+    symbol_prepared_lifecycle()
     if has_hooks:
         cached_init_faults()
         parallel_cached_init_faults()
+        symbol_cached_init_faults()
 
     run(native_config_sql("lifecycle.roundtrip", stem=False, discard=False, normalize=False))
     original_oid = int(run("SELECT 'lifecycle.roundtrip'::regconfig::oid"))

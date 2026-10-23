@@ -16,10 +16,12 @@ mod prepare;
 mod resources;
 mod routes;
 mod stopwords;
+mod symbol_dictionary;
+mod symbols;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
 
-const ANALYSIS_REVISION: &str = "route16-english-shared-fst-1";
+const ANALYSIS_REVISION: &str = "route16-ascii-symbol-1";
 
 #[pg_extern(sql = false)]
 fn analysis_info() -> JsonB {
@@ -40,6 +42,7 @@ fn analysis_info() -> JsonB {
         "cargo_lock_sha256":env!("PG_CHARABIA_LOCK_SHA256"),"resource_manifest_sha256":env!("PG_CHARABIA_RESOURCES_SHA256"),
         "analysis_revision":ANALYSIS_REVISION,"resource_fingerprint":format!("{:x}",Sha256::digest(fingerprint.as_bytes())),
         "language_count":routes::LanguageId::ALL.len(),"languages":languages.as_slice(),
+        "symbols":symbols::identity(),
         "resources":serde_json::from_str::<serde_json::Value>(include_str!("../resources/manifest.json")).expect("fixed resource manifest")
     }))
 }
@@ -83,6 +86,7 @@ fn analyze(
         pgrx::check_for_interrupts!();
         let kind = match span.token_type {
             routes::TokenType::Language(_) => "word",
+            routes::TokenType::Symbol(kind) => kind.alias(),
             routes::TokenType::Blank => "blank",
             routes::TokenType::Display => "display_only",
         };

@@ -12,14 +12,14 @@ $fn$;
 -- Fixed selected-language contract. IDs do not follow the full whatlang enum.
 CREATE TEMP TABLE native_routes(id integer PRIMARY KEY, alias text UNIQUE);
 INSERT INTO native_routes SELECT ord::integer,alias FROM unnest(ARRAY[
- 'eng','deu','nld','rus','spa','fra','por','ita','ara','tur','cmn','jpn','kor','vie','tha','und','blank','display_only'
+ 'eng','deu','nld','rus','spa','fra','por','ita','ara','tur','cmn','jpn','kor','vie','tha','und','blank','display_only','url','host','email','file','numword'
 ]) WITH ORDINALITY AS r(alias,ord);
 SELECT pg_temp.assert_true(NOT EXISTS(
  (SELECT tokid,alias FROM ts_token_type('charabia.parser') EXCEPT SELECT id,alias FROM native_routes)
  UNION ALL (SELECT id,alias FROM native_routes EXCEPT SELECT tokid,alias FROM ts_token_type('charabia.parser'))),
- '18 fixed token IDs and aliases');
-SELECT pg_temp.assert_true((SELECT count(*)=16 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),
- 'default has exactly 16 mappings');
+ '23 fixed token IDs and aliases');
+SELECT pg_temp.assert_true((SELECT count(*)=21 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),
+ 'default has exactly 21 mappings');
 SELECT pg_temp.assert_true((SELECT (i->>'language_count')::integer=16
  AND jsonb_array_length(i->'languages')=16
  AND (SELECT count(*)=15 FROM jsonb_array_elements(i->'languages') l WHERE (l->>'has_stopwords')::boolean)
@@ -44,7 +44,9 @@ INSERT INTO native_abi VALUES
  ('charabia.parser_lextypes(internal)','internal','parser_lextypes_wrapper'),
  ('charabia.parser_headline(internal,internal,tsquery)','internal','parser_headline_wrapper'),
  ('charabia.dictionary_init(internal)','internal','dictionary_init_wrapper'),
- ('charabia.dictionary_lexize(internal,internal,internal,internal)','internal','dictionary_lexize_wrapper');
+ ('charabia.dictionary_lexize(internal,internal,internal,internal)','internal','dictionary_lexize_wrapper'),
+ ('charabia.symbol_dictionary_init(internal)','internal','symbol_dictionary_init_wrapper'),
+ ('charabia.symbol_dictionary_lexize(internal,internal,internal,internal)','internal','symbol_dictionary_lexize_wrapper');
 SELECT pg_temp.assert_true((SELECT bool_and(coalesce(p.prorettype=to_regtype(a.result)
  AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='c') AND p.proisstrict
  AND p.prosrc=a.symbol AND NOT p.proretset,false))
@@ -62,8 +64,8 @@ SELECT pg_temp.assert_true((SELECT cfgparser=(SELECT oid FROM pg_ts_parser WHERE
  'public default uses charabia parser');
 SELECT pg_temp.assert_true((SELECT bool_and(proparallel<>'s') FROM pg_proc WHERE pronamespace='charabia'::regnamespace),
  'no unverified PARALLEL SAFE declaration');
-SELECT pg_temp.assert_true((SELECT count(*)=16 FROM pg_ts_dict WHERE dictnamespace='charabia'::regnamespace),
- 'extension installs exactly the sixteen language dictionaries');
+SELECT pg_temp.assert_true((SELECT count(*)=21 FROM pg_ts_dict WHERE dictnamespace='charabia'::regnamespace),
+ 'extension installs sixteen language and five symbol dictionaries');
 SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace='charabia'::regnamespace
  AND proname IN('create_config','alter_config','drop_config')),
  'no proprietary configuration management or compatibility functions remain');

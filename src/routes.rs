@@ -1,5 +1,7 @@
 //! Runtime algorithm bindings and PostgreSQL token types.
-pub use crate::language_data::{LanguageId, TYPE_COUNT};
+pub use crate::language_data::LanguageId;
+use crate::symbols::SymbolKind;
+pub const TYPE_COUNT: usize = 23;
 use qdrant_rust_stemmers::Algorithm;
 impl LanguageId {
     pub fn algorithm(self) -> Option<Algorithm> {
@@ -21,6 +23,7 @@ impl LanguageId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenType {
     Language(LanguageId),
+    Symbol(SymbolKind),
     Blank,
     Display,
 }
@@ -29,12 +32,15 @@ impl TokenType {
         match id {
             17 => Some(Self::Blank),
             18 => Some(Self::Display),
-            _ => LanguageId::from_id(id).map(Self::Language),
+            _ => LanguageId::from_id(id)
+                .map(Self::Language)
+                .or_else(|| SymbolKind::from_id(id).map(Self::Symbol)),
         }
     }
     pub fn id(self) -> i32 {
         match self {
             Self::Language(l) => l.id(),
+            Self::Symbol(kind) => kind.id(),
             Self::Blank => 17,
             Self::Display => 18,
         }
@@ -42,12 +48,16 @@ impl TokenType {
     pub fn alias(self) -> &'static str {
         match self {
             Self::Language(l) => l.alias(),
+            Self::Symbol(kind) => kind.alias(),
             Self::Blank => "blank",
             Self::Display => "display_only",
         }
     }
     pub fn is_language(self) -> bool {
         matches!(self, Self::Language(_))
+    }
+    pub fn is_content(self) -> bool {
+        matches!(self, Self::Language(_) | Self::Symbol(_))
     }
 }
 
@@ -83,6 +93,9 @@ mod tests {
         );
         assert_eq!(TokenType::from_id(17), Some(TokenType::Blank));
         assert_eq!(TokenType::from_id(18), Some(TokenType::Display));
-        assert_eq!(TokenType::from_id(19), None);
+        for kind in SymbolKind::ALL {
+            assert_eq!(TokenType::from_id(kind.id()), Some(TokenType::Symbol(kind)));
+        }
+        assert_eq!(TokenType::from_id(24), None);
     }
 }

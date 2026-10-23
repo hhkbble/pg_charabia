@@ -1,8 +1,8 @@
 \set ON_ERROR_STOP on
 CREATE SCHEMA smoke;
 CREATE FUNCTION pg_temp.assert_true(ok boolean,message text) RETURNS void LANGUAGE plpgsql AS $$BEGIN IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION '%',message; END IF; END$$;
-SELECT pg_temp.assert_true((SELECT count(*)=18 FROM ts_token_type('charabia.parser')),'18 finite types');
-SELECT pg_temp.assert_true((SELECT count(*)=16 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),'16 dictionary mappings');
+SELECT pg_temp.assert_true((SELECT count(*)=23 FROM ts_token_type('charabia.parser')),'23 finite types');
+SELECT pg_temp.assert_true((SELECT count(*)=21 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),'21 dictionary mappings');
 SELECT pg_temp.assert_true((SELECT string_agg(token,'')='中文全文检索 PostgreSQL 18 支持 BM25' FROM ts_parse('charabia.parser','中文全文检索 PostgreSQL 18 支持 BM25')),'raw byte fidelity');
 SELECT * FROM ts_debug('public.charabia','中文全文检索 PostgreSQL 18 支持 BM25');
 SELECT charabia.analysis_info();
@@ -76,4 +76,23 @@ SELECT pg_temp.assert_smoke('running',ARRAY[200]);
 DELETE FROM smoke.docs WHERE id=200;
 SELECT pg_temp.assert_smoke('全文',ARRAY[]::integer[]);
 SELECT pg_temp.assert_smoke('running',ARRAY[]::integer[]);
+-- Actual Rust symbol dictionaries run through the same GIN/BM25 indexes.
+INSERT INTO smoke.docs VALUES
+ (50001,'alpha https://uraniumtoken.test/Running?v=100ms omega'),
+ (50002,'alpha User+tag@argonmail.test omega'),
+ (50003,'alpha /cobaltleaf/UniqueFilename.rs omega'),
+ (50004,'alpha 100ms omega'),
+ (50005,'alpha xenononly.test omega');
+SELECT pg_temp.assert_smoke('100ms',ARRAY[50001,50004]);
+SELECT pg_temp.assert_smoke('xenononly.test',ARRAY[50005]);
+SELECT pg_temp.assert_smoke('User+tag@argonmail.test',ARRAY[50002]);
+SELECT pg_temp.assert_smoke('/cobaltleaf/UniqueFilename.rs',ARRAY[50003]);
+SELECT pg_temp.assert_smoke('https://uraniumtoken.test/Running?v=100ms',ARRAY[50001,50004]);
+SELECT pg_temp.assert_true(ts_headline('smoke.search','alpha 100ms omega',
+ plainto_tsquery('smoke.search','ms'),'HighlightAll=true')='alpha <b>100ms</b> omega',
+ 'component matches whole original symbol');
+UPDATE smoke.docs SET body='alpha 200kg omega' WHERE id=50004;
+SELECT pg_temp.assert_smoke('100ms',ARRAY[50001]);
+DELETE FROM smoke.docs WHERE id=50001;
+SELECT pg_temp.assert_smoke('100ms',ARRAY[]::integer[]);
 DROP SCHEMA smoke CASCADE;

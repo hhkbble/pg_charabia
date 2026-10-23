@@ -59,6 +59,8 @@ fn point_id(point: &str) -> u32 {
         "register_link" => 7,
         "headline_selector" => 8,
         "headline_escape" => 9,
+        "symbol_emit" => 10,
+        "symbol_emit_string" => 11,
         _ => pg_ffi::fail(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "unknown test fault point",

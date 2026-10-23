@@ -25,10 +25,16 @@ CREATE FUNCTION charabia.dictionary_init(internal) RETURNS internal
 AS 'MODULE_PATHNAME','dictionary_init_wrapper' LANGUAGE c STRICT;
 CREATE FUNCTION charabia.dictionary_lexize(internal,internal,internal,internal) RETURNS internal
 AS 'MODULE_PATHNAME','dictionary_lexize_wrapper' LANGUAGE c STRICT;
+CREATE FUNCTION charabia.symbol_dictionary_init(internal) RETURNS internal
+AS 'MODULE_PATHNAME','symbol_dictionary_init_wrapper' LANGUAGE c STRICT;
+CREATE FUNCTION charabia.symbol_dictionary_lexize(internal,internal,internal,internal) RETURNS internal
+AS 'MODULE_PATHNAME','symbol_dictionary_lexize_wrapper' LANGUAGE c STRICT;
+REVOKE ALL ON FUNCTION charabia.symbol_dictionary_init(internal),charabia.symbol_dictionary_lexize(internal,internal,internal,internal) FROM PUBLIC;
 REVOKE ALL ON FUNCTION charabia.parser_start(internal,integer),charabia.parser_gettoken(internal,internal,internal),charabia.parser_end(internal),charabia.parser_lextypes(internal),charabia.parser_headline(internal,internal,tsquery),charabia.dictionary_init(internal),charabia.dictionary_lexize(internal,internal,internal,internal) FROM PUBLIC;
 
 CREATE TEXT SEARCH PARSER charabia.parser(START=charabia.parser_start,GETTOKEN=charabia.parser_gettoken,END=charabia.parser_end,LEXTYPES=charabia.parser_lextypes,HEADLINE=charabia.parser_headline);
 CREATE TEXT SEARCH TEMPLATE charabia.template(INIT=charabia.dictionary_init,LEXIZE=charabia.dictionary_lexize);
+CREATE TEXT SEARCH TEMPLATE charabia.symbol_template(INIT=charabia.symbol_dictionary_init,LEXIZE=charabia.symbol_dictionary_lexize);
 
 CREATE FUNCTION charabia.analysis_info() RETURNS jsonb
 AS 'MODULE_PATHNAME','analysis_info_wrapper' LANGUAGE c STABLE SECURITY INVOKER PARALLEL RESTRICTED SET search_path=pg_catalog;
@@ -44,6 +50,15 @@ BEGIN
  END LOOP;
 END
 $install$;
+DO $symbols$
+DECLARE s jsonb;
+BEGIN
+ FOR s IN SELECT value FROM pg_catalog.jsonb_array_elements(charabia.analysis_info()->'symbols'->'types') LOOP
+  EXECUTE pg_catalog.format('CREATE TEXT SEARCH DICTIONARY charabia.%I(TEMPLATE=charabia.symbol_template,Kind=%L,Discard=true,Stem=true,Normalize=true)',s->>'kind',s->>'kind');
+  EXECUTE pg_catalog.format('ALTER TEXT SEARCH CONFIGURATION public.charabia ADD MAPPING FOR %I WITH charabia.%I',s->>'kind',s->>'kind');
+ END LOOP;
+END
+$symbols$;
 
 CREATE FUNCTION charabia.analyze(text)
 RETURNS TABLE(raw text,kind text,script text,charabia_language text,language text,language_source text,byte_start bigint,byte_end bigint,char_start bigint,char_end bigint,token_type text)

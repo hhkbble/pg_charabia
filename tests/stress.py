@@ -120,6 +120,37 @@ def parallel_execution():
         results["parallel"]["count"] = 20000
 
 
+def parallel_symbol_execution():
+    """Workers process actual URL dictionaries; the leader cannot do their work."""
+    with Session() as session:
+        session.value(
+            "SET max_parallel_workers_per_gather=2;SET min_parallel_table_scan_size=0;"
+            "SET parallel_setup_cost=0;SET parallel_tuple_cost=0;"
+            "SET parallel_leader_participation=off;SET enable_indexscan=off;"
+            "SET enable_bitmapscan=off;SET jit=off;SET statement_timeout='60s'"
+        )
+        # Bound lexical work to 256 rows while keeping the existing parallel
+        # table scan. The row-dependent URI prevents immutable constant folding.
+        query = ("SELECT count(*) FROM stress.docs WHERE id BETWEEN 1 AND 256 AND "
+                 "to_tsvector('public.charabia','https://example.com/Running?q='||id::text) @@ 'run'::tsquery")
+        plan = json.loads(session.value(
+            "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + query))
+        scans = [node for node in nodes(plan) if node.get("Node Type") == "Seq Scan"
+                 and node.get("Relation Name") == "docs" and node.get("Schema") == "stress"
+                 and node.get("Parallel Aware") is True and "to_tsvector(" in node.get("Filter", "")]
+        workers = [dict(worker, scan_filter=scan["Filter"]) for scan in scans for worker in scan.get("Workers", [])]
+        processed = sum(worker.get("Actual Rows", 0) * worker.get("Actual Loops", 0) for worker in workers)
+        record = {"query": query, "plan": plan, "workers": workers, "rows": processed,
+                  "leader_participation": session.value("SHOW parallel_leader_participation"),
+                  "count": session.value(query),
+                  "basis": "256 independent row IDs and upstream English running -> run; URI varies by row"}
+        results["symbol_parallel"] = record
+        checkpoint()
+        assert record["leader_participation"] == "off" and scans and workers, record
+        assert any(worker.get("Actual Rows", 0) > 0 and worker.get("Actual Loops", 0) > 0 for worker in workers), record
+        assert processed == 256 and record["count"] == "256", record
+
+
 def repeated_requests():
     with Session() as session:
         session.value("SET statement_timeout='60s'; SET jit=off")
@@ -150,14 +181,55 @@ def repeated_requests():
             results["test_counters"] = hooks(session)
 
 
-def cache_invalidation():
-    state = results["cache_invalidation"]
+def repeated_symbol_requests():
+    with Session() as session:
+        session.value("SET statement_timeout='60s';SET jit=off")
+        text = "https://example.com/Running?q=100ms example.org User+tag@example.com /tmp/RunningTests.rs 100ms 0x5fff"
+        statement = ("SELECT count(to_tsvector('public.charabia'," + literal(text) +
+                     "||' '||g::text)) FROM generate_series(1,250) g")
+        headline = ("SELECT sum(length(ts_headline('public.charabia'," + literal(text) +
+                    "||' '||g::text,'run | ms | 5fff'::tsquery,'HighlightAll=true'))) FROM generate_series(1,250) g")
+        session.value(statement)
+        session.value(headline)
+        samples = []
+        results["symbol_requests"] = {"document": text, "vector_sql": statement,
+                                      "headline_sql": headline, "samples": samples}
+        for batch in range(8):
+            before = hooks(session)
+            assert session.value(statement) == "250"
+            assert int(session.value(headline)) > 0
+            sample = observe(session, "symbol-requests", batch)
+            samples.append(sample)
+            checkpoint()
+            if before is not None:
+                after = sample["hooks"]
+                assert after["parser_created"] - before["parser_created"] == 500, (before, after)
+                assert after["parser_created"] == after["parser_dropped"], after
+                assert after["state_registered"] - before["state_registered"] == 500, (before, after)
+                assert after["state_released"] - before["state_released"] == 500, (before, after)
+                assert after["dictionary_created"] == before["dictionary_created"], (before, after)
+                assert after["dictionary_live_fst_bytes"] == 0, after
+                assert after["dictionary_live_referenced_fst_bytes"] == before["dictionary_live_referenced_fst_bytes"], (before, after)
+        bounded_contexts(samples[2:])
+
+
+def cache_invalidation(symbol=False):
+    state = results.setdefault("symbol_cache_invalidation", {}) if symbol else results["cache_invalidation"]
     state.update({"builtin_language": "eng", "sentinel": "the", "warmup": [], "control": [], "measurement": [],
                   "basis": "Pinned NLTK English stoplist contains the; Discard=false references no stop FST; all FST bytes are static"})
     # This test measures one real dictionary lifecycle, independent of automatic
     # language quality. All lexical types deliberately map to the same English
     # dictionary; blank/display types remain unmapped.
-    run("""CREATE TEXT SEARCH DICTIONARY stress.cache_words(
+    dictionary_name = "stress.symbol_cache_words" if symbol else "stress.cache_words"
+    config = "stress.symbol_cache_config" if symbol else "stress.cache_config"
+    if symbol:
+        state["basis"] = "One real symbol Dictionary borrows static English FST; raw alpha_the_beta_1 retains literals while the component stops"
+        run("CREATE TEXT SEARCH DICTIONARY " + dictionary_name + "(TEMPLATE=charabia.symbol_template,"
+            "Kind='numword',Discard=false,Stem=false,Normalize=true);CREATE TEXT SEARCH CONFIGURATION " +
+            config + "(PARSER=charabia.parser);ALTER TEXT SEARCH CONFIGURATION " + config +
+            " ADD MAPPING FOR numword WITH " + dictionary_name)
+    else:
+        run("""CREATE TEXT SEARCH DICTIONARY stress.cache_words(
  TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
 CREATE TEXT SEARCH CONFIGURATION stress.cache_config(PARSER=charabia.parser);
 DO $map$ DECLARE l jsonb; BEGIN
@@ -165,14 +237,17 @@ DO $map$ DECLARE l jsonb; BEGIN
   EXECUTE format('ALTER TEXT SEARCH CONFIGURATION stress.cache_config ADD MAPPING FOR %I WITH stress.cache_words',l->>'language');
  END LOOP;
 END $map$;""")
-    document = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. alpha beta the"
-    selected = json.loads(run("SELECT json_agg(DISTINCT language) FROM charabia.analyze(" + literal(document) + ") WHERE kind='word'"))
+    document = ("alpha_the_beta_1" if symbol else
+                "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. alpha beta the")
+    selected = json.loads(run("SELECT coalesce(json_agg(DISTINCT language),'[]'::json) FROM charabia.analyze(" + literal(document) + ") WHERE kind='word'"))
     state["probe_document"] = document
     state["selected_languages"] = selected
+    if symbol:
+        assert selected == [], selected
     with Session() as warm, Session() as updater:
         warm.value(
             "SET plan_cache_mode=force_generic_plan; SET jit=off; SET statement_timeout='60s'; "
-            "PREPARE cache_probe(text) AS SELECT to_tsvector('stress.cache_config',$1)::text"
+            "PREPARE cache_probe(text) AS SELECT to_tsvector('" + config + "',$1)::text"
         )
         updater.value("SET statement_timeout='60s'")
         # Parameter binding prevents constant folding from hiding cache lookup.
@@ -225,7 +300,7 @@ END $map$;""")
         def cycle(phase, number, selection, replaced):
             before = hooks(warm)
             if replaced:
-                updater.value("ALTER TEXT SEARCH DICTIONARY stress.cache_words(Discard=" + ("true" if selection else "false") + ")")
+                updater.value("ALTER TEXT SEARCH DICTIONARY " + dictionary_name + "(Discard=" + ("true" if selection else "false") + ")")
             value = warm.value(probe)
             sample = dict(observe(warm, phase, number), discard=bool(selection), vector=value)
             state[phase].append(sample)
@@ -304,19 +379,24 @@ def bm25_query(text):
     )
 
 
-def assert_bm25_plan(plan):
+def assert_bm25_plan(plan, index="stress_bm25"):
     scans = [node for node in nodes(plan)
              if node.get("Node Type") == "Index Scan"
-             and node.get("Index Name") == "stress_bm25"
+             and node.get("Index Name") == index
              and node.get("Schema") == "stress"
              and node.get("Actual Loops", 0) > 0]
     assert scans, plan
 
 
 def concurrency():
+    run("CREATE TABLE stress.symbol_docs(id int PRIMARY KEY,body text NOT NULL);"
+        "INSERT INTO stress.symbol_docs VALUES(1,'100ms'),(2,'200ms'),(3,'0x5fff'),"
+        "(4,'https://example.com/Running');CREATE INDEX stress_symbol_gin ON stress.symbol_docs "
+        "USING gin(to_tsvector('public.charabia',body))")
     if LINUX:
         # Every writer mutation below must maintain an already-existing index.
         run("CREATE INDEX stress_bm25 ON stress.docs USING bm25(body) WITH(text_config='public.charabia')")
+        run("CREATE INDEX stress_symbol_bm25 ON stress.symbol_docs USING bm25(body) WITH(text_config='public.charabia')")
     snapshots_ready = threading.Barrier(3)
     writes_committed = threading.Barrier(3)
     stop = threading.Event()
@@ -351,8 +431,16 @@ def concurrency():
                             f"WHERE id BETWEEN {first} AND {first+19}"
                         )
                         session.value(f"DELETE FROM stress.docs WHERE id BETWEEN {first+40} AND {first+49}")
+                        # This already-indexed small table isolates actual
+                        # symbol postings while preserving the original load.
+                        symbol_id = 100 + batch
+                        session.value("INSERT INTO stress.symbol_docs VALUES(" + str(symbol_id) +
+                                      ",'100ms'),(" + str(symbol_id + 100) + ",'100ms')")
+                        session.value("UPDATE stress.symbol_docs SET body='0x5fff' WHERE id=" + str(symbol_id + 100))
+                        session.value("DELETE FROM stress.symbol_docs WHERE id=" + str(symbol_id + 100))
                         record["batches"].append({
                             "batch": batch, "inserted": 50, "updated": 20, "deleted": 10,
+                            "symbol_inserted": 2, "symbol_updated": 1, "symbol_deleted": 1,
                             "started_monotonic": started, "committed_monotonic": time.monotonic(),
                         })
                         writes_committed.wait(timeout=90)
@@ -371,6 +459,12 @@ def concurrency():
                             "batch": batch, "query": text, "snapshot": snapshot, "native_oracle": oracle,
                             "started_monotonic": started, "oracle_monotonic": time.monotonic(),
                         }
+                        symbol_text = "100ms" if batch % 2 == 0 else "5fff"
+                        symbol_oracle_sql = ("SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM stress.symbol_docs "
+                            "WHERE tsvector_to_array(to_tsvector('public.charabia',body)) && "
+                            "tsvector_to_array(to_tsvector('public.charabia'," + literal(symbol_text) + "))")
+                        observation["symbol"] = {"query": symbol_text, "oracle_sql": symbol_oracle_sql,
+                                                 "native_oracle": json.loads(session.value(symbol_oracle_sql))}
                         record["batches"].append(observation)
                         # The index now contains committed writes newer than
                         # this reader snapshot; its scan must honor that snapshot.
@@ -386,8 +480,20 @@ def concurrency():
                             observation["bm25_candidates"] = actual
                             assert_bm25_plan(plan)
                             assert actual == oracle, observation
+                            symbol_sql = ("SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM ("
+                                "SELECT id FROM stress.symbol_docs ORDER BY body <@> to_bm25query(" +
+                                literal(symbol_text) + ",'stress.stress_symbol_bm25') LIMIT 100) ranked")
+                            symbol_plan = json.loads(session.value(
+                                "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + symbol_sql))
+                            symbol_actual = json.loads(session.value(symbol_sql))
+                            observation["symbol"].update(sql=symbol_sql, plan=symbol_plan, bm25_candidates=symbol_actual)
+                            assert_bm25_plan(symbol_plan, "stress_symbol_bm25")
+                            assert symbol_actual == observation["symbol"]["native_oracle"], observation
                         else:
                             assert int(session.value("SELECT count(*) FROM stress.docs")) >= 20000
+                            symbol_actual = json.loads(session.value(symbol_oracle_sql))
+                            observation["symbol"]["repeated_native"] = symbol_actual
+                            assert symbol_actual == observation["symbol"]["native_oracle"], observation
                         session.value("COMMIT")
                         error = session.query("SELECT * FROM charabia.analyze(repeat('x',262145))")
                         assert "ERROR:" in error and session.value("SELECT 1") == "1", error
@@ -468,6 +574,7 @@ def concurrency():
     if failures:
         raise AssertionError(f"Concurrent clients failed after join: {[repr(error) for error in failures]}") from failures[0]
     assert run("SELECT count(*) FROM stress.docs") == "20320"
+    assert run("SELECT count(*) FROM stress.symbol_docs") == "12"
     if LINUX:
         with Session() as session:
             session.value("SET enable_seqscan=off; SET jit=off; SET statement_timeout='60s'")
@@ -491,8 +598,11 @@ CREATE INDEX stress_gin ON stress.docs USING gin(to_tsvector('public.charabia',b
 ANALYZE stress.docs;
 """)
     parallel_execution()
+    parallel_symbol_execution()
     repeated_requests()
+    repeated_symbol_requests()
     cache_invalidation()
+    cache_invalidation(symbol=True)
     concurrency()
     results["status"] = "passed"
 except BaseException as error:

@@ -183,6 +183,118 @@ def capture_plan(session, name, sql, index):
     return forced
 
 
+def symbol_workloads():
+    """Collect bounded symbol observations before ordinary-domain gates run."""
+    cases = [
+        ("url", "https://example.com/running?q=100ms"),
+        ("host", "standalone.example.net"),
+        ("email", "user+tag@example.org"),
+        ("file", "/src/running-tests.rs"),
+        ("numword", "100ms"),
+    ]
+    record = results["symbols"] = {
+        "status": "running", "cases": cases, "modes": {},
+        "basis": "Five fixed literal structures repeated across 100 rows; ordinary words explicitly use English without stop/stem. Query expectations come from declared literal/component rules, not observed extension output.",
+        "control": "literal_only maps the five symbol types to real pg_catalog.simple. It is a smaller alternative workload, not an equivalent analyzer or a model of symbol CPU cost.",
+        "cost_boundary": "Parser/analyze, full vectorization, index construction, indexed writes, query analysis, ranking, and whole-source headline are separate measured operations. No SLA or score/storage neutrality claim.",
+    }
+    checkpoint()
+    run(f"CREATE TEXT SEARCH DICTIONARY {SCHEMA}.symbol_words(TEMPLATE=charabia.template,Language='eng',"
+        "Discard=false,Stem=false,Normalize=true,Filter=false,English=false);"
+        f"CREATE TEXT SEARCH CONFIGURATION {SCHEMA}.symbol_default(COPY=public.charabia);"
+        "DO $symbols$ DECLARE l jsonb; BEGIN "
+        "FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP "
+        f"EXECUTE format('ALTER TEXT SEARCH CONFIGURATION {SCHEMA}.symbol_default ALTER MAPPING FOR %I WITH {SCHEMA}.symbol_words',l->>'language');"
+        "END LOOP;END $symbols$;"
+        f"CREATE TEXT SEARCH CONFIGURATION {SCHEMA}.symbol_literal(COPY={SCHEMA}.symbol_default);"
+        f"ALTER TEXT SEARCH CONFIGURATION {SCHEMA}.symbol_literal ALTER MAPPING FOR url,host,email,file,numword WITH pg_catalog.simple;")
+    source = ",".join(f"({ordinal},{literal(kind)},{literal('left ' + raw + ' right')})"
+        for ordinal, (kind, raw) in enumerate(cases))
+    run(f"CREATE TABLE {SCHEMA}.symbol_source(family_id integer PRIMARY KEY,family text NOT NULL,body text NOT NULL);"
+        f"INSERT INTO {SCHEMA}.symbol_source VALUES{source};")
+    for mode, config in (("expanded", f"{SCHEMA}.symbol_default"), ("literal_only", f"{SCHEMA}.symbol_literal")):
+        table = f"{SCHEMA}.symbol_docs_{mode}"
+        gin_index, bm25_index = f"symbol_{mode}_gin", f"symbol_{mode}_bm25"
+        run(f"CREATE TABLE {table}(id integer PRIMARY KEY,family text NOT NULL,body text NOT NULL CHECK(octet_length(body)<=262144))")
+        observations = record["modes"][mode] = {"configuration": config, "table": table}
+        with Session() as session:
+            session.value("SET statement_timeout='180s';SET client_min_messages=warning")
+            verify_library(session)
+            measure(session, mode + "-symbol-insert-bulk", f"INSERT INTO {table} SELECT g,s.family,s.body "
+                f"FROM generate_series(1,100)g JOIN {SCHEMA}.symbol_source s ON s.family_id=g%5")
+            memory(session, mode + "-symbol-cold", config)
+            measure(session, mode + "-symbol-first-vector", f"SELECT to_tsvector({literal(config)},body)::text FROM {table} WHERE id=1")
+            measure(session, mode + "-symbol-parser", f"SELECT sum((SELECT count(*)FROM charabia.analyze(d.body)))FROM {table} d", 3)
+            measure(session, mode + "-symbol-vectorize", f"SELECT sum(length(to_tsvector({literal(config)},body)))FROM {table}", 3)
+            observations["vectors_tf_dl"] = json.loads(statement(session,
+                "SELECT jsonb_agg(jsonb_build_object('id',d.id,'family',d.family,'body',d.body,"
+                f"'vector',to_tsvector({literal(config)},d.body)::text,"
+                f"'tf',(SELECT jsonb_object_agg(lexeme,cardinality(positions))FROM unnest(to_tsvector({literal(config)},d.body))),"
+                f"'dl',(SELECT sum(cardinality(positions))FROM unnest(to_tsvector({literal(config)},d.body))))ORDER BY d.id)"
+                f"FROM {table} d WHERE id<=10", mode + "-symbol-vector-tf-dl"))
+            observations["tf_dl_meaning"] = "Actual tsvector position counts, before BM25 fieldnorm quantization; no invented BM25 formula."
+            measure(session, mode + "-symbol-build-gin", f"CREATE INDEX {gin_index} ON {table} USING gin(to_tsvector({literal(config)},body))")
+            measure(session, mode + "-symbol-build-bm25", f"CREATE INDEX {bm25_index} ON {table} USING bm25(body)WITH(text_config={literal(config)})")
+            session.value(f"ANALYZE {table}")
+            observations["queries"] = []
+            for label, query in (("unit", "100ms"), ("full-url", cases[0][1])):
+                expected = ([number for number in range(1, 101) if number % 5 in (0, 4)] if label == "unit" else list(range(1, 101))) if mode == "expanded" else (
+                    [number for number in range(1, 101) if number % 5 == (4 if label == "unit" else 0)])
+                ranked = (f"SELECT id,body <@> to_bm25query({literal(query)},'{SCHEMA}.{bm25_index}')AS score FROM {table} "
+                    f"ORDER BY body <@> to_bm25query({literal(query)},'{SCHEMA}.{bm25_index}')LIMIT 200")
+                capture_plan(session, mode + "-symbol-" + label, ranked, bm25_index)
+                rows = json.loads(measure(session, mode + "-symbol-query-" + label,
+                    "SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]')FROM(" + ranked + ")r", 3))
+                observation = {"query": query, "rows": rows, "independent_candidate_ids": expected,
+                    "meaning": "Candidate expansion and actual scores/ranks are separate observations; full-query bag matches do not establish structural equality or ranking quality."}
+                observations["queries"].append(observation)
+                checkpoint()
+                check(sorted(row["id"] for row in rows) == expected, "symbol benchmark literal/component candidates changed", observation)
+                check(all(math.isfinite(row["score"]) for row in rows), "symbol benchmark produced nonfinite scores", observation)
+                measure(session, mode + "-symbol-query-any-" + label,
+                    f"SELECT charabia.query_any({literal(query)},{literal(config)})::text", 3)
+            gin = f"SELECT id FROM {table} WHERE to_tsvector({literal(config)},body) @@ plainto_tsquery({literal(config)},'100ms')"
+            capture_plan(session, mode + "-symbol-gin", gin, gin_index)
+            ids = json.loads(measure(session, mode + "-symbol-query-gin", "SELECT coalesce(jsonb_agg(id ORDER BY id),'[]')FROM(" + gin + ")r", 3))
+            expected = [number for number in range(1, 101) if number % 5 in ((0, 4) if mode == "expanded" else (4,))]
+            check(ids == expected, "symbol benchmark native full/bundle IDs changed", {"expected": expected, "actual": ids})
+            observations["native_unit_ids"] = ids
+            session.value("SET enable_seqscan=on;SET enable_indexscan=on;SET enable_indexonlyscan=on;SET enable_bitmapscan=on")
+            measure(session, mode + "-symbol-insert", f"INSERT INTO {table} VALUES(101,'numword','left 100ms right')")
+            measure(session, mode + "-symbol-update", f"UPDATE {table} SET body='left replacement right'WHERE id=101")
+            measure(session, mode + "-symbol-delete", f"DELETE FROM {table} WHERE id=101")
+            session.value(f"ANALYZE {table}")
+            after_dml = f"SELECT id FROM {table} ORDER BY body <@> to_bm25query('100ms','{SCHEMA}.{bm25_index}')LIMIT 200"
+            capture_plan(session, mode + "-symbol-after-dml", after_dml, bm25_index)
+            after_ids = json.loads(statement(session, "SELECT coalesce(jsonb_agg(id ORDER BY id),'[]')FROM(" + after_dml + ")r", mode + "-symbol-after-dml-ids"))
+            check(after_ids == expected, "symbol indexed write observations did not restore the source corpus", after_ids)
+            topk = (f"WITH p AS MATERIALIZED(SELECT charabia.query_any('100ms',{literal(config)})AS q),"
+                f"ranked AS MATERIALIZED(SELECT id,body,body <@> to_bm25query('100ms','{SCHEMA}.{bm25_index}')AS score "
+                f"FROM {table} WHERE(SELECT numnode(q)>0 FROM p)ORDER BY body <@> to_bm25query('100ms','{SCHEMA}.{bm25_index}')LIMIT 10)"
+                f"SELECT r.id,r.body,r.score,ts_headline({literal(config)},r.body,p.q,'HighlightAll=true')AS headline "
+                "FROM ranked r CROSS JOIN p ORDER BY r.score")
+            plan = capture_plan(session, mode + "-symbol-topk-headline", topk, bm25_index)
+            p_nodes = [node for node in nodes(plan) if node.get("Subplan Name") == "CTE p"]
+            check(len(p_nodes) == 1 and p_nodes[0].get("Actual Loops") == 1 and p_nodes[0].get("Actual Rows") == 1,
+                  "symbol performance query_any was not evaluated once", p_nodes)
+            headline_rows = json.loads(measure(session, mode + "-symbol-topk-headline",
+                "SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]')FROM(" + topk + ")r", 3))
+            check(len(headline_rows) == 10 and all(row["id"] in expected for row in headline_rows),
+                  "symbol headline top-k includes a noncandidate", headline_rows)
+            check(all(html.unescape(row["headline"].replace("<b>", "").replace("</b>", "")) == row["body"] and
+                      "<b>" in row["headline"] for row in headline_rows), "symbol headline performance path loses source", headline_rows)
+            observations["topk_headlines"] = headline_rows
+            observations["sizes"] = json.loads(statement(session,
+                "SELECT jsonb_object_agg(relname,jsonb_build_object('main_bytes',pg_relation_size(oid),'total_bytes',pg_total_relation_size(oid)))"
+                f"FROM pg_class WHERE relnamespace='{SCHEMA}'::regnamespace AND relname IN('symbol_docs_{mode}','{gin_index}','{bm25_index}')",
+                mode + "-symbol-sizes"))
+            memory(session, mode + "-symbol-warm", config)
+            observations["status"] = "measured"
+            checkpoint()
+    record["status"] = "measured"
+    checkpoint()
+
+
 def logical_ablation(session, table, config):
     rows = json.loads(statement(session, f"""
 SELECT jsonb_agg(jsonb_build_object('id',d.id,'family',d.family,'body',d.body,
@@ -259,6 +371,7 @@ def main():
         setup = run(f"CREATE SCHEMA {SCHEMA}", check=False)
         check(setup.returncode == 0, "cannot create exclusively owned benchmark schema", setup.stderr)
         created_schema = True
+        symbol_workloads()
         run(native_config_sql(f'{SCHEMA}.no_stem',stem=False,discard=True))
         # Same terminal dictionary, with zero/one/two real preparation filters.
         # Output equality is required before timing; these are not public profiles.

@@ -14,7 +14,7 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, symbol_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -197,11 +197,22 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                     (tests / (suite + ".py")).write_text("# Selection fixture only\n")
             self.assertEqual(select_suites(None, "linux-amd64", directory), list(SUITES))
             self.assertEqual(select_suites(None, "macos-arm64", directory), list(MAC_DEFAULT))
-            self.assertEqual(ARCHIVE_SUITES, ("smoke", "chain", "headline", "config", "recovery"))
+            self.assertEqual(ARCHIVE_SUITES, ("smoke", "symbol", "chain", "headline", "config", "recovery"))
             for suite in ("chain", "recovery"):
                 (tests / (suite + ".py")).unlink()
                 with self.assertRaisesRegex(ValueError, "not implemented"):
                     select_suites([suite], "linux-amd64", directory)
+
+    def test_disclosed_symbol_costs_cannot_disappear_from_delivery(self):
+        report=self.report()
+        require_release_report(report)
+        del report["symbol_quality_costs"]
+        with self.assertRaisesRegex(ValueError,"symbol precision"):
+            require_release_report(report)
+        report=self.report()
+        report["symbol_quality_costs"][0]["native_actual"]=False
+        with self.assertRaisesRegex(ValueError,"symbol precision"):
+            require_release_report(report)
 
     def test_exact_quality_failures_are_separate(self):
         frozen = frozen_quality_cases()
@@ -246,6 +257,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                 "quality": {"format": FORMAT, "cases": [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen_quality_cases().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
                 "analysis_info": self.info(), "public_api_abi_verified": True, "default_objects_verified": True,
                 "default_objects": self.default_objects(),
+                "symbol_quality_costs":[{"input":"100 ms","query":"100ms","domain_expected":False,"native_actual":True}],
                 "loaded_library_sha256": "f" * 64,
                 "recovery": {"format": FORMAT, "status": "passed", "loaded_library_sha256": "f" * 64, "cleanup": {key: True for key in ("marker_matches", "clusters_stopped", "directory_removed")}},
                 "pg_textsearch": {"loaded_backend_verified": True},
@@ -254,16 +266,10 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
     def info(self):
         return {"extension": RELEASE_VERSION, "pgrx": "0.19.3", "charabia": "0.10.0", "target": "x86_64-unknown-linux-gnu", "cargo_lock_sha256": "a" * 64,
                 "resource_manifest_sha256": "b" * 64, "analysis_revision": ANALYSIS_REVISION, "resource_fingerprint": "c" * 64,
-                "language_count": 16, "languages": language_capabilities(), "resources": {}}
+                "language_count": 16, "languages": language_capabilities(), "symbols": symbol_identity(), "resources": {}}
 
     def default_objects(self):
-        return {"parser": {"schema": "charabia", "name": "parser"},
-                "types": [{"id": index, "alias": alias} for index, alias in enumerate((*LANGUAGE_CODES, "blank", "display_only"), 1)],
-                "dictionaries": sorted(LANGUAGE_CODES),
-                "dictionary_options": [{"dictionary": row["language"], "template_schema": "charabia", "template": "template",
-                                        "options": ", ".join(f"{key} = '{value}'" for key, value in {"language": row["language"], **{key: str(value).lower() for key, value in row["defaults"].items()}}.items())}
-                                       for row in sorted(language_capabilities(), key=lambda item: item["language"])],
-                "mappings": [{"type": index, "order": 1, "dictionary_schema": "charabia", "dictionary": alias} for index, alias in enumerate(LANGUAGE_CODES, 1)]}
+        return default_catalog()
 
     def test_manifest_separates_build_sources_from_runtime_data(self):
         manifest=json.loads((ROOT/"resources/manifest.json").read_text())

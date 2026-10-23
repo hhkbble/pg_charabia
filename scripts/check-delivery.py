@@ -114,6 +114,9 @@ def main():
             raise RuntimeError("Delivery manifest and original loaded library identity disagree")
         result["delivery_manifest"] = manifest
         result["original_quality"] = original["quality"]
+        if manifest.get("symbol_quality_costs") != original.get("symbol_quality_costs"):
+            raise RuntimeError("Delivery manifest omits or changes the recorded symbol precision costs")
+        result["symbol_quality_costs"] = original["symbol_quality_costs"]
         version = command([pg_config, "--version"], "pg-version", True).strip()
         if not version.startswith("PostgreSQL 18.") or version != manifest["postgres_build"]:
             raise RuntimeError(f"Expected the packaged PostgreSQL build {manifest['postgres_build']}, got {version}")

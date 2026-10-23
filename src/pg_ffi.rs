@@ -259,6 +259,39 @@ pub fn lexemes(outcome: LexizeOutcome) -> Internal {
     }
 }
 
+pub(crate) fn symbol_lexemes(terms: Option<crate::symbols::SymbolTerms>) -> Internal {
+    let Some(terms) = terms else {
+        return datum(0);
+    };
+    let count = terms.len();
+    let (full, components) = terms.into_groups();
+    let component_variant = full.len() as u16;
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit("symbol_emit");
+    // SAFETY: SymbolTerms validates <=66 entries and its complete byte budget
+    // before any PG allocation. All returned storage belongs to PG, not Rust.
+    unsafe {
+        let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::TSLexeme>() * (count + 1))
+            .cast::<pg_sys::TSLexeme>();
+        let mut index = 0;
+        for (variant, term) in full.into_iter().enumerate() {
+            (*result.add(index)).lexeme = pg_string(&term);
+            (*result.add(index)).nvariant = variant as u16;
+            index += 1;
+            #[cfg(feature = "test-hooks")]
+            if index == 1 {
+                crate::test_hooks::hit("symbol_emit_string");
+            }
+        }
+        for term in components {
+            (*result.add(index)).lexeme = pg_string(&term);
+            (*result.add(index)).nvariant = component_variant;
+            index += 1;
+        }
+        pointer(result)
+    }
+}
+
 pub fn lextypes() -> Internal {
     // SAFETY: Each descriptor/string and the zero terminator are PG-owned.
     unsafe {
@@ -269,7 +302,7 @@ pub fn lextypes() -> Internal {
             let entry = result.add(index);
             (*entry).lexid = route.id();
             (*entry).alias = pg_string(route.alias());
-            (*entry).descr = pg_string(if !route.is_language() {
+            (*entry).descr = pg_string(if !route.is_content() {
                 "Unindexed original text fragment"
             } else {
                 route.alias()
@@ -277,6 +310,52 @@ pub fn lextypes() -> Internal {
         }
         pointer(result)
     }
+}
+
+/// # Safety
+/// INIT supplies a live PG-owned List<DefElem>; option bindings guard PG ERROR.
+pub(crate) unsafe fn symbol_options(options: Internal) -> crate::symbols::Options {
+    require_utf8();
+    let mut kind = None;
+    let (mut discard, mut stem, mut normalize) = (true, true, true);
+    let mut seen = std::collections::BTreeSet::new();
+    pgrx::memcx::current_context(|cx| {
+        let list =
+            unsafe { pgrx::list::List::<*mut c_void>::downcast_ptr_in_memcx(raw(options), cx) }
+                .unwrap_or_else(|| invalid("invalid symbol dictionary option list"));
+        for pointer in list.iter() {
+            let def = (*pointer).cast::<pg_sys::DefElem>();
+            let name = unsafe { CStr::from_ptr((*def).defname) }
+                .to_str()
+                .unwrap_or_else(|_| invalid("invalid option name UTF8"))
+                .to_ascii_lowercase();
+            if !seen.insert(name.clone()) {
+                invalid(format!("duplicate symbol dictionary option: {name}"));
+            }
+            match name.as_str() {
+                "kind" => {
+                    let value = unsafe { CStr::from_ptr(pg_sys::defGetString(def)) }
+                        .to_str()
+                        .unwrap_or_else(|_| invalid("invalid Kind UTF8"));
+                    kind = Some(
+                        crate::symbols::SymbolKind::from_alias(value).unwrap_or_else(|| {
+                            invalid("Kind must be url, host, email, file or numword")
+                        }),
+                    );
+                }
+                "discard" => discard = unsafe { pg_sys::defGetBoolean(def) },
+                "stem" => stem = unsafe { pg_sys::defGetBoolean(def) },
+                "normalize" => normalize = unsafe { pg_sys::defGetBoolean(def) },
+                _ => invalid(format!("unknown symbol dictionary option: {name}")),
+            }
+        }
+    });
+    checked(crate::symbols::Options::new(
+        kind.unwrap_or_else(|| invalid("Kind is required")),
+        discard,
+        stem,
+        normalize,
+    ))
 }
 
 /// # Safety
@@ -569,7 +648,7 @@ pub unsafe fn headline(
                 "invalid headline token type",
             )
         });
-        let word = entry.repeated() == 0 && token_type.is_language();
+        let word = entry.repeated() == 0 && token_type.is_content();
         // SAFETY: Mutate only scratch type/flags. The original pos, item,
         // repeated, raw bytes and language route remain owned by PG core.
         unsafe {

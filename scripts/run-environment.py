@@ -317,7 +317,7 @@ def main():
             FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
             WHERE n.nspname='charabia' AND p.proname IN
             ('parser_start','parser_gettoken','parser_end','parser_lextypes','parser_headline',
-             'dictionary_init','dictionary_lexize');"""
+             'dictionary_init','dictionary_lexize','symbol_dictionary_init','symbol_dictionary_lexize');"""
         actual_abi = json.loads(command(psql + ["-Atq", "-c", abi_query], "fts-callback-abi", True))
         callback_types = {
             "parser_start": ("internal, integer", "internal"),
@@ -326,6 +326,8 @@ def main():
             "parser_lextypes": ("internal", "internal"),
             "parser_headline": ("internal, internal, tsquery", "internal"),
             "dictionary_init": ("internal", "internal"),
+            "symbol_dictionary_init": ("internal", "internal"),
+            "symbol_dictionary_lexize": ("internal, internal, internal, internal", "internal"),
             "dictionary_lexize": ("internal, internal, internal, internal", "internal"),
         }
         expected_abi = [{"name": name, "arguments": types[0], "returns": types[1], "strict": True} for name, types in sorted(callback_types.items())]
@@ -457,6 +459,17 @@ def main():
                 result["quality"] = read_quality(evidence / "quality-results.json")
             except (ValueError, json.JSONDecodeError) as exc:
                 result["quality_error"] = str(exc)
+        symbol_report=evidence/"symbol-results.json"
+        if symbol_report.is_file():
+            try:
+                symbol_data=json.loads(symbol_report.read_text())
+                result["symbol_quality_costs"]=symbol_data.get("quality_observations",[])
+            except (ValueError,TypeError,AttributeError) as exc:
+                result["symbol_quality_cost_error"]=str(exc)
+                if result["status"] != "cleanup-failed":
+                    result["status"]="failed"
+                if failure is None:
+                    failure=exc
         result["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         checkpoint()
         print(f"[{run_id}] {result['status']}; evidence: {evidence}", flush=True)

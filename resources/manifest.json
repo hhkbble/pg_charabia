@@ -90,7 +90,7 @@
       "bytes": 142094
     }
   ],
-  "pipeline_revision": "route16-english-shared-fst-1",
+  "pipeline_revision": "route16-ascii-symbol-1",
   "language_policy": "charabia15-clamp-script3-english-merge",
   "lexeme_policy": "terminal-native-and-english-up-to-four-or-single-filter",
   "general_dependencies": {
@@ -106,6 +106,22 @@
         "nltk"
       ],
       "precedence": "NLTK whole table; ISO missing language only"
+    },
+    "linkify": {
+      "version": "0.11.0",
+      "sha256": "92f9ae2f3d31697697311f016320fe984127e636b45cf5eb5c175b7eb103dadb",
+      "license": "MIT OR Apache-2.0",
+      "selected_license": "MIT",
+      "notice": "notices/linkify-LICENSE-MIT.txt",
+      "notice_sha256": "ee04163bfec76c4f977a0c0a5834fd285c0df4b3889da5bba27d2151f3833d95"
+    },
+    "iri-string": {
+      "version": "0.7.14",
+      "sha256": "1663ee7d8cf2900cc1414b1e1eec9f348d6eaa3bcab07579f4726a4b8499f447",
+      "license": "MIT OR Apache-2.0",
+      "selected_license": "MIT",
+      "notice": "notices/iri-string-LICENSE-MIT.txt",
+      "notice_sha256": "21ab3c8e9af71d0212606c98a210f71d6a86234b179b3babff0ccc4798b90f33"
     }
   },
   "language_routes": [
@@ -331,7 +347,7 @@
     "notices/ESDB-Copyright.txt": "71bffd4b74ad47fff01c8b3c666e77da92737854e568850d8728024e0a53f304",
     "notices/GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
     "notices/LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
-    "notices/README.md": "4d1dd1ef733138af3c0802dd613604d78ec6cf8480df3cde36388d8c60e532e8",
+    "notices/README.md": "84abd68155a06c306423b26389e33497a9eb4138421a12258f6ac118135e3887",
     "notices/charabia-MIT.txt": "b0b5aee3ad1a8cad84dd3b73dbac346bf2b903b33ea90b1d1b3d0800744f5a74",
     "notices/german-decompounder-NOTICE.txt": "abb37d58a38238c34814c4433293fddea2c53e7e377a7763abce9517219e1033",
     "notices/german-words-source.txt": "9a643bc1e0ce04337100a4b62a39d3e8ead004458d46f5ddf01c0c02ec5844a1",
@@ -348,7 +364,9 @@
     "notices/stop-words-README.md": "723b37258d18258fea4ff9c14f2a081a088002fbdf31bbe47a6e66261c839d10",
     "notices/stop-words-src-nltk-README": "e0365fde880eadb522f844cba2774529969b66b7406db7643cf260dcd77d6541",
     "notices/stopwords-iso-LICENSE": "7f2982f30e863a3c9826dcc51e1ad895d2a78b1f55d4398d0f5eb9b5c0631f13",
-    "notices/unidic/COPYING.txt": "178ffb7cbc2beadb0b87a14497e58222b484076ba7cfc8938a07ac7627fa22c4"
+    "notices/unidic/COPYING.txt": "178ffb7cbc2beadb0b87a14497e58222b484076ba7cfc8938a07ac7627fa22c4",
+    "notices/linkify-LICENSE-MIT.txt": "ee04163bfec76c4f977a0c0a5834fd285c0df4b3889da5bba27d2151f3833d95",
+    "notices/iri-string-LICENSE-MIT.txt": "21ab3c8e9af71d0212606c98a210f71d6a86234b179b3babff0ccc4798b90f33"
   },
   "compiled_stop_sets": {
     "eng": {
@@ -645,5 +663,11 @@
       "bytes": 259
     }
   ],
-  "compiled_resource_policy": "Runtime embeds only the selected Charabia data and the 15 stop FSTs plus English FST. build_source_files are checksum-verified inputs, not linked raw arrays."
+  "compiled_resource_policy": "Runtime embeds only the selected Charabia data and the 15 stop FSTs plus English FST. build_source_files are checksum-verified inputs, not linked raw arrays.",
+  "symbol_policy": "ascii-atomic-full-or-component-bundle-1",
+  "ordinary_ascii_delimiters": [
+    "<",
+    ">",
+    "="
+  ]
 }

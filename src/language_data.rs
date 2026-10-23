@@ -2,7 +2,6 @@
 use charabia::{Language, Script};
 pub const LANGUAGE_COUNT: usize = 15;
 pub const ROUTE_COUNT: usize = 16;
-pub const TYPE_COUNT: usize = 18;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LanguageId(u8);
 pub const LANGUAGES: [(Language, Script, &str, Option<&str>); LANGUAGE_COUNT] = [
