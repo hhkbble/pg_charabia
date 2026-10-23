@@ -139,10 +139,10 @@ fn url(raw: &str) -> Option<&UriStr> {
         return None;
     }
     let authority = uri.authority_components()?;
-    if authority.host().is_empty() {
-        if !uri.scheme_str().eq_ignore_ascii_case("file") || authority.port().is_some() {
-            return None;
-        }
+    if authority.host().is_empty()
+        && (!uri.scheme_str().eq_ignore_ascii_case("file") || authority.port().is_some())
+    {
+        return None;
     }
     Some(uri)
 }
@@ -297,10 +297,11 @@ fn version(raw: &str) -> bool {
 }
 
 fn numword(raw: &str) -> Option<Numword<'_>> {
-    if let Some(body) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        if !body.is_empty() && body.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Some(Numword::Hex(body));
-        }
+    if let Some(body) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X"))
+        && !body.is_empty()
+        && body.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Some(Numword::Hex(body));
     }
     if number(raw) || version(raw) {
         return Some(Numword::Literal);
@@ -783,9 +784,8 @@ mod tests {
                 "URI reg-name is not a DNS assertion: {raw}"
             );
         }
-        for invalid in ["https://example.com.:abc"] {
-            assert!(parse(SymbolKind::Url, invalid).is_none(), "{invalid}");
-        }
+        let invalid = "https://example.com.:abc";
+        assert!(parse(SymbolKind::Url, invalid).is_none(), "{invalid}");
     }
 
     #[test]
