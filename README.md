@@ -1,8 +1,8 @@
 # pg_charabia
 
-pg_charabia adds multilingual text analysis to PostgreSQL 18 with [Charabia](https://github.com/meilisearch/charabia). Use it with native full-text search (FTS), GIN indexes, and `ts_headline`. Optional BM25 ranking uses [pg_textsearch](https://github.com/timescale/pg_textsearch).
+pg_charabia adds multilingual linguistic analysis to PostgreSQL 18 with [Charabia](https://github.com/meilisearch/charabia). Use it with native full-text search (FTS), GIN indexes, and `ts_headline`. Optional BM25 ranking uses [pg_textsearch](https://github.com/timescale/pg_textsearch).
 
-Default dictionaries cover 15 languages plus `und` for an undetermined language. They enable built-in stopwords and stemming where supported. Five ASCII symbol dictionaries recognize URLs, hosts, email addresses, file paths, and mixed letter/number forms.
+Default dictionaries cover 15 languages plus `und` for an undetermined language. They enable built-in stopwords and stemming where supported. Five structured dictionaries for ASCII tokens recognize URLs, hosts, email addresses, file paths, and mixed letter/number forms.
 
 [Usage reference](docs/reference.md) · [Installation and maintenance](docs/operations.md) · [Architecture](docs/architecture.md) · [Development](docs/development.md)
 
@@ -56,7 +56,7 @@ A configuration `COPY` copies mappings but shares dictionaries. Create a separat
 CREATE SCHEMA app;
 CREATE TEXT SEARCH CONFIGURATION app.search(COPY=public.charabia);
 CREATE TEXT SEARCH DICTIONARY app.search_eng(
- TEMPLATE=charabia.template, Language='eng',
+ TEMPLATE=charabia.linguistic_template, Language='eng',
  Discard=true, Stem=false, Normalize=true, Filter=false
 );
 ALTER TEXT SEARCH CONFIGURATION app.search
@@ -67,7 +67,7 @@ SELECT ts_lexize('app.search_eng','running');
 SELECT charabia.query_any('全文 banana','app.search');
 ```
 
-Keep default extension members as an unchanged baseline. For indexed configurations, [analysis changes require vector and index maintenance](docs/operations.md#analysis-changes-and-index-maintenance). See the [dictionary parameters and chains](docs/reference.md#configurations-and-dictionary-chains), [filter example](docs/reference.md#filter-chain-example), and [custom symbol example](docs/reference.md#custom-symbol-dictionary-example).
+Keep default extension members as an unchanged baseline. For indexed configurations, [analysis changes require vector and index maintenance](docs/operations.md#analysis-changes-and-index-maintenance). See the [dictionary parameters and chains](docs/reference.md#configurations-and-dictionary-chains), [filter example](docs/reference.md#filter-chain-example), and [custom structured token example](docs/reference.md#custom-structured-dictionary-example).
 
 ## Optional BM25 ranking
 
@@ -92,13 +92,13 @@ RESET enable_seqscan;
 
 The index path returns document `1`. Its plan contains an `Index Scan` on `documents_bm25`. Disabling sequential scans demonstrates that path on a tiny example table. It is not an application-wide planner recommendation.
 
-BM25 matches a bag of terms. Native AND, phrase, and symbol component queries have different semantics. See [Queries and BM25](docs/reference.md#queries-and-bm25) before combining ranking and match conditions.
+BM25 matches a bag of terms. Native AND, phrase, and structured token component queries have different semantics. See [Queries and BM25](docs/reference.md#queries-and-bm25) before combining ranking and match conditions.
 
 ## Limits and maintenance
 
 Validate complete documents and queries against the 262144-byte input limit before BM25 slices them. Keep the document CHECK from the quick start. See [all limits and known quality issues](docs/reference.md#limits-and-known-quality-issues).
 
-Short-query and mixed-language errors remain possible. The `cats were running` phrase case remains unresolved. Symbol components can match scattered words or shared parts. Headline is a presentation step, not a retrieval filter. See [symbol semantics](docs/reference.md#ascii-symbols) and [headline rules](docs/reference.md#headline).
+Short-query and mixed-language errors remain possible. The `cats were running` phrase case remains unresolved. Structured token components can match scattered words or shared parts. Headline is a presentation step, not a retrieval filter. See [structured token semantics](docs/reference.md#structured-ascii-tokens) and [headline rules](docs/reference.md#headline).
 
 Release v0.3.0 temporarily accepts [47 exact BM25 quality warnings](docs/reference.md#reviewed-release-warnings), including extra matches, German `die` false matches, and a TopK ranking failure. Warnings remain quality failures and do not count as quality PASS. New differences, complete-candidate loss, and mechanism failures still block release.
 

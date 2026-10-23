@@ -90,7 +90,7 @@
       "bytes": 142094
     }
   ],
-  "pipeline_revision": "route16-ascii-symbol-1",
+  "pipeline_revision": "route16-structured-tokens-1",
   "language_policy": "charabia15-clamp-script3-english-merge",
   "lexeme_policy": "terminal-native-and-english-up-to-four-or-single-filter",
   "general_dependencies": {
@@ -664,7 +664,7 @@
     }
   ],
   "compiled_resource_policy": "Runtime embeds only the selected Charabia data and the 15 stop FSTs plus English FST. build_source_files are checksum-verified inputs, not linked raw arrays.",
-  "symbol_policy": "ascii-atomic-full-or-component-bundle-1",
+  "structured_token_policy": "ascii-atomic-full-or-component-bundle-1",
   "ordinary_ascii_delimiters": [
     "<",
     ">",

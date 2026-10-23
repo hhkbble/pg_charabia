@@ -259,7 +259,11 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
         ));
     }
     let calls = crate::language::complete(input, &mut spans)?;
-    let spans = overlay_symbols(input, spans, &crate::symbols::recognition::scan(input))?;
+    let spans = overlay_structured_tokens(
+        input,
+        spans,
+        &crate::structured_tokens::recognition::scan(input),
+    )?;
     let spans = split_literal_delimiters(input, spans);
     // Classify each upstream span once. The merge and type assignment reuse it.
     let classified = spans
@@ -267,7 +271,7 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
         .map(|span| {
             let raw = &input[span.start..span.end];
             let word = !matches!(raw, "<" | ">" | "=")
-                && !matches!(span.token_type, TokenType::Symbol(_))
+                && !matches!(span.token_type, TokenType::Structured(_))
                 && is_word(&input[span.start..span.end]);
             (span, word)
         })
@@ -276,7 +280,7 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
     let mut bounded = Vec::with_capacity(restored.len());
     for (mut span, word) in restored {
         if span.end - span.start <= MAX_RAW_TOKEN_BYTES {
-            span.token_type = if matches!(span.token_type, TokenType::Symbol(_)) {
+            span.token_type = if matches!(span.token_type, TokenType::Structured(_)) {
                 span.token_type
             } else if word {
                 TokenType::Language(span.route)
@@ -317,7 +321,7 @@ fn split_literal_delimiters(input: &str, spans: Vec<Span>) -> Vec<Span> {
     }
     let mut output = Vec::with_capacity(spans.len());
     for span in spans {
-        if matches!(span.token_type, TokenType::Symbol(_)) {
+        if matches!(span.token_type, TokenType::Structured(_)) {
             output.push(span);
             continue;
         }
@@ -360,10 +364,10 @@ fn split_literal_delimiters(input: &str, spans: Vec<Span>) -> Vec<Span> {
     output
 }
 
-fn overlay_symbols(
+fn overlay_structured_tokens(
     input: &str,
     spans: Vec<Span>,
-    candidates: &[crate::symbols::Candidate],
+    candidates: &[crate::structured_tokens::Candidate],
 ) -> Result<Vec<Span>, AnalysisError> {
     if candidates.is_empty() {
         return Ok(spans);
@@ -378,8 +382,8 @@ fn overlay_symbols(
             AnalysisError::new(ErrorKind::Internal, "symbol overlay lost the original span")
         })?;
         let next = candidates.get(candidate);
-        let symbol = next.filter(|item| item.start == byte);
-        let end = if let Some(item) = symbol {
+        let structured = next.filter(|item| item.start == byte);
+        let end = if let Some(item) = structured {
             item.end
         } else {
             next.map_or(span.end, |item| span.end.min(item.start))
@@ -393,8 +397,8 @@ fn overlay_symbols(
             char_end,
             ..span
         };
-        if let Some(item) = symbol {
-            clipped.token_type = TokenType::Symbol(item.kind);
+        if let Some(item) = structured {
+            clipped.token_type = TokenType::Structured(item.kind);
             clipped.route = LanguageId::UND;
             clipped.language_source = LanguageSource::None;
             // A structure may cover several upstream metadata records.
@@ -1147,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn markup_delimiters_do_not_hide_ordinary_words_or_split_symbols() {
+    fn markup_delimiters_do_not_hide_ordinary_words_or_split_structured_tokens() {
         let input = "<a href=\"https://Example.com/A?q=100ms\">search &amp; ordinary</a>";
         let spans = segment(input).unwrap();
         let words: Vec<_> = spans
@@ -1158,7 +1162,7 @@ mod tests {
         assert!(words.contains(&"search"));
         assert!(words.contains(&"ordinary"));
         assert!(spans.iter().any(|s| s.token_type
-            == TokenType::Symbol(crate::symbols::SymbolKind::Url)
+            == TokenType::Structured(crate::structured_tokens::StructuredTokenKind::Url)
             && &input[s.start..s.end] == "https://Example.com/A?q=100ms"));
         assert_eq!(
             spans

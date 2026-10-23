@@ -6,15 +6,15 @@ import re
 
 FORMAT = 2
 RELEASE_VERSION = "0.3.0"
-ANALYSIS_REVISION = "route16-ascii-symbol-1"
+ANALYSIS_REVISION = "route16-structured-tokens-1"
 LANGUAGE_CODES = ("eng", "deu", "nld", "rus", "spa", "fra", "por", "ita", "ara", "tur", "cmn", "jpn", "kor", "vie", "tha", "und")
 ENGLISH_ELIGIBLE = frozenset(("deu", "nld", "spa", "fra", "por", "ita", "tur", "vie"))
 LANGUAGE_SCRIPTS = dict(zip(LANGUAGE_CODES, ("Latin", "Latin", "Latin", "Cyrillic", "Latin", "Latin", "Latin", "Latin", "Arabic", "Latin", "Cj", "Cj", "Hangul", "Latin", "Thai", "Other")))
 LANGUAGE_STEMMERS = dict(zip(LANGUAGE_CODES[:10], ("English", "German", "Dutch", "Russian", "Spanish", "French", "Portuguese", "Italian", "Arabic", "Turkish")))
-SUITES = ("unit", "smoke", "native", "symbol", "chain", "bm25", "headline", "config", "lifecycle", "errors", "stress", "recovery", "benchmark")
-MAC_DEFAULT = ("unit", "native", "symbol", "chain", "headline", "config", "lifecycle", "errors")
-ARCHIVE_SUITES = ("smoke", "symbol", "chain", "headline", "config", "recovery")
-STATIC_INFO_FIELDS = frozenset(("extension", "pgrx", "charabia", "target", "cargo_lock_sha256", "resource_manifest_sha256", "analysis_revision", "resource_fingerprint", "language_count", "languages", "symbols", "resources"))
+SUITES = ("unit", "smoke", "native", "structured", "chain", "bm25", "headline", "config", "lifecycle", "errors", "stress", "recovery", "benchmark")
+MAC_DEFAULT = ("unit", "native", "structured", "chain", "headline", "config", "lifecycle", "errors")
+ARCHIVE_SUITES = ("smoke", "structured", "chain", "headline", "config", "recovery")
+STATIC_INFO_FIELDS = frozenset(("extension", "pgrx", "charabia", "target", "cargo_lock_sha256", "resource_manifest_sha256", "analysis_revision", "resource_fingerprint", "language_count", "languages", "structured_tokens", "resources"))
 VERIFIED = ("verified", "verified-with-known-quality-failures", "verified-with-quality-warnings")
 QUALITY_FIELDS = ("input", "query", "config", "expected", "actual")
 REQUIRED_QUALITY_CASES = frozenset(("english-den", "code-var", "english-short-phrase"))
@@ -105,8 +105,8 @@ def language_capabilities():
             for alias in LANGUAGE_CODES]
 
 
-def symbol_identity():
-    """Independent static rules and object expectations for ASCII symbols."""
+def structured_token_identity():
+    """Independent static rules and object expectations for structured ASCII tokens."""
     return {"rule_revision":"ascii-atomic-full-or-component-bundle-1", "dictionary_count":5,
             "ordinary_ascii_delimiters":["<",">","="],
             "types":[{"id":index,"kind":kind,"defaults":{"discard":True,"stem":True,"normalize":True}}
@@ -117,20 +117,20 @@ def symbol_identity():
 
 def default_catalog():
     """Expected standard objects, independent of runtime installation output."""
-    symbols=symbol_identity()["types"]
-    options=[{"dictionary":row["language"],"template_schema":"charabia","template":"template",
+    structured_tokens=structured_token_identity()["types"]
+    options=[{"dictionary":row["language"],"template_schema":"charabia","template":"linguistic_template",
               "options":", ".join(f"{key} = '{value}'" for key,value in
                  {"language":row["language"],**{key:str(value).lower() for key,value in row["defaults"].items()}}.items())}
              for row in language_capabilities()]
-    options += [{"dictionary":row["kind"],"template_schema":"charabia","template":"symbol_template",
-                 "options":f"kind = '{row['kind']}', discard = 'true', stem = 'true', normalize = 'true'"} for row in symbols]
+    options += [{"dictionary":row["kind"],"template_schema":"charabia","template":"structured_template",
+                 "options":f"kind = '{row['kind']}', discard = 'true', stem = 'true', normalize = 'true'"} for row in structured_tokens]
     mappings=[{"type":index,"order":1,"dictionary_schema":"charabia","dictionary":alias}
               for index,alias in enumerate(LANGUAGE_CODES,1)]
-    mappings += [{"type":row["id"],"order":1,"dictionary_schema":"charabia","dictionary":row["kind"]} for row in symbols]
+    mappings += [{"type":row["id"],"order":1,"dictionary_schema":"charabia","dictionary":row["kind"]} for row in structured_tokens]
     return {"parser":{"schema":"charabia","name":"parser"},
             "types":[{"id":index,"alias":alias} for index,alias in enumerate((*LANGUAGE_CODES,"blank","display_only"),1)] +
-                    [{"id":row["id"],"alias":row["kind"]} for row in symbols],
-            "dictionaries":sorted((*LANGUAGE_CODES,*(row["kind"] for row in symbols))),
+                    [{"id":row["id"],"alias":row["kind"]} for row in structured_tokens],
+            "dictionaries":sorted((*LANGUAGE_CODES,*(row["kind"] for row in structured_tokens))),
             "dictionary_options":sorted(options,key=lambda row:row["dictionary"]),"mappings":mappings}
 
 
@@ -143,7 +143,7 @@ def require_default_objects(document, info):
     for key,message in (("parser","Default Configuration must use charabia.parser"),
                         ("types","Installed Parser types differ from the 23 ordered types"),
                         ("dictionaries","Expected exactly the 21 default dictionaries"),
-                        ("mappings","Default mappings must use language and symbol dictionaries, blank/display unmapped")):
+                        ("mappings","Default mappings must use language and structured dictionaries, blank/display unmapped")):
         if not same_json(document[key],expected[key]):raise ValueError(message)
     def parse_options(raw):
         if not isinstance(raw,str):raise ValueError("Missing Dictionary options")
@@ -242,8 +242,8 @@ def require_static_info(info, expected):
         value = info[field]
         if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
             raise ValueError(f"analysis_info contains an invalid {field}")
-    if not same_json(info["symbols"], symbol_identity()):
-        raise ValueError("Symbol types, defaults, dependencies or limits differ from the fixed contract")
+    if not same_json(info["structured_tokens"], structured_token_identity()):
+        raise ValueError("Structured types, defaults, dependencies or limits differ from the fixed contract")
     languages = info["languages"]
     if not isinstance(languages, list) or len(languages) != len(LANGUAGE_CODES):
         raise ValueError("analysis_info requires exactly 16 language capability rows")
@@ -449,9 +449,9 @@ def require_release_report(report):
     for key in ("counts", "warnings", "warning_review", "known_failures", "regressions"):
         if key not in report["quality"]:
             raise ValueError(f"Missing quality warning disclosure: {key}")
-    costs=report.get("symbol_quality_costs")
+    costs=report.get("structured_token_quality_costs")
     if not isinstance(costs,list) or not any(isinstance(item,dict) and item.get("input")=="100 ms" and item.get("query")=="100ms" and item.get("domain_expected") is False and item.get("native_actual") is True for item in costs):
-        raise ValueError("Missing explicit non-PASS symbol precision-cost evidence")
+        raise ValueError("Missing explicit non-PASS structured precision-cost evidence")
     if report["status"] != verified_status(quality):
         raise ValueError("Quality failures and report status disagree")
     if not report.get("analysis_info_verified") or not report.get("fts_callback_abi_verified"):

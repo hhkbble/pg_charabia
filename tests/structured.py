@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real native ASCII-symbol contracts, independent of pg_textsearch installation."""
+"""Real native structured ASCII token contracts, independent of pg_textsearch installation."""
 import html
 import json
 import os
@@ -25,7 +25,7 @@ REPORT = {
 
 
 def checkpoint():
-    save("symbol-results.json", REPORT)
+    save("structured-results.json", REPORT)
 
 
 def check(condition, label, evidence=None):
@@ -46,8 +46,8 @@ def nodes(value):
 
 
 def main():
-    schema = "pgcb_symbol_" + str(os.getpid())
-    evidence = Path(os.environ["PGCB_RUN_DIR"]) / "symbol"
+    schema = "pgcb_structured_" + str(os.getpid())
+    evidence = Path(os.environ["PGCB_RUN_DIR"]) / "structured"
     evidence.mkdir(exist_ok=False)
     sequence = 0
     created = False
@@ -97,17 +97,17 @@ def main():
                 "'mappings',(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),"
                 "'template',to_regclass('pg_catalog.pg_ts_template') IS NOT NULL AND EXISTS("
                 "SELECT 1 FROM pg_ts_template t JOIN pg_namespace n ON n.oid=t.tmplnamespace "
-                "WHERE n.nspname='charabia' AND t.tmplname='symbol_template'))", "catalog", True)
+                "WHERE n.nspname='charabia' AND t.tmplname='structured_template'))", "catalog", True)
             check(len(catalog["types"]) == 23 and all(catalog["types"].get(str(i + 19)) == kind
-                  for i, kind in enumerate(KINDS)), "Parser installs the five fixed symbol type IDs", catalog)
+                  for i, kind in enumerate(KINDS)), "Parser installs the five fixed structured type IDs", catalog)
             check(set(catalog["dictionaries"]) == set(LANGUAGES + KINDS) and catalog["mappings"] == 21
-                  and catalog["template"], "default installation owns 16 language and five symbol dictionaries", catalog)
+                  and catalog["template"], "default installation owns 16 linguistic and five structured dictionaries", catalog)
 
             sql(session, "CREATE SCHEMA " + schema, "schema")
             created = True
             config = schema + ".general"
             sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + ".words("
-                "TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=false,Normalize=true,"
+                "TEMPLATE=charabia.linguistic_template,Language='eng',Discard=true,Stem=false,Normalize=true,"
                 "Filter=false,English=false);CREATE TEXT SEARCH CONFIGURATION " + config +
                 "(COPY=public.charabia)", "private-config")
             for language in LANGUAGES:
@@ -142,7 +142,7 @@ def main():
                 check(len(selected) == 1 and selected[0]["raw"] == raw and
                       selected[0]["language"] is None and selected[0]["byte_start"] == 3 and
                       selected[0]["byte_end"] == 3 + len(raw.encode()),
-                      "one original ASCII envelope has one symbol record and no language", {"kind": kind, "rows": rows})
+                      "one original ASCII envelope has one structured record and no language", {"kind": kind, "rows": rows})
                 previous = 0
                 for row in rows:
                     check(row["byte_start"] == previous and
@@ -223,16 +223,16 @@ def main():
             vector = positions(session, config, "alpha the 100ms beta", "atomic-positions")
             check(all(vector.get(term) == [3] for term in ("100ms", "100", "ms")) and
                   vector.get("alpha") == [1] and vector.get("beta") == [4],
-                  "symbol alternatives share one position while an outside Stop leaves one hole", vector)
+                  "structured alternatives share one position while an outside Stop leaves one hole", vector)
             check(matches(session, config, "alpha the 100ms beta", "'alpha <2> 100ms <-> beta'::tsquery", "outer-phrase") and
                   not matches(session, config, "100ms", "'100 <-> ms'::tsquery", "inner-phrase"),
-                  "one atomic symbol preserves the outside distance and has no internal phrase positions")
+                  "one atomic structured token preserves the outside distance and has no internal phrase positions")
             check(matches(session, config, "100ms", "to_tsquery(" + literal(config) + ",'100m:*')", "prefix"),
-                  "prefix flags apply to the real analyzed symbol operands")
+                  "prefix flags apply to the real analyzed structured token operands")
 
             # Native ALTER preserves omitted parameters and recomputes removed defaults.
             sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + ".parts("
-                "TEMPLATE=charabia.symbol_template,Kind='numword',Discard=false,Stem=false,Normalize=false)", "parts")
+                "TEMPLATE=charabia.structured_template,Kind='numword',Discard=false,Stem=false,Normalize=false)", "parts")
             terms = direct(session, schema + ".parts", "Running100", "parts-no-stem")
             check("running" in terms and "run" not in terms and "Running100" in terms,
                   "Stem=false preserves the prepared surface and the literal full form", terms)
@@ -244,7 +244,7 @@ def main():
                   "native ALTER duplicate merge keeps the last same-spelling value")
             sql(session, "ALTER TEXT SEARCH DICTIONARY " + schema + ".parts(Stem)", "parts-remove-stem")
             check("run" in direct(session, schema + ".parts", "Running100", "parts-default-stem"),
-                  "removing Stem restores the symbol default")
+                  "removing Stem restores the structured default")
             check("the" in direct(session, schema + ".parts", "the100", "parts-no-discard"),
                   "Discard=false retains the English stop component")
             sql(session, "ALTER TEXT SEARCH DICTIONARY " + schema + ".parts(Discard=true)", "parts-enable-discard")
@@ -258,7 +258,7 @@ def main():
                     options = ",".join(key + "=" + ("true" if mask & (1 << index) else "false")
                                        for index, key in enumerate(("Discard", "Stem", "Normalize")))
                     sql(session, "CREATE TEXT SEARCH DICTIONARY " + name +
-                        "(TEMPLATE=charabia.symbol_template,Kind=" + literal(kind) + "," + options +
+                        "(TEMPLATE=charabia.structured_template,Kind=" + literal(kind) + "," + options +
                         ");DROP TEXT SEARCH DICTIONARY " + name, "parameter-matrix")
                     accepted += 1
             check(accepted == 40, "all five kinds accept all eight explicit Boolean combinations", accepted)
@@ -272,10 +272,10 @@ def main():
                 ("duplicate-kind", "Kind='url',\"Kind\"='host'", "22023"),
             ):
                 error(session, "CREATE TEXT SEARCH DICTIONARY " + schema + ".bad("
-                      "TEMPLATE=charabia.symbol_template," + options + ")", state, label)
+                      "TEMPLATE=charabia.structured_template," + options + ")", state, label)
 
             sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + ".filter("
-                "TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=false,Normalize=true,"
+                "TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=false,Normalize=true,"
                 "Filter=true,English=false);CREATE TEXT SEARCH CONFIGURATION " + schema +
                 ".filtered(COPY=" + config + ");ALTER TEXT SEARCH CONFIGURATION " + schema +
                 ".filtered ALTER MAPPING FOR numword WITH " + schema + ".filter,charabia.numword;"
@@ -286,21 +286,21 @@ def main():
                 ");ALTER TEXT SEARCH CONFIGURATION " + schema +
                 ".terminal ALTER MAPPING FOR numword WITH charabia.numword,pg_catalog.simple", "chains")
             check(direct(session, "charabia.url", "100ms", "direct-reject") is None,
-                  "a symbol dictionary independently rejects input outside its Kind")
+                  "a structured dictionary independently rejects input outside its Kind")
             fallback = positions(session, schema + ".fallback", "100ms", "fallback-vector")
             check(fallback == {"100ms": [1]}, "NULL rejection passes the actual current input to simple", fallback)
             check(headline(session, schema + ".fallback", "100ms", "'100ms'::tsquery", "external-terminal-headline") == "<b>100ms</b>",
-                  "an external simple terminal dictionary highlights the original symbol")
+                  "an external simple terminal dictionary highlights the original structured token")
             filtered = positions(session, schema + ".filtered", "RUNNING100", "filter-vector")
             check("running100" in filtered and "RUNNING100" not in filtered and "run" in filtered,
-                  "a preceding real Filter changes bytes before independent symbol validation", filtered)
+                  "a preceding real Filter changes bytes before independent structured validation", filtered)
             terminal = positions(session, schema + ".terminal", "100ms", "terminal-vector")
             check(terminal == {"100ms": [1], "100": [1], "ms": [1]},
-                  "a successful symbol is terminal while all emitted terms share one position", terminal)
+                  "a successful structured token is terminal while all emitted terms share one position", terminal)
 
             sql(session, "CREATE TABLE " + schema + ".docs(id int PRIMARY KEY,body text NOT NULL);INSERT INTO " +
                 schema + ".docs VALUES(1,'100ms'),(2,'100'),(3,'ms'),(4,'100 ms'),(5,'200ms'),"
-                "(6,'alpha 100ms beta');CREATE INDEX symbol_gin ON " + schema +
+                "(6,'alpha 100ms beta');CREATE INDEX structured_gin ON " + schema +
                 ".docs USING gin(to_tsvector(" + literal(config) + ",body));ANALYZE " + schema + ".docs", "gin-setup")
 
             def indexed(expected, label):
@@ -320,7 +320,7 @@ def main():
                     "RESET enable_bitmapscan", label + "-reset-settings")
                 REPORT["plans"].append({"label": label, "sql": query, "default": default, "index": plan,
                                         "expected_ids": expected, "indexed": actual, "sequential": sequential})
-                check(any(node.get("Index Name") == "symbol_gin" and node.get("Actual Loops", 0) > 0
+                check(any(node.get("Index Name") == "structured_gin" and node.get("Actual Loops", 0) > 0
                           for node in nodes(plan)), "real GIN executes the expression index after " + label, plan)
                 check(actual == sequential == expected, "GIN and heap return independent IDs after " + label,
                       {"expected": expected, "indexed": actual, "heap": sequential})
@@ -340,20 +340,20 @@ def main():
             check(html.unescape(actual.replace("<b>", "").replace("</b>", "")) == raw,
                   "headline markers and source escaping preserve every original byte", actual)
             check(headline(session, config, "alpha 100ms beta", "'100 | ms | 100ms'::tsquery", "headline-repeated") ==
-                  "alpha <b>100ms</b> beta", "multiple matching operands do not repeat the original symbol")
+                  "alpha <b>100ms</b> beta", "multiple matching operands do not repeat the original structured token token")
             for typ in ("json", "jsonb"):
                 document = {"content": ["100ms & <tag>", "", "100ms"], "number": 7}
                 output = sql(session, "SELECT ts_headline(" + literal(config) + "," + literal(json.dumps(document)) +
                     "::" + typ + ",'ms'::tsquery,'HighlightAll=true')", "headline-" + typ, True)
                 check(output == {"content": ["<b>100ms</b> &amp; &lt;tag&gt;", "", "<b>100ms</b>"], "number": 7},
-                      "each JSON string uses the same original-text symbol headline callback", output)
+                      "each JSON string uses the same original-text structured headline callback", output)
             error(session, "SELECT ts_headline(" + literal(config) +
                   ",'100ms','ms'::tsquery,'UnknownSymbolOption=true')", "22023", "headline-unknown-option")
             distinct = ["https://unique.example/item?q=" + str(i) for i in range(100)]
             block = " ".join(distinct)
-            block_positions = positions(session, config, block, "distinct-symbol-block")
+            block_positions = positions(session, config, block, "distinct-structured-block")
             check(all(block_positions.get(raw) == [index + 1] for index, raw in enumerate(distinct)),
-                  "many distinct full symbols survive with one consecutive position each", block_positions)
+                  "many distinct full structured tokens survive with one consecutive position each", block_positions)
             error(session, "SELECT ts_lexize('charabia.numword',repeat('a',262145))", "54000", "direct-input-limit")
             # Count before Stop and deduplication: 31 English leaves plus one
             # numeric leaf are 32 units even though all repeated 'the' stop.
@@ -365,7 +365,7 @@ def main():
             error(session, "SELECT ts_lexize('charabia.numword'," + literal(over_units) + ")",
                   "54000", "unit-boundary-33")
             check(direct(session, "charabia.numword", "100ms", "post-budget-recovery") is not None,
-                  "a budget failure does not poison the cached symbol dictionary")
+                  "a budget failure does not poison the cached structured dictionary")
             long_raw = "https://example.com/" + "x" * 2047
             rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) FROM charabia.analyze(" +
                        literal(long_raw) + ")a", "long-envelope", True)
@@ -394,7 +394,7 @@ def main():
             REPORT["status"] = "failed"
             if primary is None:
                 raise
-            primary.add_note("symbol schema cleanup also failed: " + repr(cleanup_error))
+            primary.add_note("structured schema cleanup also failed: " + repr(cleanup_error))
         finally:
             checkpoint()
 

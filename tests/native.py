@@ -168,7 +168,7 @@ WITH inputs(id,body) AS(VALUES {values}) SELECT jsonb_agg(jsonb_build_object(
                           f"input {item['id']} selected Parser language matches lexical type")
                 elif token["kind"] in ("url", "host", "email", "file", "numword"):
                     check(debug["dictionaries"] == ["charabia." + token["kind"]] and token["language"] is None,
-                          f"input {item['id']} symbol mapping selects its own terminal with no selected language")
+                          f"input {item['id']} structured mapping selects its own terminal with no selected language")
                 else:
                     check(token["kind"] in ("blank", "display_only"), f"input {item['id']} has a recognized diagnostic kind")
                     check(debug["dictionaries"] == [] and debug["lexemes"] is None and token["language"] is None,
@@ -264,7 +264,7 @@ ANALYZE {schema}.default_docs;
 
         changing = f"{schema}.changing"
         sql(f"""
-CREATE TEXT SEARCH DICTIONARY {schema}.changing_eng(TEMPLATE=charabia.template,
+CREATE TEXT SEARCH DICTIONARY {schema}.changing_eng(TEMPLATE=charabia.linguistic_template,
  Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
 CREATE TEXT SEARCH CONFIGURATION {changing}(PARSER=charabia.parser);
 DO $map$

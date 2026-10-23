@@ -101,7 +101,7 @@ def main():
             "target": report["target_triple"], "build_profile": "release", "test_hooks": False,
             "source_commit": current_commit, "source_dirty": False,
             "verification_format": FORMAT, "verification_status": report["status"],
-            "quality": report["quality"], "symbol_quality_costs":report["symbol_quality_costs"],
+            "quality": report["quality"], "structured_token_quality_costs":report["structured_token_quality_costs"],
             "verified_run": report["run_id"], "verified_outer_run": outer["run_id"],
             "library_sha256": library_hash, "cargo_lock_sha256": report["cargo_lock_sha256"],
             "resource_manifest_sha256": report["resources_sha256"], "image_id": outer["image_id"],

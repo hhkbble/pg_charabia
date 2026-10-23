@@ -14,7 +14,7 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import QUALITY_FIELDS, QUALITY_WARNING_REVIEW, REVIEWED_QUALITY_WARNINGS, reviewed_quality_warnings, ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, symbol_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import QUALITY_FIELDS, QUALITY_WARNING_REVIEW, REVIEWED_QUALITY_WARNINGS, reviewed_quality_warnings, ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, structured_token_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -197,21 +197,21 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                     (tests / (suite + ".py")).write_text("# Selection fixture only\n")
             self.assertEqual(select_suites(None, "linux-amd64", directory), list(SUITES))
             self.assertEqual(select_suites(None, "macos-arm64", directory), list(MAC_DEFAULT))
-            self.assertEqual(ARCHIVE_SUITES, ("smoke", "symbol", "chain", "headline", "config", "recovery"))
+            self.assertEqual(ARCHIVE_SUITES, ("smoke", "structured", "chain", "headline", "config", "recovery"))
             for suite in ("chain", "recovery"):
                 (tests / (suite + ".py")).unlink()
                 with self.assertRaisesRegex(ValueError, "not implemented"):
                     select_suites([suite], "linux-amd64", directory)
 
-    def test_disclosed_symbol_costs_cannot_disappear_from_delivery(self):
+    def test_disclosed_structured_costs_cannot_disappear_from_delivery(self):
         report=self.report()
         require_release_report(report)
-        del report["symbol_quality_costs"]
-        with self.assertRaisesRegex(ValueError,"symbol precision"):
+        del report["structured_token_quality_costs"]
+        with self.assertRaisesRegex(ValueError,"structured precision"):
             require_release_report(report)
         report=self.report()
-        report["symbol_quality_costs"][0]["native_actual"]=False
-        with self.assertRaisesRegex(ValueError,"symbol precision"):
+        report["structured_token_quality_costs"][0]["native_actual"]=False
+        with self.assertRaisesRegex(ValueError,"structured precision"):
             require_release_report(report)
 
     def test_exact_quality_failures_are_separate(self):
@@ -341,7 +341,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                 "quality": {"format": FORMAT, "cases": [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen_quality_cases().items()] + [quality_case(case_id, **values) for case_id, values in reviewed_quality_warnings().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
                 "analysis_info": self.info(), "public_api_abi_verified": True, "default_objects_verified": True,
                 "default_objects": self.default_objects(),
-                "symbol_quality_costs":[{"input":"100 ms","query":"100ms","domain_expected":False,"native_actual":True}],
+                "structured_token_quality_costs":[{"input":"100 ms","query":"100ms","domain_expected":False,"native_actual":True}],
                 "loaded_library_sha256": "f" * 64,
                 "recovery": {"format": FORMAT, "status": "passed", "loaded_library_sha256": "f" * 64, "cleanup": {key: True for key in ("marker_matches", "clusters_stopped", "directory_removed")}},
                 "pg_textsearch": {"loaded_backend_verified": True},
@@ -352,7 +352,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
     def info(self):
         return {"extension": RELEASE_VERSION, "pgrx": "0.19.3", "charabia": "0.10.0", "target": "x86_64-unknown-linux-gnu", "cargo_lock_sha256": "a" * 64,
                 "resource_manifest_sha256": "b" * 64, "analysis_revision": ANALYSIS_REVISION, "resource_fingerprint": "c" * 64,
-                "language_count": 16, "languages": language_capabilities(), "symbols": symbol_identity(), "resources": {}}
+                "language_count": 16, "languages": language_capabilities(), "structured_tokens": structured_token_identity(), "resources": {}}
 
     def default_objects(self):
         return default_catalog()

@@ -174,7 +174,7 @@ def main():
                 ("tur_stop_parallel", "Language='tur',Discard=true,Stem=false,Normalize=true,Filter=false,English=true"),
             ):
                 sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + "." + name +
-                    "(TEMPLATE=charabia.template," + options + ")", "dictionary-" + name)
+                    "(TEMPLATE=charabia.linguistic_template," + options + ")", "dictionary-" + name)
             sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + ".synonyms("
                 "TEMPLATE=pg_catalog.synonym,SYNONYMS='synonym_sample');"
                 "CREATE TEXT SEARCH DICTIONARY " + schema + ".simple_reject("

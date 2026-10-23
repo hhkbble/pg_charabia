@@ -259,7 +259,9 @@ pub fn lexemes(outcome: LexizeOutcome) -> Internal {
     }
 }
 
-pub(crate) fn symbol_lexemes(terms: Option<crate::symbols::SymbolTerms>) -> Internal {
+pub(crate) fn structured_lexemes(
+    terms: Option<crate::structured_tokens::StructuredTokenTerms>,
+) -> Internal {
     let Some(terms) = terms else {
         return datum(0);
     };
@@ -267,8 +269,8 @@ pub(crate) fn symbol_lexemes(terms: Option<crate::symbols::SymbolTerms>) -> Inte
     let (full, components) = terms.into_groups();
     let component_variant = full.len() as u16;
     #[cfg(feature = "test-hooks")]
-    crate::test_hooks::hit("symbol_emit");
-    // SAFETY: SymbolTerms validates <=66 entries and its complete byte budget
+    crate::test_hooks::hit("structured_emit");
+    // SAFETY: StructuredTokenTerms validates <=66 entries and its complete byte budget
     // before any PG allocation. All returned storage belongs to PG, not Rust.
     unsafe {
         let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::TSLexeme>() * (count + 1))
@@ -280,7 +282,7 @@ pub(crate) fn symbol_lexemes(terms: Option<crate::symbols::SymbolTerms>) -> Inte
             index += 1;
             #[cfg(feature = "test-hooks")]
             if index == 1 {
-                crate::test_hooks::hit("symbol_emit_string");
+                crate::test_hooks::hit("structured_emit_string");
             }
         }
         for term in components {
@@ -314,7 +316,7 @@ pub fn lextypes() -> Internal {
 
 /// # Safety
 /// INIT supplies a live PG-owned List<DefElem>; option bindings guard PG ERROR.
-pub(crate) unsafe fn symbol_options(options: Internal) -> crate::symbols::Options {
+pub(crate) unsafe fn structured_options(options: Internal) -> crate::structured_tokens::Options {
     require_utf8();
     let mut kind = None;
     let (mut discard, mut stem, mut normalize) = (true, true, true);
@@ -338,9 +340,10 @@ pub(crate) unsafe fn symbol_options(options: Internal) -> crate::symbols::Option
                         .to_str()
                         .unwrap_or_else(|_| invalid("invalid Kind UTF8"));
                     kind = Some(
-                        crate::symbols::SymbolKind::from_alias(value).unwrap_or_else(|| {
-                            invalid("Kind must be url, host, email, file or numword")
-                        }),
+                        crate::structured_tokens::StructuredTokenKind::from_alias(value)
+                            .unwrap_or_else(|| {
+                                invalid("Kind must be url, host, email, file or numword")
+                            }),
                     );
                 }
                 "discard" => discard = unsafe { pg_sys::defGetBoolean(def) },
@@ -350,7 +353,7 @@ pub(crate) unsafe fn symbol_options(options: Internal) -> crate::symbols::Option
             }
         }
     });
-    checked(crate::symbols::Options::new(
+    checked(crate::structured_tokens::Options::new(
         kind.unwrap_or_else(|| invalid("Kind is required")),
         discard,
         stem,
@@ -395,7 +398,7 @@ pub fn invalid(message: impl AsRef<str>) -> ! {
 
 /// # Safety
 /// `options` is the INIT callback's live PG-owned List<DefElem>.
-pub unsafe fn dictionary_options(options: Internal) -> crate::analysis::Options {
+pub unsafe fn linguistic_options(options: Internal) -> crate::analysis::Options {
     require_utf8();
     let mut language = None;
     let mut discard = None;

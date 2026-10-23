@@ -5,7 +5,7 @@ use iri_string::types::UriStr;
 use linkify::{LinkFinder, LinkKind};
 use unicode_normalization::char::is_combining_mark;
 
-use super::{Candidate, SymbolKind};
+use super::{Candidate, StructuredTokenKind};
 use crate::prepare::MAX_RAW_TOKEN_BYTES;
 
 #[derive(Debug, Clone, Copy)]
@@ -38,23 +38,23 @@ pub(crate) enum Parsed<'a> {
 }
 
 /// Validate the actual dictionary input, including calls that bypass the parser.
-pub(crate) fn parse(kind: SymbolKind, raw: &str) -> Option<Parsed<'_>> {
+pub(crate) fn parse(kind: StructuredTokenKind, raw: &str) -> Option<Parsed<'_>> {
     if raw.is_empty() || raw.len() > MAX_RAW_TOKEN_BYTES || !raw.is_ascii() {
         return None;
     }
     match kind {
-        SymbolKind::Url => {
+        StructuredTokenKind::Url => {
             let uri = url(raw)?;
             let recall = recall_url(raw);
             Some(Parsed::Url { uri, recall })
         }
-        SymbolKind::Host => host(raw, false).map(Parsed::Host),
-        SymbolKind::Email => {
+        StructuredTokenKind::Host => host(raw, false).map(Parsed::Host),
+        StructuredTokenKind::Email => {
             let (local, domain) = email(raw)?;
             Some(Parsed::Email { local, domain })
         }
-        SymbolKind::File => file(raw).then_some(Parsed::File(raw)),
-        SymbolKind::Numword => numword(raw).map(Parsed::Numword),
+        StructuredTokenKind::File => file(raw).then_some(Parsed::File(raw)),
+        StructuredTokenKind::Numword => numword(raw).map(Parsed::Numword),
     }
 }
 
@@ -358,23 +358,23 @@ fn overlaps(blocked: &[(usize, usize)], start: usize, end: usize) -> bool {
     blocked.get(i).is_some_and(|&(begin, _)| begin < end)
 }
 
-fn lexical_kind(raw: &str) -> Option<SymbolKind> {
+fn lexical_kind(raw: &str) -> Option<StructuredTokenKind> {
     if raw.parse::<Ipv4Addr>().is_ok() || raw.starts_with('[') && host(raw, false).is_some() {
-        return Some(SymbolKind::Host);
+        return Some(StructuredTokenKind::Host);
     }
     if matches!(numword(raw), Some(Numword::Literal)) {
-        return Some(SymbolKind::Numword);
+        return Some(StructuredTokenKind::Numword);
     }
     if file(raw) && (explicit_file(raw) || raw.starts_with('.') || preferred_file(raw)) {
-        return Some(SymbolKind::File);
+        return Some(StructuredTokenKind::File);
     }
     if host(raw, false).is_some() {
-        return Some(SymbolKind::Host);
+        return Some(StructuredTokenKind::Host);
     }
     if file(raw) {
-        return Some(SymbolKind::File);
+        return Some(StructuredTokenKind::File);
     }
-    numword(raw).map(|_| SymbolKind::Numword)
+    numword(raw).map(|_| StructuredTokenKind::Numword)
 }
 
 /// Choose leftmost, longest ASCII structures without deleting failed input.
@@ -414,13 +414,13 @@ pub(crate) fn scan(input: &str) -> Vec<Candidate> {
     candidates
 }
 
-fn priority(kind: SymbolKind) -> u8 {
+fn priority(kind: StructuredTokenKind) -> u8 {
     match kind {
-        SymbolKind::Url => 0,
-        SymbolKind::Email => 1,
-        SymbolKind::File => 2,
-        SymbolKind::Host => 3,
-        SymbolKind::Numword => 4,
+        StructuredTokenKind::Url => 0,
+        StructuredTokenKind::Email => 1,
+        StructuredTokenKind::File => 2,
+        StructuredTokenKind::Host => 3,
+        StructuredTokenKind::Numword => 4,
     }
 }
 
@@ -467,7 +467,7 @@ fn scan_run(
             input,
             run_start + i,
             run_start + accepted_end,
-            SymbolKind::Url,
+            StructuredTokenKind::Url,
             candidates,
         );
         i = end;
@@ -492,12 +492,13 @@ fn scan_run(
             continue;
         }
         let raw = &run[start..end];
-        if file(raw) && (explicit_file(raw) || lexical_kind(raw) == Some(SymbolKind::File)) {
+        if file(raw) && (explicit_file(raw) || lexical_kind(raw) == Some(StructuredTokenKind::File))
+        {
             push(
                 input,
                 run_start + start,
                 run_start + end,
-                SymbolKind::File,
+                StructuredTokenKind::File,
                 candidates,
             );
             file_blocks.push((run_start + start, run_start + end));
@@ -509,7 +510,7 @@ fn scan_run(
         let start = run_start + link.start();
         let end = run_start + link.end();
         if !overlaps(&blocked, start, end) {
-            push(input, start, end, SymbolKind::Email, candidates);
+            push(input, start, end, StructuredTokenKind::Email, candidates);
         }
     }
     let mut i = 0;
@@ -544,7 +545,13 @@ fn scan_run(
     }
 }
 
-fn push(input: &str, start: usize, end: usize, kind: SymbolKind, output: &mut Vec<Candidate>) {
+fn push(
+    input: &str,
+    start: usize,
+    end: usize,
+    kind: StructuredTokenKind,
+    output: &mut Vec<Candidate>,
+) {
     if start < end
         && end - start <= MAX_RAW_TOKEN_BYTES
         && scalar_envelope(input, start, end)
@@ -558,7 +565,7 @@ fn push(input: &str, start: usize, end: usize, kind: SymbolKind, output: &mut Ve
 mod tests {
     use super::*;
 
-    fn observed(input: &str) -> Vec<(&str, SymbolKind)> {
+    fn observed(input: &str) -> Vec<(&str, StructuredTokenKind)> {
         scan(input)
             .into_iter()
             .map(|candidate| (&input[candidate.start..candidate.end], candidate.kind))
@@ -569,26 +576,29 @@ mod tests {
     fn literal_scope_and_outer_spans() {
         assert_eq!(
             observed("前文 https://Example.com/Running?q=100ms 后文"),
-            [("https://Example.com/Running?q=100ms", SymbolKind::Url)]
+            [(
+                "https://Example.com/Running?q=100ms",
+                StructuredTokenKind::Url
+            )]
         );
         assert_eq!(
             observed("<a href=\"https://Example.com/A#Part\">body 100ms</a> &amp;"),
             [
-                ("https://Example.com/A#Part", SymbolKind::Url),
-                ("100ms", SymbolKind::Numword),
-                ("/a", SymbolKind::File)
+                ("https://Example.com/A#Part", StructuredTokenKind::Url),
+                ("100ms", StructuredTokenKind::Numword),
+                ("/a", StructuredTokenKind::File)
             ]
         );
         assert_eq!(
             observed("/src/foo_bar.rs root@localhost"),
             [
-                ("/src/foo_bar.rs", SymbolKind::File),
-                ("root@localhost", SymbolKind::Email),
+                ("/src/foo_bar.rs", StructuredTokenKind::File),
+                ("root@localhost", StructuredTokenKind::Email),
             ]
         );
         assert_eq!(
             observed("中https://x.test/A中"),
-            [("https://x.test/A", SymbolKind::Url)]
+            [("https://x.test/A", StructuredTokenKind::Url)]
         );
         assert!(
             observed("https://x.test/A\u{301} https://x.test/a|b https://x.test/%ZZ").is_empty()
@@ -604,27 +614,29 @@ mod tests {
             "https://[::1]:8080/A",
             "file:///tmp/A",
         ] {
-            let Some(Parsed::Url { uri, recall }) = parse(SymbolKind::Url, raw) else {
+            let Some(Parsed::Url { uri, recall }) = parse(StructuredTokenKind::Url, raw) else {
                 panic!("valid literal URL rejected: {raw}");
             };
             assert_eq!(uri.as_str(), raw);
             assert!(recall.is_none());
             assert_eq!(uri.as_str().as_ptr(), raw.as_ptr());
         }
-        let Some(Parsed::Url { uri, recall }) = parse(SymbolKind::Url, "https://x.test/a(foo)).")
+        let Some(Parsed::Url { uri, recall }) =
+            parse(StructuredTokenKind::Url, "https://x.test/a(foo)).")
         else {
             panic!()
         };
         assert_eq!(uri.as_str(), "https://x.test/a(foo)).");
         assert_eq!(recall.map(UriStr::as_str), Some("https://x.test/a(foo)"));
-        let Some(Parsed::Url { recall, .. }) = parse(SymbolKind::Url, "https://x.test/?x=&amp;")
+        let Some(Parsed::Url { recall, .. }) =
+            parse(StructuredTokenKind::Url, "https://x.test/?x=&amp;")
         else {
             panic!()
         };
         assert!(recall.is_none());
         assert_eq!(
             observed("https://x.test/A]}"),
-            [("https://x.test/A", SymbolKind::Url)]
+            [("https://x.test/A", StructuredTokenKind::Url)]
         );
         for raw in [
             "mailto:a@example.com",
@@ -633,7 +645,7 @@ mod tests {
             "https://x.test/%ZZ",
             "https://x.test/a|b",
         ] {
-            assert!(parse(SymbolKind::Url, raw).is_none(), "{raw}");
+            assert!(parse(StructuredTokenKind::Url, raw).is_none(), "{raw}");
         }
     }
 
@@ -644,13 +656,13 @@ mod tests {
                 "v1.2.3 1.2.3 1.2.3.4 -1.25e-3 100ms snake_case kebab-case camelCase PascalCase C++"
             ),
             [
-                ("v1.2.3", SymbolKind::Numword),
-                ("1.2.3", SymbolKind::Numword),
-                ("1.2.3.4", SymbolKind::Host),
-                ("-1.25e-3", SymbolKind::Numword),
-                ("100ms", SymbolKind::Numword),
-                ("snake_case", SymbolKind::Numword),
-                ("kebab-case", SymbolKind::Numword),
+                ("v1.2.3", StructuredTokenKind::Numword),
+                ("1.2.3", StructuredTokenKind::Numword),
+                ("1.2.3.4", StructuredTokenKind::Host),
+                ("-1.25e-3", StructuredTokenKind::Numword),
+                ("100ms", StructuredTokenKind::Numword),
+                ("snake_case", StructuredTokenKind::Numword),
+                ("kebab-case", StructuredTokenKind::Numword),
             ]
         );
         assert_eq!(
@@ -658,13 +670,13 @@ mod tests {
                 "README.md foo.rs example.com example.rs foo.weirdextension my.7file .gitignore"
             ),
             [
-                ("README.md", SymbolKind::File),
-                ("foo.rs", SymbolKind::File),
-                ("example.com", SymbolKind::Host),
-                ("example.rs", SymbolKind::File),
-                ("foo.weirdextension", SymbolKind::Host),
-                ("my.7file", SymbolKind::File),
-                (".gitignore", SymbolKind::File),
+                ("README.md", StructuredTokenKind::File),
+                ("foo.rs", StructuredTokenKind::File),
+                ("example.com", StructuredTokenKind::Host),
+                ("example.rs", StructuredTokenKind::File),
+                ("foo.weirdextension", StructuredTokenKind::Host),
+                ("my.7file", StructuredTokenKind::File),
+                (".gitignore", StructuredTokenKind::File),
             ]
         );
         for (raw, body) in [
@@ -675,12 +687,12 @@ mod tests {
             ("abc123", "abc123"),
         ] {
             assert!(
-                matches!(parse(SymbolKind::Numword, raw), Some(Parsed::Numword(Numword::Hex(actual))) if actual==body)
+                matches!(parse(StructuredTokenKind::Numword, raw), Some(Parsed::Numword(Numword::Hex(actual))) if actual==body)
             );
         }
         for raw in ["dead", "cafe", "face", "1234", "5ff", "100ms"] {
             assert!(!matches!(
-                parse(SymbolKind::Numword, raw),
+                parse(StructuredTokenKind::Numword, raw),
                 Some(Parsed::Numword(Numword::Hex(_)))
             ));
         }
@@ -707,7 +719,7 @@ mod tests {
             assert!(host(raw, false).is_none(), "{raw}");
         }
         for raw in ["User+tag@Example.com", "root@localhost"] {
-            assert!(parse(SymbolKind::Email, raw).is_some());
+            assert!(parse(StructuredTokenKind::Email, raw).is_some());
         }
         for raw in [
             ".bad@example.com",
@@ -716,7 +728,7 @@ mod tests {
             "a@[::1]",
             "é@example.com",
         ] {
-            assert!(parse(SymbolKind::Email, raw).is_none(), "{raw}");
+            assert!(parse(StructuredTokenKind::Email, raw).is_none(), "{raw}");
         }
         for raw in [
             "/tmp/a",
@@ -727,7 +739,7 @@ mod tests {
             r"\\server\share\a",
             "src/foo.rs",
         ] {
-            assert!(parse(SymbolKind::File, raw).is_some(), "{raw}");
+            assert!(parse(StructuredTokenKind::File, raw).is_some(), "{raw}");
         }
     }
 
@@ -741,35 +753,35 @@ mod tests {
         let spans = scan(input);
         assert_eq!(spans.len(), 2);
         assert!(spans.windows(2).all(|pair| pair[0].end <= pair[1].start));
-        assert_eq!(spans[0].kind, SymbolKind::File);
-        assert_eq!(spans[1].kind, SymbolKind::Url);
+        assert_eq!(spans[0].kind, StructuredTokenKind::File);
+        assert_eq!(spans[1].kind, StructuredTokenKind::Url);
     }
 
     #[test]
     fn explicit_file_keeps_all_text_envelope_punctuation() {
         let raw = "/tmp/a(b)[2]{x}|name=foo,bar!.txt";
-        assert!(parse(SymbolKind::File, raw).is_some());
-        assert_eq!(observed(raw), [(raw, SymbolKind::File)]);
+        assert!(parse(StructuredTokenKind::File, raw).is_some());
+        assert_eq!(observed(raw), [(raw, StructuredTokenKind::File)]);
         let raw = r"C:\tmp\a(b)[2].txt";
-        assert_eq!(observed(raw), [(raw, SymbolKind::File)]);
+        assert_eq!(observed(raw), [(raw, StructuredTokenKind::File)]);
         let raw = "src/user@example.com/a(b).rs";
-        assert_eq!(observed(raw), [(raw, SymbolKind::File)]);
+        assert_eq!(observed(raw), [(raw, StructuredTokenKind::File)]);
         let raw = format!("/tmp/a({})file.rs", "x".repeat(MAX_RAW_TOKEN_BYTES));
         assert!(scan(&raw).is_empty());
-        assert!(parse(SymbolKind::File, "/tmp/a\0b").is_none());
+        assert!(parse(StructuredTokenKind::File, "/tmp/a\0b").is_none());
     }
 
     #[test]
     fn url_root_dot_preserves_full_and_optional_recall() {
         let raw = "https://Example.com.";
-        let Some(Parsed::Url { uri, recall }) = parse(SymbolKind::Url, raw) else {
+        let Some(Parsed::Url { uri, recall }) = parse(StructuredTokenKind::Url, raw) else {
             panic!("DNS root dot is valid in a URL authority");
         };
         assert_eq!(uri.as_str(), raw);
         assert_eq!(recall.map(UriStr::as_str), Some("https://Example.com"));
-        assert_eq!(observed(raw), [(raw, SymbolKind::Url)]);
+        assert_eq!(observed(raw), [(raw, StructuredTokenKind::Url)]);
         let raw = "https://Example.com.:00080/A";
-        let Some(Parsed::Url { uri, recall }) = parse(SymbolKind::Url, raw) else {
+        let Some(Parsed::Url { uri, recall }) = parse(StructuredTokenKind::Url, raw) else {
             panic!("DNS root dot before a decimal port is valid");
         };
         assert_eq!(uri.as_str(), raw);
@@ -780,12 +792,15 @@ mod tests {
             "https://example_com/A",
         ] {
             assert!(
-                parse(SymbolKind::Url, raw).is_some(),
+                parse(StructuredTokenKind::Url, raw).is_some(),
                 "URI reg-name is not a DNS assertion: {raw}"
             );
         }
         let invalid = "https://example.com.:abc";
-        assert!(parse(SymbolKind::Url, invalid).is_none(), "{invalid}");
+        assert!(
+            parse(StructuredTokenKind::Url, invalid).is_none(),
+            "{invalid}"
+        );
     }
 
     #[test]
@@ -793,17 +808,17 @@ mod tests {
         for raw in [".5", "5.", "-.5", "-0.5", "+.5", "5.e2", ".5e-2"] {
             assert!(
                 matches!(
-                    parse(SymbolKind::Numword, raw),
+                    parse(StructuredTokenKind::Numword, raw),
                     Some(Parsed::Numword(Numword::Literal))
                 ),
                 "{raw}"
             );
-            assert_eq!(observed(raw), [(raw, SymbolKind::Numword)]);
+            assert_eq!(observed(raw), [(raw, StructuredTokenKind::Numword)]);
         }
         for raw in [".", "+.", "-.", ".e2", "5.e"] {
             assert!(
                 !matches!(
-                    parse(SymbolKind::Numword, raw),
+                    parse(StructuredTokenKind::Numword, raw),
                     Some(Parsed::Numword(Numword::Literal))
                 ),
                 "{raw}"

@@ -5,17 +5,17 @@ CREATE FUNCTION pg_temp.assert_chain(ok boolean,label text) RETURNS void LANGUAG
 BEGIN IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'chain assertion: %',label;END IF;END$fn$;
 -- These explicit Language choices test dictionary semantics, not automatic detection.
 CREATE TEXT SEARCH DICTIONARY pgcb_chain_sql.eng (
- TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=true,Normalize=true,Filter=false,English=false);
+ TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=true,Normalize=true,Filter=false,English=false);
 CREATE TEXT SEARCH DICTIONARY pgcb_chain_sql.fra_plain (
- TEMPLATE=charabia.template,Language='fra',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);
+ TEMPLATE=charabia.linguistic_template,Language='fra',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);
 CREATE TEXT SEARCH DICTIONARY pgcb_chain_sql.fra_fold (
- TEMPLATE=charabia.template,Language='fra',Discard=false,Stem=false,Normalize=true,Filter=false,English=false);
+ TEMPLATE=charabia.linguistic_template,Language='fra',Discard=false,Stem=false,Normalize=true,Filter=false,English=false);
 CREATE TEXT SEARCH DICTIONARY pgcb_chain_sql.tur_plain (
- TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=true,Normalize=false,Filter=false,English=false);
+ TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=true,Normalize=false,Filter=false,English=false);
 CREATE TEXT SEARCH DICTIONARY pgcb_chain_sql.tur_fold (
- TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=true,Normalize=true,Filter=false,English=false);
+ TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=true,Normalize=true,Filter=false,English=false);
 CREATE TEXT SEARCH DICTIONARY pgcb_chain_sql.tur_parallel (
- TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=true,Normalize=false,Filter=false,English=true);
+ TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=true,Normalize=false,Filter=false,English=true);
 SELECT pg_temp.assert_chain(ts_lexize('pgcb_chain_sql.eng','running')=ARRAY['running','run'],
  'terminal preserves surface and one different English stem');
 SELECT pg_temp.assert_chain(ts_lexize('pgcb_chain_sql.fra_plain','CAFÉ')=ARRAY['café'],

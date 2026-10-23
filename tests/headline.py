@@ -42,7 +42,7 @@ def fragment_positions(session):
         # A fixed Dictionary Language makes the Stop hole independent of the
         # Parser's statistical language choice; ordinary native mappings suffice.
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".words ("
-                      "TEMPLATE=charabia.template,Language='eng',Discard=true,"
+                      "TEMPLATE=charabia.linguistic_template,Language='eng',Discard=true,"
                       "Stem=true,Normalize=true,Filter=false,English=false)")
         session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
         routes = json.loads(session.value(
@@ -106,10 +106,10 @@ def external_dictionary_cases(session):
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".synonyms("
                       "TEMPLATE=pg_catalog.synonym,SYNONYMS='synonym_sample')")
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".filter("
-                      "TEMPLATE=charabia.template,Language='eng',Discard=false,"
+                      "TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,"
                       "Stem=false,Normalize=true,Filter=true,English=false)")
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".fra_plain("
-                      "TEMPLATE=charabia.template,Language='fra',Discard=false,"
+                      "TEMPLATE=charabia.linguistic_template,Language='fra',Discard=false,"
                       "Stem=false,Normalize=false,Filter=false,English=false)")
         aliases = json.loads(session.value(
             "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
@@ -163,10 +163,10 @@ def merge_and_parallel_cases(session):
     session.value("CREATE SCHEMA " + schema)
     try:
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".words("
-                      "TEMPLATE=charabia.template,Language='eng',Discard=false,"
+                      "TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,"
                       "Stem=false,Normalize=false,Filter=false,English=false);")
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".parallel("
-                      "TEMPLATE=charabia.template,Language='tur',Discard=false,"
+                      "TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,"
                       "Stem=true,Normalize=false,Filter=false,English=true);")
         aliases = json.loads(session.value(
             "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "

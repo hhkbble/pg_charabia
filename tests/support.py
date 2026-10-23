@@ -177,7 +177,7 @@ def native_config_sql(name, stem=False, discard=False, normalize=True):
     return f"""CREATE TEXT SEARCH CONFIGURATION {name}(PARSER=charabia.parser);
 DO $fixture$ DECLARE l jsonb; BEGIN
  FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
-  EXECUTE format('CREATE TEXT SEARCH DICTIONARY %I.%I(TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize={boolean(normalize)},Filter=false)',
+  EXECUTE format('CREATE TEXT SEARCH DICTIONARY %I.%I(TEMPLATE=charabia.linguistic_template,Language=%L,Discard=%s,Stem=%s,Normalize={boolean(normalize)},Filter=false)',
    {literal(schema)},{literal(base)}||'_'||(l->>'language'),l->>'language',
    ({boolean(discard)} AND (l->>'has_stopwords')::boolean)::text,
    ({boolean(stem)} AND (l->'defaults'->>'stem')::boolean)::text);

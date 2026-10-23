@@ -1,32 +1,32 @@
 //! Standard terminal Dictionary callbacks; state never borrows Parser metadata.
-use crate::{pg_ffi, symbols};
+use crate::{pg_ffi, structured_tokens};
 use pgrx::{Internal, pg_extern};
 
-struct SymbolDictionaryState {
-    options: symbols::Options,
+struct StructuredDictionaryState {
+    options: structured_tokens::Options,
     #[cfg(feature = "test-hooks")]
     generation: u64,
 }
 
 #[cfg(feature = "test-hooks")]
-impl Drop for SymbolDictionaryState {
+impl Drop for StructuredDictionaryState {
     fn drop(&mut self) {
         crate::test_hooks::dictionary_dropped(0, self.options.referenced_fst_bytes());
     }
 }
 
 #[pg_extern(sql = false)]
-fn symbol_dictionary_init(options: Internal) -> Internal {
+fn structured_dictionary_init(options: Internal) -> Internal {
     pgrx::check_for_interrupts!();
     // SAFETY: The template supplies a live PG List<DefElem> in the owning context.
-    let options = unsafe { pg_ffi::symbol_options(options) };
+    let options = unsafe { pg_ffi::structured_options(options) };
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     let generation = crate::test_hooks::dictionary_created(0, options.referenced_fst_bytes());
     // SAFETY: Paired LEXIZE uses this exact type; Drop is pure Rust and static
     // FST bytes outlive every context. Registration retains RAII on failure.
     let state = unsafe {
-        pg_ffi::owned_state(SymbolDictionaryState {
+        pg_ffi::owned_state(StructuredDictionaryState {
             options,
             #[cfg(feature = "test-hooks")]
             generation,
@@ -38,7 +38,7 @@ fn symbol_dictionary_init(options: Internal) -> Internal {
 }
 
 #[pg_extern(sql = false)]
-fn symbol_dictionary_lexize(
+fn structured_dictionary_lexize(
     state: Internal,
     token: Internal,
     length: Internal,
@@ -51,16 +51,16 @@ fn symbol_dictionary_lexize(
     #[cfg(feature = "test-hooks")]
     {
         // SAFETY: Paired INIT created exactly this state. End its borrow before a hook can call PG.
-        let generation = unsafe { pg_ffi::state::<SymbolDictionaryState>(&state) }.generation;
+        let generation = unsafe { pg_ffi::state::<StructuredDictionaryState>(&state) }.generation;
         crate::test_hooks::dictionary_lexized(generation);
         crate::test_hooks::hit("lexize");
     }
     let outcome = {
         // SAFETY: The paired INIT allocated this state. No PG operation occurs
         // while its options or subsidiary objects are borrowed.
-        let options = &unsafe { pg_ffi::state::<SymbolDictionaryState>(&state) }.options;
-        symbols::analyze(text, options)
+        let options = &unsafe { pg_ffi::state::<StructuredDictionaryState>(&state) }.options;
+        structured_tokens::analyze(text, options)
     };
     pgrx::check_for_interrupts!();
-    pg_ffi::symbol_lexemes(pg_ffi::checked(outcome))
+    pg_ffi::structured_lexemes(pg_ffi::checked(outcome))
 }

@@ -11,7 +11,7 @@ SELECT pg_temp.assert_true(ts_lexize('charabia.eng','The')=ARRAY[]::text[],'stop
 SELECT pg_temp.assert_true(ts_lexize('charabia.eng','running')=ARRAY['running','run'],'same-position surface and stem');
 SELECT pg_temp.assert_true(ts_headline('public.charabia','<x> CAFÉ & cafe','cafe'::tsquery,'HighlightAll=true')='&lt;x&gt; <b>CAFÉ</b> &amp; <b>cafe</b>','standard original headline and escape');
 -- Four independent variants are same-position alternatives, not an AND group.
-CREATE TEXT SEARCH DICTIONARY smoke.tur4(TEMPLATE=charabia.template,Language='tur',English=true,Discard=false,Stem=true,Normalize=false,Filter=false);
+CREATE TEXT SEARCH DICTIONARY smoke.tur4(TEMPLATE=charabia.linguistic_template,Language='tur',English=true,Discard=false,Stem=true,Normalize=false,Filter=false);
 CREATE TEXT SEARCH CONFIGURATION smoke.four(PARSER=charabia.parser);
 DO $map$ DECLARE types text; BEGIN
  SELECT string_agg(quote_ident(l->>'language'),',') INTO types FROM jsonb_array_elements(charabia.analysis_info()->'languages')l;
@@ -25,7 +25,7 @@ SELECT pg_temp.assert_true((SELECT count(*)=1 AND min(token)='PostgreSQL' FROM t
 SELECT pg_temp.assert_true((SELECT string_agg(token,'')='post greSQL' FROM ts_parse('charabia.parser','post greSQL')),'word recovery cannot remove whitespace');
 SELECT pg_temp.assert_true((SELECT string_agg(raw,'')='Ελληνικά বাংলা 123' FROM charabia.analyze('Ελληνικά বাংলা 123')),'valid outside and unknown text stays raw without an internal range error');
 CREATE TEXT SEARCH CONFIGURATION smoke.search(COPY=public.charabia);
-CREATE TEXT SEARCH DICTIONARY smoke.eng(TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=true,Normalize=true,Filter=false);
+CREATE TEXT SEARCH DICTIONARY smoke.eng(TEMPLATE=charabia.linguistic_template,Language='eng',Discard=true,Stem=true,Normalize=true,Filter=false);
 ALTER TEXT SEARCH CONFIGURATION smoke.search ALTER MAPPING FOR eng WITH smoke.eng;
 CREATE TABLE smoke.docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));
 INSERT INTO smoke.docs VALUES
@@ -76,7 +76,7 @@ SELECT pg_temp.assert_smoke('running',ARRAY[200]);
 DELETE FROM smoke.docs WHERE id=200;
 SELECT pg_temp.assert_smoke('全文',ARRAY[]::integer[]);
 SELECT pg_temp.assert_smoke('running',ARRAY[]::integer[]);
--- Actual Rust symbol dictionaries run through the same GIN/BM25 indexes.
+-- Actual Rust structured dictionaries run through the same GIN/BM25 indexes.
 INSERT INTO smoke.docs VALUES
  (50001,'alpha https://uraniumtoken.test/Running?v=100ms omega'),
  (50002,'alpha User+tag@argonmail.test omega'),
@@ -90,7 +90,7 @@ SELECT pg_temp.assert_smoke('/cobaltleaf/UniqueFilename.rs',ARRAY[50003]);
 SELECT pg_temp.assert_smoke('https://uraniumtoken.test/Running?v=100ms',ARRAY[50001,50004]);
 SELECT pg_temp.assert_true(ts_headline('smoke.search','alpha 100ms omega',
  plainto_tsquery('smoke.search','ms'),'HighlightAll=true')='alpha <b>100ms</b> omega',
- 'component matches whole original symbol');
+ 'component matches whole original structured');
 UPDATE smoke.docs SET body='alpha 200kg omega' WHERE id=50004;
 SELECT pg_temp.assert_smoke('100ms',ARRAY[50001]);
 DELETE FROM smoke.docs WHERE id=50001;

@@ -1,14 +1,14 @@
 use crate::{analysis, pg_ffi};
 use pgrx::{Internal, pg_extern};
 
-pub(crate) struct DictionaryState {
+pub(crate) struct LinguisticDictionaryState {
     pub(crate) options: analysis::Options,
     #[cfg(feature = "test-hooks")]
     generation: u64,
 }
 
 #[cfg(feature = "test-hooks")]
-impl Drop for DictionaryState {
+impl Drop for LinguisticDictionaryState {
     fn drop(&mut self) {
         crate::test_hooks::dictionary_dropped(
             fst_bytes(&self.options),
@@ -23,11 +23,11 @@ fn fst_bytes(options: &analysis::Options) -> usize {
 }
 
 #[pg_extern(sql = false)]
-fn dictionary_init(options: Internal) -> Internal {
+fn linguistic_dictionary_init(options: Internal) -> Internal {
     // SAFETY: Template INIT receives a live PG List<DefElem> in dictCtx or the
     // DDL validation context; owned_state attaches cleanup to that context.
     pgrx::check_for_interrupts!();
-    let options = unsafe { pg_ffi::dictionary_options(options) };
+    let options = unsafe { pg_ffi::linguistic_options(options) };
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     let generation =
@@ -35,7 +35,7 @@ fn dictionary_init(options: Internal) -> Internal {
     // SAFETY: The state borrows static FST bytes, Drop is pure Rust, and LEXIZE borrows the
     // exact type only while PG keeps the owning dictCtx alive.
     let state = unsafe {
-        pg_ffi::owned_state(DictionaryState {
+        pg_ffi::owned_state(LinguisticDictionaryState {
             options,
             #[cfg(feature = "test-hooks")]
             generation,
@@ -47,7 +47,7 @@ fn dictionary_init(options: Internal) -> Internal {
 }
 
 #[pg_extern(sql = false)]
-fn dictionary_lexize(
+fn linguistic_dictionary_lexize(
     state: Internal,
     token: Internal,
     length: Internal,
@@ -60,14 +60,14 @@ fn dictionary_lexize(
     #[cfg(feature = "test-hooks")]
     {
         // End the cache-state borrow before a hook can invoke PostgreSQL.
-        let generation = unsafe { pg_ffi::state::<DictionaryState>(&state) }.generation;
+        let generation = unsafe { pg_ffi::state::<LinguisticDictionaryState>(&state) }.generation;
         crate::test_hooks::dictionary_lexized(generation);
         crate::test_hooks::hit("lexize");
     }
     let outcome = {
-        // SAFETY: The paired INIT created exactly DictionaryState in a live
+        // SAFETY: The paired INIT created exactly LinguisticDictionaryState in a live
         // context. Only pure Rust analysis runs while this borrow is live.
-        let state = unsafe { pg_ffi::state::<DictionaryState>(&state) };
+        let state = unsafe { pg_ffi::state::<LinguisticDictionaryState>(&state) };
         analysis::normalize(text, state.options.language(), &state.options)
     };
     pgrx::check_for_interrupts!();

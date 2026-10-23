@@ -69,7 +69,7 @@ The runner provisions its pinned cargo-pgrx under its cache. It packages/stages 
 
 ```sh
 # Early real FTS/BM25/headline integration.
-./scripts/verify-linux-amd64 --suite smoke,chain,headline,symbol
+./scripts/verify-linux-amd64 --suite smoke,chain,headline,structured
 # Targeted fault injection, with separate evidence.
 ./scripts/verify-linux-amd64 --suite errors,lifecycle,stress --test-hooks --debug --no-build-image
 # Physical backup and target recovery with the staged library.
@@ -106,8 +106,8 @@ Inherited libpq connection defaults are removed by [isolated_pg_environment](../
 
 | Selection | Actual behavior |
 | --- | --- |
-| Local default | `unit,native,symbol,chain,headline,config,lifecycle,errors` |
-| Linux default / `--suite all` | `unit,smoke,native,symbol,chain,bm25,headline,config,lifecycle,errors,stress,recovery,benchmark` |
+| Local default | `unit,native,structured,chain,headline,config,lifecycle,errors` |
+| Linux default / `--suite all` | `unit,smoke,native,structured,chain,bm25,headline,config,lifecycle,errors,stress,recovery,benchmark` |
 | Local Linux-only selections | `smoke,bm25,stress,recovery,benchmark` are rejected. Local `all` also fails rather than silently dropping them. |
 | Full Linux default | Also runs fmt, Clippy, schema, ABI, default-object, loaded-library, and README/reference example checks. |
 | Targeted Linux run | Runs the selected suites and shared build/identity checks. It does not automatically run README examples or full-only lint checks. |
@@ -131,7 +131,7 @@ Validate Markdown structure, local links/anchors, shell fences with `bash -n`, a
 | Rust module tests | Real Charabia/stemmer calls, Unicode/key preparation, finite model mappings, bounds, stopword source priority, and result invariants. |
 | [native.py](../tests/native.py), [chain.py](../tests/chain.py), SQL fixtures | Real Parser/Dictionary/vector/query calls, standard chains, positions, and GIN behavior. Controlled external dictionaries test the PG protocol. |
 | [bm25.py](../tests/bm25.py), [corpus.json](../tests/fixtures/bm25/corpus.json) | Independent domain candidates, native-term overlap consistency, actual BM25 plans, CRUD, and maintenance paths. |
-| [symbol.py](../tests/symbol.py) | Native-only ASCII recognition, full/component groups, independent literal vectors, original spans, chains, GIN CRUD, parameters and expansion budgets. It runs on both supported environments. |
+| [structured.py](../tests/structured.py) | Native-only ASCII recognition, full/component groups, independent literal vectors, original spans, chains, GIN CRUD, parameters and expansion budgets. It runs on both supported environments. |
 | [headline.py](../tests/headline.py), [config.py](../tests/config.py) | Original text, options, external chains, permissions, native DDL, shared dictionaries, and logical restore. |
 | [errors.py](../tests/errors.py), [lifecycle.py](../tests/lifecycle.py), [stress.py](../tests/stress.py) | Registration/cache failure, error/cancel recovery, prepared plans, concurrent snapshots, actual worker execution, and resource stability. |
 | [recovery.py](../tests/recovery.py), [benchmark.py](../tests/benchmark.py) | Controlled physical recovery and recorded performance/ranking observations. |
@@ -139,7 +139,7 @@ Validate Markdown structure, local links/anchors, shell fences with `bash -n`, a
 Keep algorithm examples, recorded probe observations, explicit extension contracts, domain expectations, and index-consistency checks distinct. A fixture's recorded observation is not an independent upstream guarantee. Never generate new expected values from the extension and accept them without review. Finite-state checks and test counts do not establish natural-language accuracy.
 
 Format-2 reports separate mechanism, quality, and cleanup.
-`symbol_quality_costs` retains disclosed atomic-symbol false positives outside quality PASS totals.
+`structured_token_quality_costs` retains disclosed atomic structured token false positives outside quality PASS totals.
 It does not expand the required-domain failure exemptions. Packages retain these observations.
 [quality-known.json](../tests/fixtures/quality-known.json) preserves three original
 domain failures and their exact signatures. The current report contract explicitly
@@ -152,7 +152,7 @@ The temporary v0.3.0 warning policy is separate from those frozen exceptions. On
 
 Quality summaries include separate `passed`, `known-failure`, `warning`, and `regression` counts. Their `warnings` list and `warning_review` identity are retained in reports and the delivery manifest. Full acceptance requires every named reviewed case, not a matching total. The extracted-package verifier checks the original warning evidence and preserves the full acceptance summary.
 
-- `verified` means the selected mechanisms and cleanup passed without warnings or quality-registry failures. Symbol precision costs remain separately reported.
+- `verified` means the selected mechanisms and cleanup passed without warnings or quality-registry failures. Structured token precision costs remain separately reported.
 - `verified-with-known-quality-failures` permits packaging with exact frozen failures. They remain failures, not passed quality cases.
 - `verified-with-quality-warnings` permits packaging with exact reviewed warnings. Any frozen failures remain separately listed. Neither category counts as quality PASS.
 - New differences, changed warning signatures, complete-candidate loss, mechanism failure, missing identity, unexplained resource growth, or cleanup failure block success and packaging.
@@ -194,10 +194,10 @@ Run `./scripts/verify-linux-amd64 --suite recovery` in the supported target envi
 The test performs this sequence:
 
 1. Take online `pg_basebackup -X stream` and run `pg_verifybackup`.
-2. Commit distinguishable language and symbol Dictionary parameters, mapping/chain, and row changes. Recompute vectors and maintain indexes. Retain a disk segment and unspilled BM25 documents.
+2. Commit distinguishable linguistic and structured Dictionary parameters, mapping/chain, and row changes. Recompute vectors and maintain indexes. Retain a disk segment and unspilled BM25 documents.
 3. Roll back a parameter change. Establish a named restore point, commit negative controls afterward, switch WAL, and confirm archival.
 4. Validate source crash restart. Restore the base backup into another owned directory using archived WAL, stop at the named target, and promote.
-5. Compare catalog state, independent IDs, stored vectors, cold INIT, expression/stored GIN, actual BM25 scans, and original-text headline, including whole-symbol component hits. Include actual Chinese terms, not only Latin terms in mixed text.
+5. Compare catalog state, independent IDs, stored vectors, cold INIT, expression/stored GIN, actual BM25 scans, and original-text headline, including component hits on whole structured tokens. Include actual Chinese terms, not only Latin terms in mixed text.
 6. Compare BM25 durable summaries with the target snapshot, not live heap row counts. Validate segment and memtable paths.
 7. Demonstrate that the external extension library is absent from the base backup. A fresh backend fails when it is unavailable and works after the same-hash file returns.
 
@@ -225,7 +225,7 @@ English TXT/attribution, manifests, `SHA256SUMS`, and evidence. It also includes
 the committed extension source, lockfile, build script, SQL, resource tools, and
 container build files for rebuilding and relinking. It also supplies the exact hash-checked Charabia and fst crate source archives
 under `dependency-sources/`, including the original German source/FST. It does
-not bundle huge raw source inputs or claim an offline cache of every dependency. The extracted-package verifier checks checksums and loads the extracted library without compiling a replacement. It executes smoke, symbol, chain, headline, configuration, recovery, and the archive's README and reference examples. `--archive` cannot combine with suite, hooks, or debug selections.
+not bundle huge raw source inputs or claim an offline cache of every dependency. The extracted-package verifier checks checksums and loads the extracted library without compiling a replacement. It executes smoke, structured, chain, headline, configuration, recovery, and the archive's README and reference examples. `--archive` cannot combine with suite, hooks, or debug selections.
 
 After release content changes, freeze the clean final source commit again and rerun the required same-commit acceptance before packaging. An amended candidate has a new identity and needs new acceptance and packaging evidence. Do not overwrite old archives or evidence. To rebuild from an extracted archive, enter its root and use the same prerequisites
 and pinned toolchain. The archive has source files but no `.git` directory. A

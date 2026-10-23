@@ -1,8 +1,8 @@
-//! Bounded, terminal symbol terms. Structural spelling is separate from English analysis.
+//! Bounded, terminal terms for structured tokens. Structural spelling is separate from English analysis.
 use charabia::segmenter::{LatinSegmenter, Segmenter};
 use iri_string::types::UriStr;
 
-use super::{SymbolKind, recognition};
+use super::{StructuredTokenKind, recognition};
 use crate::analysis::{self, AnalysisError, ErrorKind};
 use crate::routes::LanguageId;
 
@@ -12,13 +12,13 @@ pub const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub struct Options {
-    kind: SymbolKind,
+    kind: StructuredTokenKind,
     english: analysis::Options,
 }
 
 impl Options {
     pub fn new(
-        kind: SymbolKind,
+        kind: StructuredTokenKind,
         discard: bool,
         stem: bool,
         normalize: bool,
@@ -36,7 +36,7 @@ impl Options {
         })
     }
 
-    pub fn kind(&self) -> SymbolKind {
+    pub fn kind(&self) -> StructuredTokenKind {
         self.kind
     }
 
@@ -48,12 +48,12 @@ impl Options {
 
 /// Full terms are separate OR variants; all components form one AND variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SymbolTerms {
+pub struct StructuredTokenTerms {
     full: Vec<String>,
     components: Vec<String>,
 }
 
-impl SymbolTerms {
+impl StructuredTokenTerms {
     #[cfg(test)]
     pub fn full(&self) -> &[String] {
         &self.full
@@ -79,7 +79,7 @@ fn limit(message: &'static str) -> AnalysisError {
 
 struct Builder<'a> {
     options: &'a Options,
-    terms: SymbolTerms,
+    terms: StructuredTokenTerms,
     units: usize,
     // Bounded by units. This cache belongs only to this token, not the backend.
     words: Vec<(String, Vec<String>)>,
@@ -89,7 +89,7 @@ impl<'a> Builder<'a> {
     fn new(options: &'a Options, full: Vec<String>) -> Self {
         Self {
             options,
-            terms: SymbolTerms {
+            terms: StructuredTokenTerms {
                 full,
                 components: Vec::new(),
             },
@@ -232,7 +232,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn finish(self) -> Result<SymbolTerms, AnalysisError> {
+    fn finish(self) -> Result<StructuredTokenTerms, AnalysisError> {
         if self.terms.full.is_empty() || self.terms.full.len() > 2 || self.terms.len() > MAX_TERMS {
             return Err(limit("symbol terms exceed 66 entries"));
         }
@@ -279,7 +279,10 @@ fn canonical_uri(uri: &UriStr) -> String {
     full
 }
 
-pub fn analyze(raw: &str, options: &Options) -> Result<Option<SymbolTerms>, AnalysisError> {
+pub fn analyze(
+    raw: &str,
+    options: &Options,
+) -> Result<Option<StructuredTokenTerms>, AnalysisError> {
     analysis::check_input(raw)?;
     let Some(parsed) = recognition::parse(options.kind(), raw) else {
         return Ok(None);
@@ -388,26 +391,26 @@ pub fn analyze(raw: &str, options: &Options) -> Result<Option<SymbolTerms>, Anal
 mod tests {
     use super::*;
 
-    fn options(kind: SymbolKind) -> Options {
+    fn options(kind: StructuredTokenKind) -> Options {
         Options::new(kind, true, true, true).unwrap()
     }
 
-    fn terms(kind: SymbolKind, raw: &str) -> SymbolTerms {
+    fn terms(kind: StructuredTokenKind, raw: &str) -> StructuredTokenTerms {
         analyze(raw, &options(kind)).unwrap().unwrap()
     }
 
     #[test]
     fn units_expand_as_atomic_full_or_component_bundle() {
-        let actual = terms(SymbolKind::Numword, "100ms");
+        let actual = terms(StructuredTokenKind::Numword, "100ms");
         assert_eq!(actual.full(), ["100ms"]);
         assert_eq!(actual.components(), ["100", "ms"]);
         assert_eq!(actual.len(), 3);
         for raw in ["0x5fff", "0X5FFF", "5fff"] {
-            let actual = terms(SymbolKind::Numword, raw);
+            let actual = terms(StructuredTokenKind::Numword, raw);
             assert_eq!(actual.full(), ["0x5fff", "5fff"]);
             assert!(actual.components().is_empty());
         }
-        let actual = terms(SymbolKind::Numword, "f5ff");
+        let actual = terms(StructuredTokenKind::Numword, "f5ff");
         assert_eq!(actual.full(), ["0xf5ff", "f5ff"]);
         assert!(actual.components().is_empty());
     }
@@ -417,7 +420,7 @@ mod tests {
         for raw in [
             "1234", "01", "-12.50", "1e3", "1e10", "1E10", "12e3", "1e1234", "v1.2.3",
         ] {
-            let actual = terms(SymbolKind::Numword, raw);
+            let actual = terms(StructuredTokenKind::Numword, raw);
             assert_eq!(actual.full(), [raw]);
             assert!(actual.components().is_empty(), "{raw}");
         }
@@ -426,7 +429,7 @@ mod tests {
     #[test]
     fn uri_full_case_and_percent_spelling_remain_literal() {
         let raw = "HTTP://User:Pass@Example.COM:00080/A/../%7e?x=%41&x=A#Part";
-        let actual = terms(SymbolKind::Url, raw);
+        let actual = terms(StructuredTokenKind::Url, raw);
         assert_eq!(
             actual.full(),
             ["http://User:Pass@example.com:00080/A/../%7e?x=%41&x=A#Part"]
@@ -445,9 +448,9 @@ mod tests {
 
     #[test]
     fn uri_reg_names_do_not_inherit_standalone_dns_restrictions() {
-        let actual = terms(SymbolKind::Url, "HTTPS://EXAMPLE_COM/A");
+        let actual = terms(StructuredTokenKind::Url, "HTTPS://EXAMPLE_COM/A");
         assert_eq!(actual.full(), ["https://example_com/A"]);
-        let actual = terms(SymbolKind::Url, "HTTPS://EXA%4Dple.COM/A");
+        let actual = terms(StructuredTokenKind::Url, "HTTPS://EXA%4Dple.COM/A");
         assert_eq!(actual.full(), ["https://exa%4Dple.com/A"]);
         assert!(actual.components().contains(&"exa%4Dple.com".into()));
         assert!(!actual.components().contains(&"4".into()));
@@ -455,12 +458,12 @@ mod tests {
 
     #[test]
     fn structure_is_not_case_folded_by_the_english_options() {
-        let actual = terms(SymbolKind::Email, "User+tag@Example.COM");
+        let actual = terms(StructuredTokenKind::Email, "User+tag@Example.COM");
         assert_eq!(actual.full(), ["User+tag@example.com"]);
         assert!(actual.components().contains(&"User+tag".into()));
         assert!(actual.components().contains(&"user".into()));
         assert!(!actual.components().contains(&"com".into()));
-        let actual = terms(SymbolKind::File, "/Src/RunningTests.rs");
+        let actual = terms(StructuredTokenKind::File, "/Src/RunningTests.rs");
         assert_eq!(actual.full(), ["/Src/RunningTests.rs"]);
         assert!(actual.components().contains(&"RunningTests.rs".into()));
         assert!(actual.components().contains(&"running".into()));
@@ -469,20 +472,20 @@ mod tests {
 
     #[test]
     fn dns_labels_retain_literal_identity_without_recursive_hex_expansion() {
-        let actual = terms(SymbolKind::Host, "ABC123.Example.TEST");
+        let actual = terms(StructuredTokenKind::Host, "ABC123.Example.TEST");
         assert_eq!(actual.full(), ["abc123.example.test"]);
         assert!(actual.components().contains(&"abc123".into()));
         assert!(actual.components().contains(&"abc".into()));
         assert!(actual.components().contains(&"123".into()));
         assert!(!actual.components().contains(&"0xabc123".into()));
         assert!(!actual.components().contains(&"test".into()));
-        let actual = terms(SymbolKind::Host, "the.example");
+        let actual = terms(StructuredTokenKind::Host, "the.example");
         assert!(actual.components().contains(&"the".into()));
         assert!(!crate::resources::english_contains("databaseapi"));
         for (kind, raw) in [
-            (SymbolKind::Host, "DatabaseAPI.example"),
-            (SymbolKind::Url, "https://DatabaseAPI.example/"),
-            (SymbolKind::Email, "User@DatabaseAPI.example"),
+            (StructuredTokenKind::Host, "DatabaseAPI.example"),
+            (StructuredTokenKind::Url, "https://DatabaseAPI.example/"),
+            (StructuredTokenKind::Email, "User@DatabaseAPI.example"),
         ] {
             let actual = terms(kind, raw);
             assert!(actual.components().contains(&"databaseapi".into()));
@@ -494,7 +497,7 @@ mod tests {
 
     #[test]
     fn url_root_dot_does_not_turn_the_final_dns_label_into_a_component() {
-        let actual = terms(SymbolKind::Url, "https://Example.COM./Running");
+        let actual = terms(StructuredTokenKind::Url, "https://Example.COM./Running");
         assert_eq!(actual.full(), ["https://example.com./Running"]);
         assert!(actual.components().contains(&"example.com.".into()));
         assert!(!actual.components().contains(&"com".into()));
@@ -502,15 +505,15 @@ mod tests {
 
     #[test]
     fn stop_does_not_delete_structural_literals_or_full_forms() {
-        let actual = terms(SymbolKind::Url, "https://example.com/the");
+        let actual = terms(StructuredTokenKind::Url, "https://example.com/the");
         assert_eq!(actual.full(), ["https://example.com/the"]);
         assert!(actual.components().contains(&"the".into()));
-        let actual = terms(SymbolKind::Numword, "the_1");
+        let actual = terms(StructuredTokenKind::Numword, "the_1");
         assert!(!actual.components().contains(&"the".into()));
         assert!(actual.components().contains(&"1".into()));
         let actual = analyze(
             "the_1",
-            &Options::new(SymbolKind::Numword, false, false, false).unwrap(),
+            &Options::new(StructuredTokenKind::Numword, false, false, false).unwrap(),
         )
         .unwrap()
         .unwrap();
@@ -518,13 +521,13 @@ mod tests {
     }
 
     #[test]
-    fn all_symbol_boolean_options_are_valid_and_resources_are_shared() {
+    fn all_structured_boolean_options_are_valid_and_resources_are_shared() {
         for kind in [
-            SymbolKind::Url,
-            SymbolKind::Host,
-            SymbolKind::Email,
-            SymbolKind::File,
-            SymbolKind::Numword,
+            StructuredTokenKind::Url,
+            StructuredTokenKind::Host,
+            StructuredTokenKind::Email,
+            StructuredTokenKind::File,
+            StructuredTokenKind::Numword,
         ] {
             for flags in 0..8 {
                 let options =
@@ -537,7 +540,7 @@ mod tests {
 
     #[test]
     fn budget_is_checked_before_stop_and_duplicate_removal() {
-        let options = options(SymbolKind::Numword);
+        let options = options(StructuredTokenKind::Numword);
         let mut builder = Builder::new(&options, vec!["root".into()]);
         for _ in 0..32 {
             builder.word("the").unwrap();
@@ -555,7 +558,7 @@ mod tests {
 
     #[test]
     fn output_budget_and_full_collisions_have_independent_checks() {
-        let options = options(SymbolKind::Numword);
+        let options = options(StructuredTokenKind::Numword);
         let mut builder = Builder::new(&options, vec!["root".into()]);
         builder.literal("root").unwrap();
         builder.literal("other").unwrap();
@@ -570,10 +573,10 @@ mod tests {
     #[test]
     fn invalid_kind_input_returns_null_fallback_without_new_detection() {
         for (kind, raw) in [
-            (SymbolKind::Url, "https://example.com/%ZZ"),
-            (SymbolKind::Email, "not-an-email"),
-            (SymbolKind::Host, "https://example.com"),
-            (SymbolKind::Numword, "ordinary"),
+            (StructuredTokenKind::Url, "https://example.com/%ZZ"),
+            (StructuredTokenKind::Email, "not-an-email"),
+            (StructuredTokenKind::Host, "https://example.com"),
+            (StructuredTokenKind::Numword, "ordinary"),
         ] {
             assert!(analyze(raw, &options(kind)).unwrap().is_none(), "{raw}");
         }

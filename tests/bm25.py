@@ -360,7 +360,7 @@ class Suite:
         empty = self.run("SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]'::jsonb)FROM("+guarded_empty+")r;", "guard-empty-query")[0]
         self.require(empty == [], "explicit complete-query guard did not prevent empty BM25 fallback rows")
 
-    def symbol_protocol(self):
+    def structured_protocol(self):
         # These IDs follow literal structures and the explicit component rules.
         # The control dictionary removes automatic-language quality from this
         # mechanism corpus; no existing default-policy corpus is changed.
@@ -375,31 +375,31 @@ class Suite:
             (10, "alpha unrelated zygomorphic beta"),
             (11, "alpha 100 appendix ms beta"),
         ]
-        config = "bm25_test.symbols"
+        config = "bm25_test.structured_tokens"
         rows = ",".join(f"({number},{literal(body)})" for number, body in documents)
-        record = self.result["symbols"] = {
+        record = self.result["structured_tokens"] = {
             "status": "running", "documents": documents, "queries": [],
             "basis": "Fixed literal structures, English running -> run, same-position full OR component-AND policy; not extension-generated expectations",
             "quality_boundary": "The native overlap oracle checks index consistency only; fixed IDs check this controlled corpus. Scattered components and bag widening are reported separately from structural equality.",
         }
         self.checkpoint()
-        self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.symbol_words(TEMPLATE=charabia.template,"
+        self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.structured_words(TEMPLATE=charabia.linguistic_template,"
             "Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false,English=false);"
-            "CREATE TEXT SEARCH CONFIGURATION bm25_test.symbols(COPY=public.charabia);"
-            "DO $symbols$ DECLARE l jsonb; BEGIN "
+            "CREATE TEXT SEARCH CONFIGURATION bm25_test.structured_tokens(COPY=public.charabia);"
+            "DO $structured_tokens$ DECLARE l jsonb; BEGIN "
             "FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP "
-            "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.symbols ALTER MAPPING FOR %I WITH bm25_test.symbol_words',l->>'language');"
-            "END LOOP;END $symbols$;"
-            "CREATE TABLE bm25_test.symbol_docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));"
-            f"INSERT INTO bm25_test.symbol_docs VALUES{rows};"
-            "CREATE INDEX symbol_bm25 ON bm25_test.symbol_docs USING bm25(body)WITH(text_config='bm25_test.symbols');"
-            "ANALYZE bm25_test.symbol_docs;", "symbol-build")
+            "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.structured_tokens ALTER MAPPING FOR %I WITH bm25_test.structured_words',l->>'language');"
+            "END LOOP;END $structured_tokens$;"
+            "CREATE TABLE bm25_test.structured_docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));"
+            f"INSERT INTO bm25_test.structured_docs VALUES{rows};"
+            "CREATE INDEX structured_bm25 ON bm25_test.structured_docs USING bm25(body)WITH(text_config='bm25_test.structured_tokens');"
+            "ANALYZE bm25_test.structured_docs;", "structured-build")
         record["vectors"] = self.run(
             "SELECT jsonb_agg(jsonb_build_object('id',d.id,'body',d.body,"
-            "'vector',to_tsvector('bm25_test.symbols',d.body)::text,"
-            "'tf',(SELECT jsonb_object_agg(lexeme,cardinality(positions)) FROM unnest(to_tsvector('bm25_test.symbols',d.body))),"
-            "'dl',(SELECT sum(cardinality(positions)) FROM unnest(to_tsvector('bm25_test.symbols',d.body))))ORDER BY d.id)"
-            "FROM bm25_test.symbol_docs d;", "symbol-vector-tf-dl")[0]
+            "'vector',to_tsvector('bm25_test.structured_tokens',d.body)::text,"
+            "'tf',(SELECT jsonb_object_agg(lexeme,cardinality(positions)) FROM unnest(to_tsvector('bm25_test.structured_tokens',d.body))),"
+            "'dl',(SELECT sum(cardinality(positions)) FROM unnest(to_tsvector('bm25_test.structured_tokens',d.body))))ORDER BY d.id)"
+            "FROM bm25_test.structured_docs d;", "structured-vector-tf-dl")[0]
         record["tf_dl_meaning"] = "Stored tsvector position counts are analyzer TF/dl inputs; they are not decoded BM25 fieldnorms or score goldens."
         cases = [
             ("unit", "100ms", [1, 2, 5, 6, 11], [1, 5, 11]),
@@ -413,22 +413,22 @@ class Suite:
             for mode in ("force_custom_plan", "force_generic_plan"):
                 for name, query, bag_expected, native_expected in cases:
                     q = literal(query)
-                    ranked = ("SELECT id,body <@> to_bm25query($1,'bm25_test.symbol_bm25')AS score "
-                        "FROM bm25_test.symbol_docs ORDER BY body <@> to_bm25query($1,'bm25_test.symbol_bm25')LIMIT 100")
+                    ranked = ("SELECT id,body <@> to_bm25query($1,'bm25_test.structured_bm25')AS score "
+                        "FROM bm25_test.structured_docs ORDER BY body <@> to_bm25query($1,'bm25_test.structured_bm25')LIMIT 100")
                     default, plan, scored, oracle, counts = self.run(
                         f"SET pg_textsearch.memtable_cache_enabled={cache};SET plan_cache_mode={mode};"
                         "SET enable_seqscan=on;EXPLAIN(FORMAT JSON,VERBOSE,COSTS OFF) " + ranked.replace("$1", q) + ";"
-                        "SET enable_seqscan=off;PREPARE symbol_rank(text)AS SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]')FROM(" + ranked + ")r;"
-                        f"EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF)EXECUTE symbol_rank({q});"
-                        f"EXECUTE symbol_rank({q});"
-                        "SELECT jsonb_build_object('overlap',coalesce((SELECT jsonb_agg(id ORDER BY id)FROM bm25_test.symbol_docs "
-                        "WHERE tsvector_to_array(to_tsvector('bm25_test.symbols',body)) && "
-                        f"tsvector_to_array(to_tsvector('bm25_test.symbols',{q}))),'[]'),"
-                        "'native',coalesce((SELECT jsonb_agg(id ORDER BY id)FROM bm25_test.symbol_docs "
-                        f"WHERE to_tsvector('bm25_test.symbols',body) @@ plainto_tsquery('bm25_test.symbols',{q})),'[]'),"
-                        f"'query',plainto_tsquery('bm25_test.symbols',{q})::text,'terms',tsvector_to_array(to_tsvector('bm25_test.symbols',{q})));"
-                        "SELECT jsonb_build_object('custom',custom_plans,'generic',generic_plans)FROM pg_prepared_statements WHERE name='symbol_rank';",
-                        f"symbol-{cache}-{mode}-{name}")
+                        "SET enable_seqscan=off;PREPARE structured_rank(text)AS SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]')FROM(" + ranked + ")r;"
+                        f"EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF)EXECUTE structured_rank({q});"
+                        f"EXECUTE structured_rank({q});"
+                        "SELECT jsonb_build_object('overlap',coalesce((SELECT jsonb_agg(id ORDER BY id)FROM bm25_test.structured_docs "
+                        "WHERE tsvector_to_array(to_tsvector('bm25_test.structured_tokens',body)) && "
+                        f"tsvector_to_array(to_tsvector('bm25_test.structured_tokens',{q}))),'[]'),"
+                        "'native',coalesce((SELECT jsonb_agg(id ORDER BY id)FROM bm25_test.structured_docs "
+                        f"WHERE to_tsvector('bm25_test.structured_tokens',body) @@ plainto_tsquery('bm25_test.structured_tokens',{q})),'[]'),"
+                        f"'query',plainto_tsquery('bm25_test.structured_tokens',{q})::text,'terms',tsvector_to_array(to_tsvector('bm25_test.structured_tokens',{q})));"
+                        "SELECT jsonb_build_object('custom',custom_plans,'generic',generic_plans)FROM pg_prepared_statements WHERE name='structured_rank';",
+                        f"structured-{cache}-{mode}-{name}")
                     ids = sorted(row["id"] for row in scored)
                     observation = dict(name=name, query=query, cache=cache, mode=mode, default_plan=default,
                         plan=plan, scored=scored, expected_bag_ids=bag_expected, expected_native_ids=native_expected,
@@ -436,70 +436,70 @@ class Suite:
                         ranking="Observed order/scores; no arbitrary tie ordering, score neutrality, or structural-equality claim")
                     record["queries"].append(observation)
                     self.checkpoint()
-                    target = index_nodes(plan, "symbol_bm25")
-                    self.require(target and all(n.get("Actual Loops", 0) > 0 for n in target), name + ": symbol BM25 index did not execute")
-                    self.require(ids == oracle["overlap"], name + ": symbol BM25/native-overlap inconsistency")
+                    target = index_nodes(plan, "structured_bm25")
+                    self.require(target and all(n.get("Actual Loops", 0) > 0 for n in target), name + ": structured BM25 index did not execute")
+                    self.require(ids == oracle["overlap"], name + ": structured BM25/native-overlap inconsistency")
                     self.require(ids == bag_expected and oracle["native"] == native_expected,
-                                 name + ": fixed symbol corpus candidates or native grouping changed")
+                                 name + ": fixed structured corpus candidates or native grouping changed")
                     expected_key, other_key = ("custom", "generic") if mode == "force_custom_plan" else ("generic", "custom")
                     self.require(counts[expected_key] > 0 and counts[other_key] == 0,
-                                 name + ": symbol prepared plan mode was not exercised")
+                                 name + ": structured prepared plan mode was not exercised")
         positions, whole, grouping = self.run(
-            "SELECT jsonb_object_agg(lexeme,positions)FROM unnest(to_tsvector('bm25_test.symbols','alpha 100ms beta'));"
-            "SELECT to_jsonb(ts_headline('bm25_test.symbols','alpha https://example.com/Running?q=100ms beta',"
+            "SELECT jsonb_object_agg(lexeme,positions)FROM unnest(to_tsvector('bm25_test.structured_tokens','alpha 100ms beta'));"
+            "SELECT to_jsonb(ts_headline('bm25_test.structured_tokens','alpha https://example.com/Running?q=100ms beta',"
             "'ms'::tsquery,'HighlightAll=true'));"
-            "SELECT jsonb_build_object('plain',plainto_tsquery('bm25_test.symbols','100ms')::text,"
-            "'any',charabia.query_any('100ms','bm25_test.symbols')::text,"
-            "'internal_phrase',to_tsvector('bm25_test.symbols','100ms') @@ '100 <-> ms'::tsquery,"
-            "'outer_phrase',to_tsvector('bm25_test.symbols','alpha 100ms beta') @@ phraseto_tsquery('bm25_test.symbols','alpha 100ms beta'),"
-            "'scattered',to_tsvector('bm25_test.symbols','100 appendix ms') @@ plainto_tsquery('bm25_test.symbols','100ms'));",
-            "symbol-position-headline")
+            "SELECT jsonb_build_object('plain',plainto_tsquery('bm25_test.structured_tokens','100ms')::text,"
+            "'any',charabia.query_any('100ms','bm25_test.structured_tokens')::text,"
+            "'internal_phrase',to_tsvector('bm25_test.structured_tokens','100ms') @@ '100 <-> ms'::tsquery,"
+            "'outer_phrase',to_tsvector('bm25_test.structured_tokens','alpha 100ms beta') @@ phraseto_tsquery('bm25_test.structured_tokens','alpha 100ms beta'),"
+            "'scattered',to_tsvector('bm25_test.structured_tokens','100 appendix ms') @@ plainto_tsquery('bm25_test.structured_tokens','100ms'));",
+            "structured-position-headline")
         record.update(positions=positions, whole_headline=whole, grouping=grouping)
         record["precision_cost"] = {"input": "100 appendix ms", "query": "100ms",
             "domain_expectation_for_structural_equality": False, "actual_native_plain": grouping["scattered"],
             "meaning": "Explicit native component-conjunction precision cost; a true match is not counted as a structural-quality success or a new known-failure exemption."}
         self.require(positions == {"alpha": [1], "100ms": [2], "100": [2], "ms": [2], "beta": [3]},
-                     "symbol components did not retain one atomic position")
+                     "structured components did not retain one atomic position")
         self.require(grouping["outer_phrase"] and not grouping["internal_phrase"] and grouping["scattered"] and
                      " & " in grouping["plain"] and " & " not in grouping["any"],
-                     "symbol group, query_any, or fixed phrase distance changed")
-        self.require(whole == "alpha <b>https://example.com/Running?q=100ms</b> beta", "symbol component headline lost the complete original URL")
-        topk = ("WITH p AS MATERIALIZED(SELECT charabia.query_any('100ms','bm25_test.symbols')AS q),"
-            "ranked AS MATERIALIZED(SELECT id,body,body <@> to_bm25query('100ms','bm25_test.symbol_bm25')AS score "
-            "FROM bm25_test.symbol_docs WHERE(SELECT numnode(q)>0 FROM p)"
-            "ORDER BY body <@> to_bm25query('100ms','bm25_test.symbol_bm25')LIMIT 2)"
-            "SELECT r.id,r.body,r.score,ts_headline('bm25_test.symbols',r.body,p.q,'HighlightAll=true')AS headline "
+                     "structured group, query_any, or fixed phrase distance changed")
+        self.require(whole == "alpha <b>https://example.com/Running?q=100ms</b> beta", "structured component headline lost the complete original URL")
+        topk = ("WITH p AS MATERIALIZED(SELECT charabia.query_any('100ms','bm25_test.structured_tokens')AS q),"
+            "ranked AS MATERIALIZED(SELECT id,body,body <@> to_bm25query('100ms','bm25_test.structured_bm25')AS score "
+            "FROM bm25_test.structured_docs WHERE(SELECT numnode(q)>0 FROM p)"
+            "ORDER BY body <@> to_bm25query('100ms','bm25_test.structured_bm25')LIMIT 2)"
+            "SELECT r.id,r.body,r.score,ts_headline('bm25_test.structured_tokens',r.body,p.q,'HighlightAll=true')AS headline "
             "FROM ranked r CROSS JOIN p ORDER BY r.score")
         plan, rows = self.run("SET enable_seqscan=off;EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF)" + topk +
-            ";SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]')FROM(" + topk + ")r;", "symbol-topk-headline")
+            ";SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]')FROM(" + topk + ")r;", "structured-topk-headline")
         record["topk"] = dict(plan=plan, rows=rows, query_analysis_cost="One query_any evaluation plus the necessary independent BM25 query analysis")
-        target = index_nodes(plan, "symbol_bm25")
+        target = index_nodes(plan, "structured_bm25")
         p_nodes = [n for n in nodes(plan) if n.get("Subplan Name") == "CTE p"]
-        self.require(target and all(n.get("Actual Loops", 0) > 0 for n in target), "symbol top-k did not execute BM25")
+        self.require(target and all(n.get("Actual Loops", 0) > 0 for n in target), "structured top-k did not execute BM25")
         self.require(len(p_nodes) == 1 and p_nodes[0].get("Actual Loops") == 1 and p_nodes[0].get("Actual Rows") == 1,
-                     "symbol top-k constructed query_any more than once")
-        self.require(len(rows) == 2 and all(row["id"] in [1, 2, 5, 6, 11] for row in rows), "symbol top-k includes a noncandidate")
+                     "structured top-k constructed query_any more than once")
+        self.require(len(rows) == 2 and all(row["id"] in [1, 2, 5, 6, 11] for row in rows), "structured top-k includes a noncandidate")
         self.require(all(html.unescape(row["headline"].replace("<b>", "").replace("</b>", "")) == row["body"] and
-                         "<b>" in row["headline"] for row in rows), "symbol top-k headline lost source or matching content")
-        self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.symbol_pre(TEMPLATE=charabia.template,Language='eng',"
+                         "<b>" in row["headline"] for row in rows), "structured top-k headline lost source or matching content")
+        self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.structured_pre(TEMPLATE=charabia.linguistic_template,Language='eng',"
             "Discard=false,Stem=false,Normalize=false,Filter=true,English=false);"
-            "CREATE TEXT SEARCH CONFIGURATION bm25_test.symbol_chain(COPY=bm25_test.symbols);"
-            "ALTER TEXT SEARCH CONFIGURATION bm25_test.symbol_chain ALTER MAPPING FOR numword WITH bm25_test.symbol_pre,charabia.numword;"
-            "CREATE TABLE bm25_test.symbol_chain_docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));"
-            "INSERT INTO bm25_test.symbol_chain_docs SELECT * FROM bm25_test.symbol_docs WHERE id IN(5,10);"
-            "CREATE INDEX symbol_chain_bm25 ON bm25_test.symbol_chain_docs USING bm25(body)WITH(text_config='bm25_test.symbol_chain');"
-            "ANALYZE bm25_test.symbol_chain_docs;", "symbol-prefilter-chain-build")
-        self.check_query("bm25_test.symbol_chain", "symbol_chain_docs", "symbol_chain_bm25", "100ms", [5], "symbol-prefilter-chain-index")
+            "CREATE TEXT SEARCH CONFIGURATION bm25_test.structured_chain(COPY=bm25_test.structured_tokens);"
+            "ALTER TEXT SEARCH CONFIGURATION bm25_test.structured_chain ALTER MAPPING FOR numword WITH bm25_test.structured_pre,charabia.numword;"
+            "CREATE TABLE bm25_test.structured_chain_docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));"
+            "INSERT INTO bm25_test.structured_chain_docs SELECT * FROM bm25_test.structured_docs WHERE id IN(5,10);"
+            "CREATE INDEX structured_chain_bm25 ON bm25_test.structured_chain_docs USING bm25(body)WITH(text_config='bm25_test.structured_chain');"
+            "ANALYZE bm25_test.structured_chain_docs;", "structured-prefilter-chain-build")
+        self.check_query("bm25_test.structured_chain", "structured_chain_docs", "structured_chain_bm25", "100ms", [5], "structured-prefilter-chain-index")
         for label, sql, expected in (
-            ("insert", "INSERT INTO bm25_test.symbol_docs VALUES(20,'alpha 100ms beta');", [1, 2, 5, 6, 11, 20]),
-            ("update", "UPDATE bm25_test.symbol_docs SET body='replacementmarker'WHERE id=5;", [1, 2, 6, 11, 20]),
-            ("delete", "DELETE FROM bm25_test.symbol_docs WHERE id=2;", [1, 6, 11, 20]),
+            ("insert", "INSERT INTO bm25_test.structured_docs VALUES(20,'alpha 100ms beta');", [1, 2, 5, 6, 11, 20]),
+            ("update", "UPDATE bm25_test.structured_docs SET body='replacementmarker'WHERE id=5;", [1, 2, 6, 11, 20]),
+            ("delete", "DELETE FROM bm25_test.structured_docs WHERE id=2;", [1, 6, 11, 20]),
         ):
-            self.run(sql, "symbol-" + label)
-            self.check_query(config, "symbol_docs", "symbol_bm25", "100ms", expected, "symbol-" + label + "-query")
-        spill = self.run("SELECT to_jsonb(bm25_spill_index('bm25_test.symbol_bm25'));", "symbol-spill")[0]
-        self.require(type(spill) is int and spill > 0, "symbol incremental writes did not spill")
-        self.check_query(config, "symbol_docs", "symbol_bm25", "100ms", [1, 6, 11, 20], "symbol-after-spill")
+            self.run(sql, "structured-" + label)
+            self.check_query(config, "structured_docs", "structured_bm25", "100ms", expected, "structured-" + label + "-query")
+        spill = self.run("SELECT to_jsonb(bm25_spill_index('bm25_test.structured_bm25'));", "structured-spill")[0]
+        self.require(type(spill) is int and spill > 0, "structured incremental writes did not spill")
+        self.check_query(config, "structured_docs", "structured_bm25", "100ms", [1, 6, 11, 20], "structured-after-spill")
         record.update(status="mechanisms-passed", final_bag_ids=[1, 6, 11, 20], spill_block=spill)
         self.checkpoint()
 
@@ -549,9 +549,9 @@ class Suite:
         self.result["route16_quality"] = dict(basis=fixture["basis"], observations=[])
         # These ordinary native configurations are explicit controls. They do
         # not repair or excuse default-policy false positives.
-        self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.native_german_dict(TEMPLATE=charabia.template,"
+        self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.native_german_dict(TEMPLATE=charabia.linguistic_template,"
             "Language='deu',Discard=true,Stem=true,Normalize=true,Filter=false,English=false);"
-            "CREATE TEXT SEARCH DICTIONARY bm25_test.forced_italian_dict(TEMPLATE=charabia.template,"
+            "CREATE TEXT SEARCH DICTIONARY bm25_test.forced_italian_dict(TEMPLATE=charabia.linguistic_template,"
             "Language='ita',Discard=true,Stem=true,Normalize=true,Filter=false,English=false);"
             "CREATE TEXT SEARCH CONFIGURATION bm25_test.native_german(PARSER=charabia.parser);"
             "CREATE TEXT SEARCH CONFIGURATION bm25_test.forced_italian(PARSER=charabia.parser);"
@@ -812,15 +812,15 @@ END$fixture$;"""
         self.result["restart"]["after"] = after
         self.require(before["start"]!=after["start"] and bool(after["loaded_library_mappings"]),"restarted backend did not load the staged library")
         self.matrix("restart")
-        if self.result.get("symbols", {}).get("status") == "mechanisms-passed":
-            self.check_query("bm25_test.symbols", "symbol_docs", "symbol_bm25", "100ms",
-                             [1, 6, 11, 20], "symbol-after-restart")
+        if self.result.get("structured_tokens", {}).get("status") == "mechanisms-passed":
+            self.check_query("bm25_test.structured_tokens", "structured_docs", "structured_bm25", "100ms",
+                             [1, 6, 11, 20], "structured-after-restart")
 
     def execute(self):
         failure = None
         try:
             self.populate()
-            self.symbol_protocol()
+            self.structured_protocol()
             self.matrix("bulk",full=True)
             self.four_term_protocol()
             self.known_quality()

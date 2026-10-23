@@ -85,10 +85,10 @@ CREATE INDEX bypass_bm25 ON bm25_test.bypass_docs USING bm25(body) WITH(text_con
 -- Force one Dictionary language without passing Parser-private metadata. This
 -- isolates the four-variant protocol from statistical language identification.
 CREATE TEXT SEARCH DICTIONARY bm25_test.four_terms_dict(
-  TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=true,
+  TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=true,
   Normalize=false,Filter=false,English=true);
 CREATE TEXT SEARCH DICTIONARY bm25_test.native_terms_dict(
-  TEMPLATE=charabia.template,Language='tur',Discard=false,Stem=true,
+  TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=true,
   Normalize=false,Filter=false,English=false);
 CREATE TEXT SEARCH CONFIGURATION bm25_test.four_terms(PARSER=charabia.parser);
 CREATE TEXT SEARCH CONFIGURATION bm25_test.native_terms(PARSER=charabia.parser);

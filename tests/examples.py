@@ -64,11 +64,11 @@ try:
     first_info = [item for item in json_lines(results["examples"][0]["output"]) if "extension" in item]
     check(len(first_info)==1 and first_info[0]["extension"]=="0.3.0" and first_info[0]["language_count"]==16,
           "README loads this native interface release",first_info)
-    check(first_info[0].get("symbols",{}).get("dictionary_count")==5 and
-          [row["kind"] for row in first_info[0]["symbols"]["types"]]==["url","host","email","file","numword"],
-          "README loads the actual five-symbol interface",first_info[0].get("symbols"))
+    check(first_info[0].get("structured_tokens",{}).get("dictionary_count")==5 and
+          [row["kind"] for row in first_info[0]["structured_tokens"]["types"]]==["url","host","email","file","numword"],
+          "README loads the actual five structured token types",first_info[0].get("structured_tokens"))
     unit_headline=run("SELECT ts_headline('app.search','alpha 100ms beta',plainto_tsquery('app.search','ms'),'HighlightAll=true')",database)
-    check(unit_headline=="alpha <b>100ms</b> beta","reference custom symbol dictionary highlights the whole source token",unit_headline)
+    check(unit_headline=="alpha <b>100ms</b> beta","reference custom structured dictionary highlights the whole source token",unit_headline)
     capabilities = first_info[0]["languages"]
     check([row["language"] for row in capabilities] ==
           ["eng","deu","nld","rus","spa","fra","por","ita","ara","tur","cmn","jpn","kor","vie","tha","und"] and

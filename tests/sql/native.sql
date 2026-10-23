@@ -32,7 +32,7 @@ SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM native_routes r LEFT JOIN pg
  'every language route has exactly its terminal dictionary');
 SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig AND maptokentype IN(17,18)),
  'blank and display-only have no default dictionary mapping');
-SELECT pg_temp.assert_true((SELECT bool_and(d.dicttemplate=(SELECT oid FROM pg_ts_template WHERE tmplnamespace='charabia'::regnamespace AND tmplname='template'))
+SELECT pg_temp.assert_true((SELECT bool_and(d.dicttemplate=(SELECT oid FROM pg_ts_template WHERE tmplnamespace='charabia'::regnamespace AND tmplname='linguistic_template'))
  FROM native_routes r JOIN pg_ts_dict d ON d.dictnamespace='charabia'::regnamespace AND d.dictname=r.alias WHERE r.id<=16),
  'all default dictionaries use the parameterized template');
 
@@ -43,10 +43,10 @@ INSERT INTO native_abi VALUES
  ('charabia.parser_end(internal)','void','parser_end_wrapper'),
  ('charabia.parser_lextypes(internal)','internal','parser_lextypes_wrapper'),
  ('charabia.parser_headline(internal,internal,tsquery)','internal','parser_headline_wrapper'),
- ('charabia.dictionary_init(internal)','internal','dictionary_init_wrapper'),
- ('charabia.dictionary_lexize(internal,internal,internal,internal)','internal','dictionary_lexize_wrapper'),
- ('charabia.symbol_dictionary_init(internal)','internal','symbol_dictionary_init_wrapper'),
- ('charabia.symbol_dictionary_lexize(internal,internal,internal,internal)','internal','symbol_dictionary_lexize_wrapper');
+ ('charabia.linguistic_dictionary_init(internal)','internal','linguistic_dictionary_init_wrapper'),
+ ('charabia.linguistic_dictionary_lexize(internal,internal,internal,internal)','internal','linguistic_dictionary_lexize_wrapper'),
+ ('charabia.structured_dictionary_init(internal)','internal','structured_dictionary_init_wrapper'),
+ ('charabia.structured_dictionary_lexize(internal,internal,internal,internal)','internal','structured_dictionary_lexize_wrapper');
 SELECT pg_temp.assert_true((SELECT bool_and(coalesce(p.prorettype=to_regtype(a.result)
  AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='c') AND p.proisstrict
  AND p.prosrc=a.symbol AND NOT p.proretset,false))
@@ -57,15 +57,15 @@ SELECT pg_temp.assert_true((SELECT prsstart='charabia.parser_start(internal,inte
  AND prslextype='charabia.parser_lextypes(internal)'::regprocedure
  AND prsheadline='charabia.parser_headline(internal,internal,tsquery)'::regprocedure
  FROM pg_ts_parser WHERE prsnamespace='charabia'::regnamespace AND prsname='parser'), 'parser registers real HEADLINE and lifecycle callbacks');
-SELECT pg_temp.assert_true((SELECT tmplinit='charabia.dictionary_init(internal)'::regprocedure
- AND tmpllexize='charabia.dictionary_lexize(internal,internal,internal,internal)'::regprocedure
- FROM pg_ts_template WHERE tmplnamespace='charabia'::regnamespace AND tmplname='template'), 'terminal template callbacks');
+SELECT pg_temp.assert_true((SELECT tmplinit='charabia.linguistic_dictionary_init(internal)'::regprocedure
+ AND tmpllexize='charabia.linguistic_dictionary_lexize(internal,internal,internal,internal)'::regprocedure
+ FROM pg_ts_template WHERE tmplnamespace='charabia'::regnamespace AND tmplname='linguistic_template'), 'terminal template callbacks');
 SELECT pg_temp.assert_true((SELECT cfgparser=(SELECT oid FROM pg_ts_parser WHERE prsnamespace='charabia'::regnamespace AND prsname='parser') FROM pg_ts_config WHERE oid='public.charabia'::regconfig),
  'public default uses charabia parser');
 SELECT pg_temp.assert_true((SELECT bool_and(proparallel<>'s') FROM pg_proc WHERE pronamespace='charabia'::regnamespace),
  'no unverified PARALLEL SAFE declaration');
 SELECT pg_temp.assert_true((SELECT count(*)=21 FROM pg_ts_dict WHERE dictnamespace='charabia'::regnamespace),
- 'extension installs sixteen language and five symbol dictionaries');
+ 'extension installs sixteen language and five structured dictionaries');
 SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace='charabia'::regnamespace
  AND proname IN('create_config','alter_config','drop_config')),
  'no proprietary configuration management or compatibility functions remain');
@@ -114,7 +114,7 @@ SELECT pg_temp.assert_true(to_tsvector('pgcb_native_sql.stable','alpha beta') @@
 
 -- Route all lexical types to an explicit English builtin-stop dictionary.
 -- This tests Stop positions independently of statistical language selection.
-CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.eng_stop(TEMPLATE=charabia.template,
+CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.eng_stop(TEMPLATE=charabia.linguistic_template,
  Language='eng',Discard=true,Stem=false,Normalize=true,Filter=false);
 CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.stop(PARSER=charabia.parser);
 DO $map$
@@ -151,7 +151,7 @@ $fn$;
 
 -- Force the independently calculated Arabic expansion through Arabic rules;
 -- automatic language quality is not the normalized-byte boundary oracle.
-CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.ara(TEMPLATE=charabia.template,
+CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.ara(TEMPLATE=charabia.linguistic_template,
  Language='ara',Discard=false,Stem=false,Normalize=true,Filter=false);
 CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.arabic(PARSER=charabia.parser);
 DO $map$
@@ -160,7 +160,7 @@ BEGIN
  SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=16;
  EXECUTE 'ALTER TEXT SEARCH CONFIGURATION pgcb_native_sql.arabic ADD MAPPING FOR '||types||' WITH pgcb_native_sql.ara';
 END $map$;
-CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.eng_boundary(TEMPLATE=charabia.template,
+CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.eng_boundary(TEMPLATE=charabia.linguistic_template,
  Language='eng',Discard=false,Stem=true,Normalize=false,Filter=false);
 SELECT pg_temp.assert_true(cardinality(ts_lexize('pgcb_native_sql.eng_boundary',repeat('a',997)||'ies'))=2,
  'prepared 1000-byte Snowball input retains surface and different stem');

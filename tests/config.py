@@ -72,7 +72,7 @@ def catalog(session, dictionary):
 
 
 def dictionary(session, name, options="Language='eng'"):
-    value(session, f'CREATE TEXT SEARCH DICTIONARY {name}(TEMPLATE=charabia.template,{options})')
+    value(session, f'CREATE TEXT SEARCH DICTIONARY {name}(TEMPLATE=charabia.linguistic_template,{options})')
 
 
 def mapping(session, name, dictionary_name):
@@ -94,7 +94,7 @@ def explicit_option_matrix(session):
           valid:=(NOT e OR eligible) AND NOT(e AND f) AND NOT(s AND f)
             AND (NOT d OR language_code<>'und') AND (NOT s OR native_stem OR e);
           BEGIN
-            EXECUTE format('CREATE TEXT SEARCH DICTIONARY {schema}.matrix_entry(TEMPLATE=charabia.template,Language=%L,Discard=%s,Stem=%s,Normalize=%s,Filter=%s,English=%s)',language_code,d::text,s::text,n::text,f::text,e::text);
+            EXECUTE format('CREATE TEXT SEARCH DICTIONARY {schema}.matrix_entry(TEMPLATE=charabia.linguistic_template,Language=%L,Discard=%s,Stem=%s,Normalize=%s,Filter=%s,English=%s)',language_code,d::text,s::text,n::text,f::text,e::text);
             IF NOT valid THEN RAISE EXCEPTION 'accepted forbidden Language=%, mask=%',language_code,mask;END IF;
             EXECUTE 'DROP TEXT SEARCH DICTIONARY {schema}.matrix_entry';accepted:=accepted+1;
           EXCEPTION WHEN invalid_parameter_value OR feature_not_supported THEN
@@ -199,9 +199,9 @@ try:
         value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)")
         error(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(Filter=true,English=true)",
               'filter cannot transmit a parallel English branch', '22023')
-        error(s, f"CREATE TEXT SEARCH DICTIONARY {schema}.bad_eng(TEMPLATE=charabia.template,Language='eng',English=true)",
+        error(s, f"CREATE TEXT SEARCH DICTIONARY {schema}.bad_eng(TEMPLATE=charabia.linguistic_template,Language='eng',English=true)",
               'English option cannot duplicate the primary English route', '22023')
-        error(s, f"CREATE TEXT SEARCH DICTIONARY {schema}.bad_lang(TEMPLATE=charabia.template,Language='swe')",
+        error(s, f"CREATE TEXT SEARCH DICTIONARY {schema}.bad_lang(TEMPLATE=charabia.linguistic_template,Language='swe')",
               'outside Language is rejected rather than mapped to und', '22023')
         value(s, f"ALTER TEXT SEARCH DICTIONARY {schema}.vie(Filter=true)")
         check(direct(s, schema + '.vie', 'running') == ['running'],
@@ -272,7 +272,7 @@ try:
         for ordinal, (options, state) in enumerate(invalid):
             bad = f'{schema}.bad{ordinal}'
             before = value(s, f"SELECT count(*) FROM pg_ts_dict WHERE dictnamespace='{schema}'::regnamespace")
-            error(s, f'CREATE TEXT SEARCH DICTIONARY {bad}(TEMPLATE=charabia.template,{options})',
+            error(s, f'CREATE TEXT SEARCH DICTIONARY {bad}(TEMPLATE=charabia.linguistic_template,{options})',
                   'invalid INIT case ' + str(ordinal), state)
             check(value(s, f"SELECT count(*) FROM pg_ts_dict WHERE dictnamespace='{schema}'::regnamespace") == before,
                   'failed native CREATE leaves no dictionary ' + str(ordinal))

@@ -157,7 +157,7 @@ def cached_init_faults():
                              ("register_link", ("error", "panic", "allocation_error"))):
             for mode in modes:
                 name = f"lifecycle.failure_{int(warmed)}_{point}_{mode}"
-                run("CREATE TEXT SEARCH DICTIONARY " + name + " (TEMPLATE=charabia.template,Language='eng',Discard=true,Stem=true,Normalize=true,Filter=false)")
+                run("CREATE TEXT SEARCH DICTIONARY " + name + " (TEMPLATE=charabia.linguistic_template,Language='eng',Discard=true,Stem=true,Normalize=true,Filter=false)")
                 with Session() as session:
                     sql = "SELECT ts_lexize(" + literal(name) + ",'running')"
                     if warmed:
@@ -251,7 +251,7 @@ def parallel_cached_init_faults():
                                 (True,"register_link","error"),
                                 (True,"init","error")):
         name = "lifecycle.parallel_failure_" + str(int(warmed)) + "_" + point
-        run("CREATE TEXT SEARCH DICTIONARY " + name + "(TEMPLATE=charabia.template,"
+        run("CREATE TEXT SEARCH DICTIONARY " + name + "(TEMPLATE=charabia.linguistic_template,"
             "Language='tur',Discard=true,Stem=true,Normalize=false,Filter=false,English=true)")
         try:
             with Session() as session:
@@ -319,35 +319,35 @@ def parallel_cached_init_faults():
             run("DROP TEXT SEARCH DICTIONARY " + name)
 
 
-def symbol_prepared_lifecycle():
-    """Real symbol INIT invalidation without repreparing parameterized plans."""
-    config = "lifecycle.symbol_config"
-    dictionary_name = "lifecycle.symbol_words"
+def structured_prepared_lifecycle():
+    """Real structured INIT invalidation without repreparing parameterized plans."""
+    config = "lifecycle.structured_config"
+    dictionary_name = "lifecycle.structured_words"
     run("CREATE TEXT SEARCH DICTIONARY " + dictionary_name + "("
-        "TEMPLATE=charabia.symbol_template,Kind='numword',Discard=true,Stem=true,Normalize=true);"
+        "TEMPLATE=charabia.structured_template,Kind='numword',Discard=true,Stem=true,Normalize=true);"
         "CREATE TEXT SEARCH CONFIGURATION " + config + "(COPY=public.charabia);"
         "ALTER TEXT SEARCH CONFIGURATION " + config + " ALTER MAPPING FOR numword WITH " + dictionary_name + ";"
-        "CREATE TABLE lifecycle.symbol_docs(id int PRIMARY KEY,body text NOT NULL);"
-        "INSERT INTO lifecycle.symbol_docs VALUES(1,'Running100'),(2,'Other200');"
-        "CREATE INDEX symbol_lifecycle_gin ON lifecycle.symbol_docs USING gin(to_tsvector('" + config + "',body))")
-    results["symbol_prepared"] = []
+        "CREATE TABLE lifecycle.structured_docs(id int PRIMARY KEY,body text NOT NULL);"
+        "INSERT INTO lifecycle.structured_docs VALUES(1,'Running100'),(2,'Other200');"
+        "CREATE INDEX structured_lifecycle_gin ON lifecycle.structured_docs USING gin(to_tsvector('" + config + "',body))")
+    results["structured_prepared"] = []
     with Session() as warm, Session() as updater:
         for suffix in ("custom", "generic"):
-            warm.value("PREPARE symbol_analysis_" + suffix + "(text) AS SELECT jsonb_build_object("
+            warm.value("PREPARE structured_analysis_" + suffix + "(text) AS SELECT jsonb_build_object("
                 "'terms',tsvector_to_array(to_tsvector('" + config + "',$1)),"
                 "'query',plainto_tsquery('" + config + "',$1)::text)")
-            warm.value("PREPARE symbol_index_" + suffix + "(text) AS SELECT coalesce(jsonb_agg(id ORDER BY id),'[]') "
-                "FROM lifecycle.symbol_docs WHERE to_tsvector('" + config + "',body) @@ $1::tsquery")
+            warm.value("PREPARE structured_index_" + suffix + "(text) AS SELECT coalesce(jsonb_agg(id ORDER BY id),'[]') "
+                "FROM lifecycle.structured_docs WHERE to_tsvector('" + config + "',body) @@ $1::tsquery")
         prepared = json.loads(warm.value("SELECT jsonb_object_agg(name,prepare_time) FROM pg_prepared_statements"))
 
         def state(label, stem, expected_ids):
             record = {"state": label, "stem": stem, "expected_ids": expected_ids,
                       "config_oid": warm.value("SELECT '" + config + "'::regconfig::oid"), "plans": []}
-            results["symbol_prepared"].append(record)
+            results["structured_prepared"].append(record)
             save("lifecycle-results.json", results)
             for suffix, mode in (("custom", "force_custom_plan"), ("generic", "force_generic_plan")):
                 warm.value("SET plan_cache_mode=" + mode)
-                execute = "EXECUTE symbol_analysis_" + suffix + "('Running100')"
+                execute = "EXECUTE structured_analysis_" + suffix + "('Running100')"
                 analysis = json.loads(warm.value(execute))
                 item = {"mode": mode, "execute": execute, "analysis": analysis}
                 record["plans"].append(item)
@@ -355,12 +355,12 @@ def symbol_prepared_lifecycle():
                 assert "Running100" in analysis["terms"] and "running100" in analysis["terms"], item
                 assert ("run" in analysis["terms"]) == stem and (("'run'" in analysis["query"]) == stem), item
                 warm.value("SET enable_seqscan=off;SET enable_indexscan=off;SET enable_indexonlyscan=off;SET enable_bitmapscan=on")
-                index_sql = "EXECUTE symbol_index_" + suffix + "('run')"
+                index_sql = "EXECUTE structured_index_" + suffix + "('run')"
                 plan = json.loads(warm.value("EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + index_sql))
                 actual = json.loads(warm.value(index_sql))
                 item.update(index_sql=index_sql, plan=plan, ids=actual)
                 save("lifecycle-results.json", results)
-                assert any(node.get("Index Name") == "symbol_lifecycle_gin" and node.get("Actual Loops", 0) > 0
+                assert any(node.get("Index Name") == "structured_lifecycle_gin" and node.get("Actual Loops", 0) > 0
                            for node in plan_nodes(plan)), item
                 assert actual == expected_ids, item
             current = json.loads(warm.value("SELECT jsonb_agg(jsonb_build_object('name',name,'prepare_time',prepare_time,"
@@ -376,25 +376,25 @@ def symbol_prepared_lifecycle():
         state("rolled-back-alter", True, [1])
         updater.value("ALTER TEXT SEARCH DICTIONARY " + dictionary_name + "(Stem=false)")
         state("committed-alter-stale-postings", False, [1])
-        updater.value("REINDEX INDEX lifecycle.symbol_lifecycle_gin")
+        updater.value("REINDEX INDEX lifecycle.structured_lifecycle_gin")
         state("reindexed", False, [])
         updater.value("ALTER TEXT SEARCH DICTIONARY " + dictionary_name + "(Stem)")
-        updater.value("REINDEX INDEX lifecycle.symbol_lifecycle_gin")
+        updater.value("REINDEX INDEX lifecycle.structured_lifecycle_gin")
         state("removed-option-default-restored", True, [1])
-        assert len({item["config_oid"] for item in results["symbol_prepared"]}) == 1
+        assert len({item["config_oid"] for item in results["structured_prepared"]}) == 1
 
 
-def symbol_cached_init_faults():
-    """Generic dictionary counters also own the new exact symbol state type."""
-    results["symbol_cached_init_faults"] = []
+def structured_cached_init_faults():
+    """Generic dictionary counters also own the new exact structured state type."""
+    results["structured_cached_init_faults"] = []
     manifest = json.loads((Path(__file__).resolve().parent.parent / "resources/manifest.json").read_text())
     fst_bytes = manifest["compiled_stop_sets"]["eng"]["fst_bytes"]
     for warmed, point, mode in ((False, "register_alloc", "allocation_error"),
                                 (False, "init", "panic"),
                                 (True, "register_link", "error"),
                                 (True, "init", "error")):
-        name = "lifecycle.symbol_failure_" + str(int(warmed)) + "_" + point
-        run("CREATE TEXT SEARCH DICTIONARY " + name + "(TEMPLATE=charabia.symbol_template,"
+        name = "lifecycle.structured_failure_" + str(int(warmed)) + "_" + point
+        run("CREATE TEXT SEARCH DICTIONARY " + name + "(TEMPLATE=charabia.structured_template,"
             "Kind='numword',Discard=true,Stem=true,Normalize=true)")
         try:
             with Session() as session:
@@ -404,7 +404,7 @@ def symbol_cached_init_faults():
                     run("ALTER TEXT SEARCH DICTIONARY " + name + "(Stem=false)")
                 record = {"warmed": warmed, "point": point, "mode": mode, "sql": statement,
                           "pid": session.pid, "attempts": [], "fst_bytes": fst_bytes}
-                results["symbol_cached_init_faults"].append(record)
+                results["structured_cached_init_faults"].append(record)
                 before = json.loads(session.value("SELECT charabia.test_stats()"))
                 retained = point == "init"
                 for attempt in range(2):
@@ -440,11 +440,11 @@ def symbol_cached_init_faults():
                 assert recovered["dictionary_last_created"] == recovered["dictionary_last_lexized"], record
                 assert recovered["dictionary_live_referenced_fst_bytes"] == fst_bytes, record
                 run("ALTER TEXT SEARCH DICTIONARY " + name + "(Stem=" + ("true" if warmed else "false") + ")")
-                session.value("BEGIN;SAVEPOINT symbol_init")
+                session.value("BEGIN;SAVEPOINT structured_init")
                 before = json.loads(session.value("SELECT charabia.test_stats()"))
                 session.value("SELECT charabia.test_set_fault(" + literal(point) + "," + literal(mode) + ")")
                 output = session.query(statement)
-                session.value("ROLLBACK TO SAVEPOINT symbol_init")
+                session.value("ROLLBACK TO SAVEPOINT structured_init")
                 after = json.loads(session.value("SELECT charabia.test_stats()"))
                 record["savepoint"] = {"before": before, "error": output, "after_rollback": after}
                 save("lifecycle-results.json", results)
@@ -519,11 +519,11 @@ try:
         refreshed = warm.value("EXECUTE lifecycle_literal")
         assert "'run'" not in refreshed, refreshed
         results["constant_literal"]["after_reprepare"] = refreshed
-    symbol_prepared_lifecycle()
+    structured_prepared_lifecycle()
     if has_hooks:
         cached_init_faults()
         parallel_cached_init_faults()
-        symbol_cached_init_faults()
+        structured_cached_init_faults()
 
     run(native_config_sql("lifecycle.roundtrip", stem=False, discard=False, normalize=False))
     original_oid = int(run("SELECT 'lifecycle.roundtrip'::regconfig::oid"))

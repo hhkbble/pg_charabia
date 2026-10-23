@@ -3,7 +3,7 @@ pub(crate) mod recognition;
 mod terms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SymbolKind {
+pub(crate) enum StructuredTokenKind {
     Url,
     Host,
     Email,
@@ -11,7 +11,7 @@ pub(crate) enum SymbolKind {
     Numword,
 }
 
-impl SymbolKind {
+impl StructuredTokenKind {
     pub const ALL: [Self; 5] = [
         Self::Url,
         Self::Host,
@@ -49,17 +49,17 @@ impl SymbolKind {
 pub(crate) struct Candidate {
     pub start: usize,
     pub end: usize,
-    pub kind: SymbolKind,
+    pub kind: StructuredTokenKind,
 }
 
-pub(crate) use terms::{Options, SymbolTerms, analyze};
+pub(crate) use terms::{Options, StructuredTokenTerms, analyze};
 
 pub(crate) fn identity() -> serde_json::Value {
     serde_json::json!({
         "rule_revision":"ascii-atomic-full-or-component-bundle-1",
         "dictionary_count":5,
         "ordinary_ascii_delimiters":["<",">","="],
-        "types":SymbolKind::ALL.map(|kind| serde_json::json!({
+        "types":StructuredTokenKind::ALL.map(|kind| serde_json::json!({
             "id":kind.id(),"kind":kind.alias(),
             "defaults":{"discard":true,"stem":true,"normalize":true}
         })),

@@ -33,7 +33,7 @@ jobs:
         run: |
           mkdir -p artifacts
           set -o pipefail
-          ./scripts/verify-linux-amd64 --suite unit,smoke,native,symbol,chain,headline,config,lifecycle,errors,stress 2>&1 | tee artifacts/ci-release.log
+          ./scripts/verify-linux-amd64 --suite unit,smoke,native,structured,chain,headline,config,lifecycle,errors,stress 2>&1 | tee artifacts/ci-release.log
       - name: Rust fmt and Clippy in the target environment
         if: ${{ !cancelled() && steps.release.outcome != 'skipped' }}
         shell: bash

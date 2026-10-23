@@ -120,7 +120,7 @@ def parallel_execution():
         results["parallel"]["count"] = 20000
 
 
-def parallel_symbol_execution():
+def parallel_structured_execution():
     """Workers process actual URL dictionaries; the leader cannot do their work."""
     with Session() as session:
         session.value(
@@ -144,7 +144,7 @@ def parallel_symbol_execution():
                   "leader_participation": session.value("SHOW parallel_leader_participation"),
                   "count": session.value(query),
                   "basis": "256 independent row IDs and upstream English running -> run; URI varies by row"}
-        results["symbol_parallel"] = record
+        results["structured_parallel"] = record
         checkpoint()
         assert record["leader_participation"] == "off" and scans and workers, record
         assert any(worker.get("Actual Rows", 0) > 0 and worker.get("Actual Loops", 0) > 0 for worker in workers), record
@@ -181,7 +181,7 @@ def repeated_requests():
             results["test_counters"] = hooks(session)
 
 
-def repeated_symbol_requests():
+def repeated_structured_requests():
     with Session() as session:
         session.value("SET statement_timeout='60s';SET jit=off")
         text = "https://example.com/Running?q=100ms example.org User+tag@example.com /tmp/RunningTests.rs 100ms 0x5fff"
@@ -192,13 +192,13 @@ def repeated_symbol_requests():
         session.value(statement)
         session.value(headline)
         samples = []
-        results["symbol_requests"] = {"document": text, "vector_sql": statement,
+        results["structured_requests"] = {"document": text, "vector_sql": statement,
                                       "headline_sql": headline, "samples": samples}
         for batch in range(8):
             before = hooks(session)
             assert session.value(statement) == "250"
             assert int(session.value(headline)) > 0
-            sample = observe(session, "symbol-requests", batch)
+            sample = observe(session, "structured-requests", batch)
             samples.append(sample)
             checkpoint()
             if before is not None:
@@ -213,36 +213,36 @@ def repeated_symbol_requests():
         bounded_contexts(samples[2:])
 
 
-def cache_invalidation(symbol=False):
-    state = results.setdefault("symbol_cache_invalidation", {}) if symbol else results["cache_invalidation"]
+def cache_invalidation(structured=False):
+    state = results.setdefault("structured_cache_invalidation", {}) if structured else results["cache_invalidation"]
     state.update({"builtin_language": "eng", "sentinel": "the", "warmup": [], "control": [], "measurement": [],
                   "basis": "Pinned NLTK English stoplist contains the; Discard=false references no stop FST; all FST bytes are static"})
     # This test measures one real dictionary lifecycle, independent of automatic
     # language quality. All lexical types deliberately map to the same English
     # dictionary; blank/display types remain unmapped.
-    dictionary_name = "stress.symbol_cache_words" if symbol else "stress.cache_words"
-    config = "stress.symbol_cache_config" if symbol else "stress.cache_config"
-    if symbol:
-        state["basis"] = "One real symbol Dictionary borrows static English FST; raw alpha_the_beta_1 retains literals while the component stops"
-        run("CREATE TEXT SEARCH DICTIONARY " + dictionary_name + "(TEMPLATE=charabia.symbol_template,"
+    dictionary_name = "stress.structured_cache_words" if structured else "stress.cache_words"
+    config = "stress.structured_cache_config" if structured else "stress.cache_config"
+    if structured:
+        state["basis"] = "One real structured Dictionary borrows static English FST; raw alpha_the_beta_1 retains literals while the component stops"
+        run("CREATE TEXT SEARCH DICTIONARY " + dictionary_name + "(TEMPLATE=charabia.structured_template,"
             "Kind='numword',Discard=false,Stem=false,Normalize=true);CREATE TEXT SEARCH CONFIGURATION " +
             config + "(PARSER=charabia.parser);ALTER TEXT SEARCH CONFIGURATION " + config +
             " ADD MAPPING FOR numword WITH " + dictionary_name)
     else:
         run("""CREATE TEXT SEARCH DICTIONARY stress.cache_words(
- TEMPLATE=charabia.template,Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
+ TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
 CREATE TEXT SEARCH CONFIGURATION stress.cache_config(PARSER=charabia.parser);
 DO $map$ DECLARE l jsonb; BEGIN
  FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
   EXECUTE format('ALTER TEXT SEARCH CONFIGURATION stress.cache_config ADD MAPPING FOR %I WITH stress.cache_words',l->>'language');
  END LOOP;
 END $map$;""")
-    document = ("alpha_the_beta_1" if symbol else
+    document = ("alpha_the_beta_1" if structured else
                 "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. alpha beta the")
     selected = json.loads(run("SELECT coalesce(json_agg(DISTINCT language),'[]'::json) FROM charabia.analyze(" + literal(document) + ") WHERE kind='word'"))
     state["probe_document"] = document
     state["selected_languages"] = selected
-    if symbol:
+    if structured:
         assert selected == [], selected
     with Session() as warm, Session() as updater:
         warm.value(
@@ -389,14 +389,14 @@ def assert_bm25_plan(plan, index="stress_bm25"):
 
 
 def concurrency():
-    run("CREATE TABLE stress.symbol_docs(id int PRIMARY KEY,body text NOT NULL);"
-        "INSERT INTO stress.symbol_docs VALUES(1,'100ms'),(2,'200ms'),(3,'0x5fff'),"
-        "(4,'https://example.com/Running');CREATE INDEX stress_symbol_gin ON stress.symbol_docs "
+    run("CREATE TABLE stress.structured_docs(id int PRIMARY KEY,body text NOT NULL);"
+        "INSERT INTO stress.structured_docs VALUES(1,'100ms'),(2,'200ms'),(3,'0x5fff'),"
+        "(4,'https://example.com/Running');CREATE INDEX stress_structured_gin ON stress.structured_docs "
         "USING gin(to_tsvector('public.charabia',body))")
     if LINUX:
         # Every writer mutation below must maintain an already-existing index.
         run("CREATE INDEX stress_bm25 ON stress.docs USING bm25(body) WITH(text_config='public.charabia')")
-        run("CREATE INDEX stress_symbol_bm25 ON stress.symbol_docs USING bm25(body) WITH(text_config='public.charabia')")
+        run("CREATE INDEX stress_structured_bm25 ON stress.structured_docs USING bm25(body) WITH(text_config='public.charabia')")
     snapshots_ready = threading.Barrier(3)
     writes_committed = threading.Barrier(3)
     stop = threading.Event()
@@ -432,15 +432,15 @@ def concurrency():
                         )
                         session.value(f"DELETE FROM stress.docs WHERE id BETWEEN {first+40} AND {first+49}")
                         # This already-indexed small table isolates actual
-                        # symbol postings while preserving the original load.
-                        symbol_id = 100 + batch
-                        session.value("INSERT INTO stress.symbol_docs VALUES(" + str(symbol_id) +
-                                      ",'100ms'),(" + str(symbol_id + 100) + ",'100ms')")
-                        session.value("UPDATE stress.symbol_docs SET body='0x5fff' WHERE id=" + str(symbol_id + 100))
-                        session.value("DELETE FROM stress.symbol_docs WHERE id=" + str(symbol_id + 100))
+                        # structured postings while preserving the original load.
+                        structured_id = 100 + batch
+                        session.value("INSERT INTO stress.structured_docs VALUES(" + str(structured_id) +
+                                      ",'100ms'),(" + str(structured_id + 100) + ",'100ms')")
+                        session.value("UPDATE stress.structured_docs SET body='0x5fff' WHERE id=" + str(structured_id + 100))
+                        session.value("DELETE FROM stress.structured_docs WHERE id=" + str(structured_id + 100))
                         record["batches"].append({
                             "batch": batch, "inserted": 50, "updated": 20, "deleted": 10,
-                            "symbol_inserted": 2, "symbol_updated": 1, "symbol_deleted": 1,
+                            "structured_inserted": 2, "structured_updated": 1, "structured_deleted": 1,
                             "started_monotonic": started, "committed_monotonic": time.monotonic(),
                         })
                         writes_committed.wait(timeout=90)
@@ -459,12 +459,12 @@ def concurrency():
                             "batch": batch, "query": text, "snapshot": snapshot, "native_oracle": oracle,
                             "started_monotonic": started, "oracle_monotonic": time.monotonic(),
                         }
-                        symbol_text = "100ms" if batch % 2 == 0 else "5fff"
-                        symbol_oracle_sql = ("SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM stress.symbol_docs "
+                        structured_text = "100ms" if batch % 2 == 0 else "5fff"
+                        structured_oracle_sql = ("SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM stress.structured_docs "
                             "WHERE tsvector_to_array(to_tsvector('public.charabia',body)) && "
-                            "tsvector_to_array(to_tsvector('public.charabia'," + literal(symbol_text) + "))")
-                        observation["symbol"] = {"query": symbol_text, "oracle_sql": symbol_oracle_sql,
-                                                 "native_oracle": json.loads(session.value(symbol_oracle_sql))}
+                            "tsvector_to_array(to_tsvector('public.charabia'," + literal(structured_text) + "))")
+                        observation["structured"] = {"query": structured_text, "oracle_sql": structured_oracle_sql,
+                                                 "native_oracle": json.loads(session.value(structured_oracle_sql))}
                         record["batches"].append(observation)
                         # The index now contains committed writes newer than
                         # this reader snapshot; its scan must honor that snapshot.
@@ -480,20 +480,20 @@ def concurrency():
                             observation["bm25_candidates"] = actual
                             assert_bm25_plan(plan)
                             assert actual == oracle, observation
-                            symbol_sql = ("SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM ("
-                                "SELECT id FROM stress.symbol_docs ORDER BY body <@> to_bm25query(" +
-                                literal(symbol_text) + ",'stress.stress_symbol_bm25') LIMIT 100) ranked")
-                            symbol_plan = json.loads(session.value(
-                                "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + symbol_sql))
-                            symbol_actual = json.loads(session.value(symbol_sql))
-                            observation["symbol"].update(sql=symbol_sql, plan=symbol_plan, bm25_candidates=symbol_actual)
-                            assert_bm25_plan(symbol_plan, "stress_symbol_bm25")
-                            assert symbol_actual == observation["symbol"]["native_oracle"], observation
+                            structured_sql = ("SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM ("
+                                "SELECT id FROM stress.structured_docs ORDER BY body <@> to_bm25query(" +
+                                literal(structured_text) + ",'stress.stress_structured_bm25') LIMIT 100) ranked")
+                            structured_plan = json.loads(session.value(
+                                "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + structured_sql))
+                            structured_actual = json.loads(session.value(structured_sql))
+                            observation["structured"].update(sql=structured_sql, plan=structured_plan, bm25_candidates=structured_actual)
+                            assert_bm25_plan(structured_plan, "stress_structured_bm25")
+                            assert structured_actual == observation["structured"]["native_oracle"], observation
                         else:
                             assert int(session.value("SELECT count(*) FROM stress.docs")) >= 20000
-                            symbol_actual = json.loads(session.value(symbol_oracle_sql))
-                            observation["symbol"]["repeated_native"] = symbol_actual
-                            assert symbol_actual == observation["symbol"]["native_oracle"], observation
+                            structured_actual = json.loads(session.value(structured_oracle_sql))
+                            observation["structured"]["repeated_native"] = structured_actual
+                            assert structured_actual == observation["structured"]["native_oracle"], observation
                         session.value("COMMIT")
                         error = session.query("SELECT * FROM charabia.analyze(repeat('x',262145))")
                         assert "ERROR:" in error and session.value("SELECT 1") == "1", error
@@ -574,7 +574,7 @@ def concurrency():
     if failures:
         raise AssertionError(f"Concurrent clients failed after join: {[repr(error) for error in failures]}") from failures[0]
     assert run("SELECT count(*) FROM stress.docs") == "20320"
-    assert run("SELECT count(*) FROM stress.symbol_docs") == "12"
+    assert run("SELECT count(*) FROM stress.structured_docs") == "12"
     if LINUX:
         with Session() as session:
             session.value("SET enable_seqscan=off; SET jit=off; SET statement_timeout='60s'")
@@ -598,11 +598,11 @@ CREATE INDEX stress_gin ON stress.docs USING gin(to_tsvector('public.charabia',b
 ANALYZE stress.docs;
 """)
     parallel_execution()
-    parallel_symbol_execution()
+    parallel_structured_execution()
     repeated_requests()
-    repeated_symbol_requests()
+    repeated_structured_requests()
     cache_invalidation()
-    cache_invalidation(symbol=True)
+    cache_invalidation(structured=True)
     concurrency()
     results["status"] = "passed"
 except BaseException as error:
