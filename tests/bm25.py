@@ -314,6 +314,18 @@ class Suite:
         self.check_query("public.charabia","docs","docs_bm25","全文 banana",[2,10],"bag-independent-candidates",
                          domain_case_id="bm25-bag-independent-candidates")
         raw_query = "全文 running"
+        # Background rows affect ranking even when they are not candidates.
+        # Keep the quality input frozen, but retain the complete scoring corpus.
+        corpus, options = self.run(
+            "SELECT jsonb_agg(jsonb_build_object('id',id,'body',body,"
+            "'vector',to_tsvector('public.charabia',body)::text,"
+            "'stored_vector_positions',(SELECT coalesce(sum(cardinality(positions)),0)"
+            "FROM unnest(to_tsvector('public.charabia',body))))ORDER BY id)FROM bm25_test.docs;"
+            "SELECT to_jsonb(reloptions)FROM pg_class WHERE oid='bm25_test.docs_bm25'::regclass;",
+            "topk-complete-corpus-context")
+        self.require([[row["id"],row["body"]] for row in corpus] ==
+                     FIXTURE["documents"] + [[number,"cobaltxylophone"] for number in range(100,181)],
+                     "top-k corpus differs from the semantic fixture and background recipe")
         ranked = ("WITH p AS MATERIALIZED(SELECT charabia.query_any(" + literal(raw_query) + ",'public.charabia')AS q),"
             "ranked AS MATERIALIZED(SELECT id,body,body <@> to_bm25query(" + literal(raw_query) + ",'bm25_test.docs_bm25')AS score "
             "FROM bm25_test.docs WHERE(SELECT numnode(q)>0 FROM p)ORDER BY body <@> to_bm25query(" +
@@ -322,6 +334,8 @@ class Suite:
         plan, rows = self.run("EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF) " + ranked +
             ";SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]'::jsonb)FROM("+ranked+")r;", "materialized-query-topk-headline")
         self.result["topk_headline"] = dict(query=raw_query,sql=ranked,plan=plan,rows=rows,
+            corpus_context=dict(rows=corpus,index_options=options,
+                basis="Actual complete table before top-k; background rows affect corpus statistics. Stored vector positions are diagnostics, not a universal BM25 length oracle."),
             query_analysis_cost="BM25 and query_any each analyze original query once through separate PG interfaces")
         target = index_nodes(plan,"docs_bm25")
         p_nodes = [n for n in nodes(plan) if n.get("Subplan Name") == "CTE p"]
