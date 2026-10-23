@@ -14,7 +14,7 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, symbol_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import QUALITY_FIELDS, QUALITY_WARNING_REVIEW, REVIEWED_QUALITY_WARNINGS, reviewed_quality_warnings, ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, symbol_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -218,7 +218,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         frozen = frozen_quality_cases()
         cases = [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen.items()]
         summary = validate_quality({"format": FORMAT, "cases": cases})
-        self.assertEqual(summary["counts"], {"passed": 2, "known-failure": 1, "regression": 0})
+        self.assertEqual(summary["counts"], {"passed": 2, "known-failure": 1, "warning": 0, "regression": 0})
         self.assertEqual(verified_status(summary), "verified-with-known-quality-failures")
         values = frozen["english-den"]
         for field, changed in (("actual", False), ("input", "different document"), ("query", "different query"), ("config", "other.config"), ("expected", False), ("actual", 0)):
@@ -249,12 +249,96 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             from report_contract import require_known_quality_cases
             require_known_quality_cases(validate_quality({"format": FORMAT, "cases": []}))
 
+    def test_reviewed_bm25_difference_is_a_warning(self):
+        original = json.loads((ROOT / "tests/fixtures/quality-warnings-original.json").read_text())
+        row = next(case for case in original["cases"] if case["id"] == "bm25-domain-surface_running")
+        fields = {key: row[key] for key in ("input", "query", "config", "expected", "actual")}
+        case = quality_case(row["id"], **fields)
+        self.assertEqual(case["status"], "warning")
+
+    def test_warning_scope_is_exact_and_never_quality_pass(self):
+        original = json.loads((ROOT / QUALITY_WARNING_REVIEW["file"]).read_text())
+        self.assertEqual(digest(ROOT / QUALITY_WARNING_REVIEW["file"]),
+                         "ae335da2f89aae7eb10e59ab86aaf3f8233488cddafa06371b6ae9a2d8243b22")
+        reviewed = [row for row in original["cases"] if row["status"] == "regression"]
+        self.assertEqual({row["id"] for row in reviewed}, REVIEWED_QUALITY_WARNINGS)
+        cases = []
+        for row in reviewed:
+            fields = {key: row[key] for key in QUALITY_FIELDS}
+            case = quality_case(row["id"], **fields)
+            self.assertEqual(case["status"], "warning", row["id"])
+            cases.append(case)
+            for field in QUALITY_FIELDS:
+                changed = copy.deepcopy(fields)
+                # Changing any one serialized field must revoke the warning.
+                changed[field] = {"unreviewed": changed[field]}
+                altered = quality_case(row["id"], **changed)
+                self.assertEqual(altered["status"], "regression", (row["id"], field))
+            for renamed in (row["id"] + "-new", "unreviewed-" + row["id"]):
+                self.assertEqual(quality_case(renamed, **fields)["status"], "regression")
+            if isinstance(fields["actual"], list):
+                if fields["expected"]:
+                    missing = dict(fields, actual=[value for value in fields["actual"] if value not in fields["expected"]])
+                    self.assertEqual(quality_case(row["id"], **missing)["status"], "regression")
+            else:
+                # JSON booleans and numbers are not interchangeable signatures.
+                self.assertEqual(quality_case(row["id"], **dict(fields, actual=int(fields["actual"])))["status"], "regression")
+        summary = validate_quality({"format": FORMAT, "cases": cases})
+        self.assertEqual(summary["counts"], {"passed": 0, "known-failure": 0, "warning": 47, "regression": 0})
+        self.assertEqual(set(summary["warnings"]), REVIEWED_QUALITY_WARNINGS)
+        self.assertEqual(verified_status(summary), "verified-with-quality-warnings")
+        for forged_status in ("passed", "known-failure"):
+            forged = copy.deepcopy(cases[0])
+            forged["status"] = forged_status
+            with self.assertRaises(ValueError):
+                validate_quality({"format": FORMAT, "cases": [forged]})
+        for key in ("counts", "warnings", "warning_review"):
+            forged = copy.deepcopy(summary)
+            forged[key] = {} if key != "warnings" else []
+            with self.assertRaises(ValueError):
+                validate_quality(forged)
+
+    def test_release_warning_disclosure_preserves_all_other_gates(self):
+        report = self.report()
+        require_release_report(report)
+        for key in ("counts", "warnings", "warning_review"):
+            changed = copy.deepcopy(report)
+            del changed["quality"][key]
+            with self.assertRaisesRegex(ValueError, "disclosure"):
+                require_release_report(changed)
+        changed = copy.deepcopy(report)
+        changed["quality"]["cases"] = [case for case in changed["quality"]["cases"] if case["id"] != "bm25-topk-domain"]
+        changed["quality"] = validate_quality({"format": FORMAT, "cases": changed["quality"]["cases"]})
+        with self.assertRaisesRegex(ValueError, "Missing reviewed"):
+            require_release_report(changed)
+        for key, value in (("suite_results", {}), ("cleanup", {}), ("recovery", {})):
+            with self.assertRaises(ValueError):
+                require_release_report(dict(report, **{key: value}))
+        changed = copy.deepcopy(report)
+        changed["commands"][0]["exit_code"] = 1
+        with self.assertRaises(ValueError):
+            require_release_report(changed)
+
+    def test_warning_evidence_hash_cannot_be_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("scripts/report_contract.py", "tests/fixtures/quality-known.json", QUALITY_WARNING_REVIEW["file"]):
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / name, target)
+            evidence = root / QUALITY_WARNING_REVIEW["file"]
+            evidence.write_bytes(evidence.read_bytes() + b"\n")
+            command = "import sys; sys.path.insert(0, 'scripts'); from report_contract import quality_case; quality_case('unreviewed', input='', query='', config='public.charabia', expected=True, actual=True)"
+            result = subprocess.run([sys.executable, "-c", command], cwd=root, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Reviewed quality warning evidence changed", result.stderr)
+
     def report(self):
         labels = ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract", "word-generator-contract", "resource-verification", "normal-cargo-tree")
-        return {"format": FORMAT, "status": "verified-with-known-quality-failures", "platform": "linux-amd64", "build_profile": "release", "test_hooks": False,
+        report = {"format": FORMAT, "status": "verified-with-quality-warnings", "platform": "linux-amd64", "build_profile": "release", "test_hooks": False,
                 "suites": list(SUITES), "suite_results": {suite: {"status": "passed"} for suite in SUITES},
                 "cleanup": {key: True for key in ("marker_matches", "cluster_stopped", "directory_removed")},
-                "quality": {"format": FORMAT, "cases": [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen_quality_cases().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
+                "quality": {"format": FORMAT, "cases": [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen_quality_cases().items()] + [quality_case(case_id, **values) for case_id, values in reviewed_quality_warnings().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
                 "analysis_info": self.info(), "public_api_abi_verified": True, "default_objects_verified": True,
                 "default_objects": self.default_objects(),
                 "symbol_quality_costs":[{"input":"100 ms","query":"100ms","domain_expected":False,"native_actual":True}],
@@ -262,6 +346,8 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                 "recovery": {"format": FORMAT, "status": "passed", "loaded_library_sha256": "f" * 64, "cleanup": {key: True for key in ("marker_matches", "clusters_stopped", "directory_removed")}},
                 "pg_textsearch": {"loaded_backend_verified": True},
                 "commands": [{"label": label, "exit_code": 0} for label in labels] + [{"label": f"suite-{suite}-python", "exit_code": 0} for suite in SUITES if suite != "unit"]}
+        report["quality"] = validate_quality(report["quality"])
+        return report
 
     def info(self):
         return {"extension": RELEASE_VERSION, "pgrx": "0.19.3", "charabia": "0.10.0", "target": "x86_64-unknown-linux-gnu", "cargo_lock_sha256": "a" * 64,
@@ -437,7 +523,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             root = Path(directory)
             names = ("scripts/package-release", "scripts/report_contract.py", "LICENSE", "README.md",
                      "Cargo.toml", "Cargo.lock", "build.rs", "AGENTS.md", ".gitattributes", "rust-toolchain.toml", "pg_charabia.control", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz",
-                     "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json")
+                     "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json", "tests/fixtures/quality-warnings-original.json")
             for name in names:
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)

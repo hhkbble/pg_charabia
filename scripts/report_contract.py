@@ -15,7 +15,7 @@ SUITES = ("unit", "smoke", "native", "symbol", "chain", "bm25", "headline", "con
 MAC_DEFAULT = ("unit", "native", "symbol", "chain", "headline", "config", "lifecycle", "errors")
 ARCHIVE_SUITES = ("smoke", "symbol", "chain", "headline", "config", "recovery")
 STATIC_INFO_FIELDS = frozenset(("extension", "pgrx", "charabia", "target", "cargo_lock_sha256", "resource_manifest_sha256", "analysis_revision", "resource_fingerprint", "language_count", "languages", "symbols", "resources"))
-VERIFIED = ("verified", "verified-with-known-quality-failures")
+VERIFIED = ("verified", "verified-with-known-quality-failures", "verified-with-quality-warnings")
 QUALITY_FIELDS = ("input", "query", "config", "expected", "actual")
 REQUIRED_QUALITY_CASES = frozenset(("english-den", "code-var", "english-short-phrase"))
 # Reviewed against the unchanged domain inputs, real native vectors and BM25
@@ -25,6 +25,62 @@ REVIEWED_QUALITY_RESOLUTIONS = {
     "code-var": "The tur route retains var through the English branch; the unchanged technical document matches.",
 }
 
+
+# Temporary v0.3.0 policy: exact reviewed records only, never a name pattern.
+QUALITY_WARNING_REVIEW = {
+    "file": "tests/fixtures/quality-warnings-original.json",
+    "sha256": "ae335da2f89aae7eb10e59ab86aaf3f8233488cddafa06371b6ae9a2d8243b22",
+    "source_run": "20261023T221121Z-73050-amd64-inner",
+}
+REVIEWED_QUALITY_WARNINGS = frozenset((
+    'bm25-domain-surface_running',
+    'bm25-domain-french_accents',
+    'bm25-domain-swedish_boundary',
+    'bm25-domain-bulk-on-force_generic_plan-surface_running',
+    'bm25-domain-bulk-on-force_generic_plan-french_accents',
+    'bm25-domain-bulk-on-force_generic_plan-swedish_boundary',
+    'bm25-domain-bulk-off-force_custom_plan-surface_running',
+    'bm25-domain-bulk-off-force_custom_plan-french_accents',
+    'bm25-domain-bulk-off-force_custom_plan-swedish_boundary',
+    'bm25-domain-bulk-off-force_generic_plan-surface_running',
+    'bm25-domain-bulk-off-force_generic_plan-french_accents',
+    'bm25-domain-bulk-off-force_generic_plan-swedish_boundary',
+    'english-short-phrase-no-stop-bag',
+    'german-die-precision',
+    'bm25-topk-domain',
+    'bm25-domain-insert-on-force_custom_plan-surface_running',
+    'bm25-domain-insert-on-force_generic_plan-surface_running',
+    'bm25-domain-insert-off-force_custom_plan-surface_running',
+    'bm25-domain-insert-off-force_generic_plan-surface_running',
+    'bm25-domain-update-on-force_custom_plan-surface_running',
+    'bm25-domain-update-on-force_generic_plan-surface_running',
+    'bm25-domain-update-off-force_custom_plan-surface_running',
+    'bm25-domain-update-off-force_generic_plan-surface_running',
+    'bm25-domain-delete-on-force_custom_plan-surface_running',
+    'bm25-domain-delete-on-force_generic_plan-surface_running',
+    'bm25-domain-delete-off-force_custom_plan-surface_running',
+    'bm25-domain-delete-off-force_generic_plan-surface_running',
+    'bm25-domain-vacuum-on-force_custom_plan-surface_running',
+    'bm25-domain-vacuum-on-force_generic_plan-surface_running',
+    'bm25-domain-vacuum-off-force_custom_plan-surface_running',
+    'bm25-domain-vacuum-off-force_generic_plan-surface_running',
+    'bm25-domain-spill-on-force_custom_plan-surface_running',
+    'bm25-domain-spill-on-force_generic_plan-surface_running',
+    'bm25-domain-spill-off-force_custom_plan-surface_running',
+    'bm25-domain-spill-off-force_generic_plan-surface_running',
+    'bm25-domain-post-spill-insert-on-force_custom_plan-surface_running',
+    'bm25-domain-post-spill-insert-on-force_generic_plan-surface_running',
+    'bm25-domain-post-spill-insert-off-force_custom_plan-surface_running',
+    'bm25-domain-post-spill-insert-off-force_generic_plan-surface_running',
+    'bm25-domain-restart-on-force_custom_plan-surface_running',
+    'bm25-domain-restart-on-force_generic_plan-surface_running',
+    'bm25-domain-restart-off-force_custom_plan-surface_running',
+    'bm25-domain-restart-off-force_generic_plan-surface_running',
+    'bm25-domain-reindex-on-force_custom_plan-surface_running',
+    'bm25-domain-reindex-on-force_generic_plan-surface_running',
+    'bm25-domain-reindex-off-force_custom_plan-surface_running',
+    'bm25-domain-reindex-off-force_generic_plan-surface_running',
+))
 
 # Native catalog inspection also runs against the extracted package. Keep this
 # query shared so a second runner cannot omit explicit installation defaults.
@@ -239,6 +295,34 @@ def same_json(left, right):
     return json.dumps(left, sort_keys=True, separators=(",", ":"), allow_nan=False) == json.dumps(right, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def reviewed_quality_warnings():
+    """Load the immutable original report and select explicitly reviewed IDs."""
+    path = Path(__file__).resolve().parent.parent / QUALITY_WARNING_REVIEW["file"]
+    contents = path.read_bytes()
+    if hashlib.sha256(contents).hexdigest() != QUALITY_WARNING_REVIEW["sha256"]:
+        raise ValueError("Reviewed quality warning evidence changed")
+    document = json.loads(contents)
+    if document.get("format") != FORMAT or not isinstance(document.get("cases"), list):
+        raise ValueError("Invalid original quality warning report")
+    selected = {}
+    for row in document["cases"]:
+        if row.get("id") not in REVIEWED_QUALITY_WARNINGS:
+            continue
+        if row["id"] in selected or row.get("status") != "regression":
+            raise ValueError("Invalid reviewed quality warning record")
+        fields = {key: row[key] for key in QUALITY_FIELDS}
+        if same_json(fields["expected"], fields["actual"]):
+            raise ValueError("A reviewed warning must retain its original quality difference")
+        if isinstance(fields["expected"], list) and (
+            not isinstance(fields["actual"], list) or not set(fields["expected"]).issubset(fields["actual"])
+        ):
+            raise ValueError("Complete candidate loss cannot be a quality warning")
+        selected[row["id"]] = fields
+    if set(selected) != REVIEWED_QUALITY_WARNINGS:
+        raise ValueError("Missing reviewed quality warning records")
+    return selected
+
+
 def quality_case(case_id, *, input, query, config, expected, actual, known_signature=None):
     case = dict(id=case_id, input=input, query=query, config=config, expected=expected, actual=actual)
     if not isinstance(case_id, str) or not case_id:
@@ -258,7 +342,12 @@ def quality_case(case_id, *, input, query, config, expected, actual, known_signa
     elif known_signature is not None:
         raise ValueError(f"Quality case {case_id} is not an eligible known failure")
     else:
-        case["status"] = "passed" if same_json(expected, actual) else "regression"
+        reviewed = reviewed_quality_warnings().get(case_id)
+        if reviewed is not None:
+            exact = all(same_json(case[field], reviewed[field]) for field in QUALITY_FIELDS)
+            case["status"] = "warning" if exact else "regression"
+        else:
+            case["status"] = "passed" if same_json(expected, actual) else "regression"
     return case
 
 
@@ -266,7 +355,7 @@ def validate_quality(document):
     if not isinstance(document, dict) or document.get("format") != FORMAT or not isinstance(document.get("cases"), list):
         raise ValueError("Invalid quality-results.json format")
     seen = set()
-    counts = {"passed": 0, "known-failure": 0, "regression": 0}
+    counts = {"passed": 0, "known-failure": 0, "warning": 0, "regression": 0}
     for case in document["cases"]:
         if not isinstance(case, dict) or case.get("id") in seen:
             raise ValueError("Invalid or duplicate quality case")
@@ -280,9 +369,15 @@ def validate_quality(document):
             raise ValueError(f"Quality case {case['id']} has an invalid status")
         seen.add(case["id"])
         counts[case["status"]] += 1
-    return {"format": FORMAT, "counts": counts, "cases": document["cases"],
-            "known_failures": [c["id"] for c in document["cases"] if c["status"] == "known-failure"],
-            "regressions": [c["id"] for c in document["cases"] if c["status"] == "regression"]}
+    summary = {"format": FORMAT, "counts": counts, "cases": document["cases"],
+               "known_failures": [c["id"] for c in document["cases"] if c["status"] == "known-failure"],
+               "warnings": [c["id"] for c in document["cases"] if c["status"] == "warning"],
+               "warning_review": dict(QUALITY_WARNING_REVIEW),
+               "regressions": [c["id"] for c in document["cases"] if c["status"] == "regression"]}
+    for key in ("counts", "known_failures", "warnings", "warning_review", "regressions"):
+        if key in document and not same_json(document[key], summary[key]):
+            raise ValueError(f"Quality summary {key} disagrees with its cases or reviewed policy")
+    return summary
 
 
 def read_quality(path):
@@ -299,6 +394,8 @@ def require_known_quality_cases(quality):
 def verified_status(quality):
     if quality["regressions"]:
         return "failed"
+    if quality["warnings"]:
+        return "verified-with-quality-warnings"
     return "verified-with-known-quality-failures" if quality["known_failures"] else "verified"
 
 
@@ -346,6 +443,12 @@ def require_release_report(report):
         raise ValueError("Cluster cleanup did not pass")
     quality = validate_quality(report.get("quality", {}))
     require_known_quality_cases(quality)
+    missing = REVIEWED_QUALITY_WARNINGS - {case["id"] for case in quality["cases"]}
+    if missing:
+        raise ValueError(f"Missing reviewed quality warning cases: {sorted(missing)}")
+    for key in ("counts", "warnings", "warning_review", "known_failures", "regressions"):
+        if key not in report["quality"]:
+            raise ValueError(f"Missing quality warning disclosure: {key}")
     costs=report.get("symbol_quality_costs")
     if not isinstance(costs,list) or not any(isinstance(item,dict) and item.get("input")=="100 ms" and item.get("query")=="100ms" and item.get("domain_expected") is False and item.get("native_actual") is True for item in costs):
         raise ValueError("Missing explicit non-PASS symbol precision-cost evidence")

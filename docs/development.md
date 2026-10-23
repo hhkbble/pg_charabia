@@ -1,6 +1,6 @@
 # Development and validation
 
-This guide is for contributors working in a Git source checkout. The [README](../README.md) owns installation, public configuration, user limits, and required index maintenance. [Architecture](architecture.md) explains the implementation and ownership rules.
+This guide is for contributors working in a Git source checkout. Start with the [README](../README.md) for a first query. The [Usage reference](reference.md) owns public configuration and limits. [Installation and maintenance](operations.md) owns installation, required index maintenance, and backup requirements. [Architecture](architecture.md) explains the implementation and ownership rules.
 
 ## Prerequisites and supported environments
 
@@ -109,14 +109,20 @@ Inherited libpq connection defaults are removed by [isolated_pg_environment](../
 | Local default | `unit,native,symbol,chain,headline,config,lifecycle,errors` |
 | Linux default / `--suite all` | `unit,smoke,native,symbol,chain,bm25,headline,config,lifecycle,errors,stress,recovery,benchmark` |
 | Local Linux-only selections | `smoke,bm25,stress,recovery,benchmark` are rejected. Local `all` also fails rather than silently dropping them. |
-| Full Linux default | Also runs fmt, Clippy, schema, ABI, default-object, loaded-library, and README-example checks. |
+| Full Linux default | Also runs fmt, Clippy, schema, ABI, default-object, loaded-library, and README/reference example checks. |
 | Targeted Linux run | Runs the selected suites and shared build/identity checks. It does not automatically run README examples or full-only lint checks. |
 
-[tests/examples.py](../tests/examples.py) extracts exactly three README `sql` fences and executes them in order in an owned empty database. Preserve its independent assertions for installation, native queries, COPY/ALTER, filtering, actual BM25 Index Scan, and headline. The test removes that database on success or failure.
+[tests/examples.py](../tests/examples.py) extracts exactly three README `sql` fences, then the two `sql` fences in the [Usage reference](reference.md). It executes all five in that order in one owned empty database. The reference examples extend the README's native quick start and custom configuration. They do not require BM25 for manual use. Preserve the test's independent assertions for installation, native queries, COPY/ALTER, filtering, actual BM25 Index Scan, and headline. The report records each document's hash and each block's source and number. The test removes its database on success or failure.
 
-There is no `examples` suite or examples-only wrapper flag. Full Linux and extracted-package validation invoke the test automatically. For a documentation-only change, a one-use adapter can stage the same verified library in a private Linux AMD64 + PG18 cluster. Then invoke the existing example test. Keep that adapter outside tracked files. Supply the owned libpq environment, `PG_CONFIG`, `PGCB_PLATFORM`, and `PGCB_RUN_DIR` required by [support.py](../tests/support.py). Preload the pinned pg_textsearch for the optional BM25 block. Record the actually loaded library and cleanup separately from full release acceptance.
+There is no `examples` suite or examples-only wrapper flag. Full Linux and extracted-package validation invoke the test automatically. For a documentation-only change, first build, stage, and load the current library:
 
-Validate Markdown structure, local links/anchors, shell fences with `bash -n`, and flags against source/`--help`. Compare README SQL with the previous working-tree content. If executable examples change, run them. Preserve existing documentation-test safeguards rather than redesigning the runner.
+```sh
+./scripts/verify-linux-amd64 --suite build
+```
+
+Then use a one-use adapter to stage that same verified library in a private Linux AMD64 + PG18 cluster in the same image. Keep the adapter outside the repository. Mount current documents/tests and the staging package read-only, and use an owned UTF8 cluster and Unix socket without a published port. Clear inherited libpq defaults with [isolated_pg_environment](../scripts/report_contract.py). Supply the owned libpq environment, `PG_CONFIG`, `PGCB_PLATFORM=linux-amd64`, and `PGCB_RUN_DIR` required by [support.py](../tests/support.py). Preload the pinned pg_textsearch before startup. Check its version and source identity, extension dependencies, static identity, library hash, and actual backend mappings. Invoke `python3 /workspace/tests/examples.py` in that environment. Save evidence and follow the [cleanup rules](#failure-diagnosis-and-cleanup). Record the actual loaded library and cleanup separately from full release acceptance.
+
+Validate Markdown structure, local links/anchors, shell fences with `bash -n`, and flags against source/`--help`. Compare README and reference SQL with the previous working-tree content. If executable examples change, run them. Preserve existing documentation-test safeguards rather than redesigning the runner.
 
 ## Test organization and expectations
 
@@ -142,9 +148,14 @@ stay unchanged; returning to the old false result is now a regression. The phras
 case remains unresolved. A diagnostic control or new failure cannot expand the
 exemption set.
 
-- `verified` means the selected mechanisms and cleanup passed without quality-registry failures. Symbol precision costs remain separately reported.
-- `verified-with-known-quality-failures` permits local delivery only for exact frozen failures. They remain failures, not passed quality cases.
-- New regressions, unexpected changes, missing identity, unexplained resource growth, or cleanup failure block success and packaging.
+The temporary v0.3.0 warning policy is separate from those frozen exceptions. Only the explicitly listed records in [report_contract.py](../scripts/report_contract.py) qualify. Every case ID, input, query, configuration, expected value, and actual value must match exactly. The SHA256-pinned [original failure report](../tests/fixtures/quality-warnings-original.json) remains unchanged and ships in the archive. See the [user warning boundary](reference.md#reviewed-release-warnings).
+
+Quality summaries include separate `passed`, `known-failure`, `warning`, and `regression` counts. Their `warnings` list and `warning_review` identity are retained in reports and the delivery manifest. Full acceptance requires every named reviewed case, not a matching total. The extracted-package verifier checks the original warning evidence and preserves the full acceptance summary.
+
+- `verified` means the selected mechanisms and cleanup passed without warnings or quality-registry failures. Symbol precision costs remain separately reported.
+- `verified-with-known-quality-failures` permits packaging with exact frozen failures. They remain failures, not passed quality cases.
+- `verified-with-quality-warnings` permits packaging with exact reviewed warnings. Any frozen failures remain separately listed. Neither category counts as quality PASS.
+- New differences, changed warning signatures, complete-candidate loss, mechanism failure, missing identity, unexplained resource growth, or cleanup failure block success and packaging.
 - Invalid selections exit 2. Failures and interruptions exit nonzero.
 
 Review unexpected improvement before changing a frozen case. Report explicit Discard=false recovery separately from default failures. Native term overlap checks BM25 consistency, not domain recall. An index plan does not prove relevance or ranking quality.
@@ -176,7 +187,7 @@ A targeted pass is not full release acceptance. Report what ran and what remains
 
 ## Recovery validation
 
-User backup/restore actions belong in the [README](../README.md#backup-and-recovery-requirements). The `recovery` suite validates them with the current staged library, not a separate prototype.
+User backup/restore actions belong in [Backup and recovery](operations.md#backup-and-recovery). The `recovery` suite validates them with the current staged library, not a separate prototype.
 
 Run `./scripts/verify-linux-amd64 --suite recovery` in the supported target environment. [recovery.py](../tests/recovery.py) creates separate source, backup, archive, restore, socket, and staging directories under the run's owned temporary root. It enables logged writes, fsync, full-page writes, archive WAL, and pg_textsearch preload without modifying a host installation.
 
@@ -214,9 +225,9 @@ English TXT/attribution, manifests, `SHA256SUMS`, and evidence. It also includes
 the committed extension source, lockfile, build script, SQL, resource tools, and
 container build files for rebuilding and relinking. It also supplies the exact hash-checked Charabia and fst crate source archives
 under `dependency-sources/`, including the original German source/FST. It does
-not bundle huge raw source inputs or claim an offline cache of every dependency. The extracted-package verifier checks checksums and loads the extracted library without compiling a replacement. It executes smoke, symbol, chain, headline, configuration, recovery, and the archive's README examples. `--archive` cannot combine with suite, hooks, or debug selections.
+not bundle huge raw source inputs or claim an offline cache of every dependency. The extracted-package verifier checks checksums and loads the extracted library without compiling a replacement. It executes smoke, symbol, chain, headline, configuration, recovery, and the archive's README and reference examples. `--archive` cannot combine with suite, hooks, or debug selections.
 
-After release content changes, form a new final commit and rerun full acceptance before packaging. Do not overwrite old archives or evidence. To rebuild from an extracted archive, enter its root and use the same prerequisites
+After release content changes, freeze the clean final source commit again and rerun the required same-commit acceptance before packaging. An amended candidate has a new identity and needs new acceptance and packaging evidence. Do not overwrite old archives or evidence. To rebuild from an extracted archive, enter its root and use the same prerequisites
 and pinned toolchain. The archive has source files but no `.git` directory. A
 recipient can create a new local Git checkout before using the evidence runners.
 A direct isolated build can instead package without Git metadata:
@@ -231,3 +242,16 @@ This creates a new recipient build. It does not replace extracted-library
 verification or inherit the original delivery's tested commit/hash identity.
 
 Keep the delivery report in `artifacts/` or `dist/`, recording source/package identity, tests, quality failures, performance scope, recovery scope, and cleanup. Later tracked-file edits cannot retain an earlier tested commit identity.
+
+### GitHub publication
+
+The packager creates local files. GitHub upload and publication happen separately. The [v0.3.0 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.0) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
+
+1. Finish full Linux acceptance, local macOS development validation, and separate hooks checks on the same clean final commit.
+2. Generate the archive and SHA256 file with the existing packager, then pass extracted-package validation.
+3. Push the final tested commit and a matching version tag. Preserve unrelated remote commits, tags, and assets.
+4. Create a draft Release for the existing tag. Upload the complete packager archive and its SHA256 file without changing their structure.
+5. Download the draft assets and compare their hashes, source commit, manifest, and verification records with the tested package.
+6. Publish the Release with its actual acceptance results, quality warnings, and frozen failures. Check the public tag, download links, and assets again.
+
+Keep the binary inside the complete archive. GitHub's automatic source attachments do not replace that archive. A release must not claim support or production readiness beyond the recorded validation.

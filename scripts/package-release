@@ -35,7 +35,7 @@ def copy_committed_sources(delivery, commit):
         target.write_bytes(subprocess.check_output(["git", "cat-file", "blob", object_id], cwd=ROOT))
         target.chmod(0o755 if mode == "100755" else 0o644)
         copied.add(relative)
-    for relative in ("src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "docker/environment.lock.json", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz"):
+    for relative in ("src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "docker/environment.lock.json", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz", "tests/fixtures/quality-warnings-original.json"):
         require(relative in copied, f"Required rebuild/relink source file is not committed: {relative}")
     require(set(paths) - {"scripts", "tests", "docs", "src", "sql", "resources", "docker"} <= copied, "Required delivery source files are not committed")
 
@@ -117,7 +117,7 @@ def main():
     archive_digest = digest(archive)
     checksum_path = archive.with_name(archive.name + ".sha256")
     checksum_path.write_text(f"{archive_digest}  {archive.name}\n")
-    print(json.dumps({"status": report["status"], "known_quality_failures": report["quality"]["known_failures"], "archive": str(archive.resolve()), "sha256": archive_digest, "checksum_file": str(checksum_path.resolve()), "source_commit": current_commit, "verified_run": report["run_id"]}, indent=2))
+    print(json.dumps({"status": report["status"], "known_quality_failures": report["quality"]["known_failures"], "quality_warnings": report["quality"]["warnings"], "archive": str(archive.resolve()), "sha256": archive_digest, "checksum_file": str(checksum_path.resolve()), "source_commit": current_commit, "verified_run": report["run_id"]}, indent=2))
 
 if __name__ == "__main__":
     main()

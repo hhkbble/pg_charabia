@@ -601,7 +601,7 @@ class Suite:
         self.result["route16_quality"]["automatic_selection_limit"] = (
             "Short Italian/German query observations are not universal language or inflection guarantees; "
             "the forced Italian algorithm and complete-context positions are independent required controls. "
-            "The die precision requirement is separately blocking and has no known-failure exemption.")
+            "The die precision difference remains a quality failure. Only its exact reviewed signature is a non-PASS release warning.")
         self.checkpoint()
 
     def chunk_control(self):

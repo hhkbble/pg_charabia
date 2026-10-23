@@ -1,4 +1,4 @@
-"""Execute the README SQL verbatim in an owned Linux verification database."""
+"""Execute README and reference SQL verbatim in an owned Linux database."""
 import hashlib
 import json
 import os
@@ -10,11 +10,19 @@ from support import run, save
 
 ROOT = Path(__file__).resolve().parent.parent
 readme = ROOT / "README.md"
-examples = re.findall(r"```sql\n(.*?)```",readme.read_text(),re.S)
-assert len(examples) == 3, len(examples)
+documents = ((readme, 3), (ROOT / "docs/reference.md", 2))
+examples = []
+document_sha256 = {}
+for document, expected_blocks in documents:
+    source = str(document.relative_to(ROOT))
+    contents = document.read_bytes()
+    blocks = re.findall(r"```sql\n(.*?)```", contents.decode("utf-8"), re.S)
+    assert len(blocks) == expected_blocks, (source, len(blocks))
+    document_sha256[source] = hashlib.sha256(contents).hexdigest()
+    examples.extend((source, number + 1, sql) for number, sql in enumerate(blocks))
 assert os.environ["PGCB_PLATFORM"] == "linux-amd64", "The README BM25 examples require the Linux verifier and preloaded pg_textsearch"
 database = "pgcb_examples_" + str(os.getpid())
-results = {"status":"running","readme_sha256":hashlib.sha256(readme.read_bytes()).hexdigest(),"examples":[],"checks":[],"source":"README SQL plus fixed PG/Charabia contracts and independent document IDs/source text"}
+results = {"status":"running","readme_sha256":document_sha256["README.md"],"document_sha256":document_sha256,"examples":[],"checks":[],"source":"README and reference SQL plus fixed PG/Charabia contracts and independent document IDs/source text"}
 created = False
 
 
@@ -46,8 +54,8 @@ def nodes(value):
 try:
     run(f"CREATE DATABASE {database} TEMPLATE template0")
     created = True
-    for number,sql in enumerate(examples):
-        record = {"number":number+1,"sql":sql,"status":"running"}
+    for number,(source,source_block,sql) in enumerate(examples):
+        record = {"number":number+1,"source":source,"source_block":source_block,"sql":sql,"status":"running"}
         results["examples"].append(record)
         checkpoint()
         record["output"] = run(sql,database)
@@ -60,7 +68,7 @@ try:
           [row["kind"] for row in first_info[0]["symbols"]["types"]]==["url","host","email","file","numword"],
           "README loads the actual five-symbol interface",first_info[0].get("symbols"))
     unit_headline=run("SELECT ts_headline('app.search','alpha 100ms beta',plainto_tsquery('app.search','ms'),'HighlightAll=true')",database)
-    check(unit_headline=="alpha <b>100ms</b> beta","README custom symbol dictionary highlights the whole source token",unit_headline)
+    check(unit_headline=="alpha <b>100ms</b> beta","reference custom symbol dictionary highlights the whole source token",unit_headline)
     capabilities = first_info[0]["languages"]
     check([row["language"] for row in capabilities] ==
           ["eng","deu","nld","rus","spa","fra","por","ita","ara","tur","cmn","jpn","kor","vie","tha","und"] and
@@ -116,4 +124,4 @@ finally:
             primary.add_note(f"Owned documentation database cleanup also failed: {error}")
         finally:
             checkpoint()
-print("README SQL examples passed verbatim in an owned Linux database")
+print("README and reference SQL examples passed verbatim in an owned Linux database")

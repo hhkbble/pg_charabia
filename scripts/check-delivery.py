@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 
-from report_contract import ARCHIVE_SUITES, DEFAULT_OBJECTS_QUERY, FORMAT, RELEASE_VERSION, STATIC_INFO_FIELDS, VERIFIED, digest, isolated_pg_environment, read_quality, require_default_objects, require_recovery_report, require_release_report, require_static_info, verified_status, verify_checksums
+from report_contract import ARCHIVE_SUITES, DEFAULT_OBJECTS_QUERY, FORMAT, QUALITY_WARNING_REVIEW, RELEASE_VERSION, STATIC_INFO_FIELDS, VERIFIED, digest, isolated_pg_environment, read_quality, require_default_objects, require_recovery_report, require_release_report, require_static_info, same_json, verified_status, verify_checksums
 
 
 def unpack_archive(archive, destination):
@@ -113,6 +113,10 @@ def main():
         if manifest.get("source_commit") != original.get("git_commit") or manifest.get("library_sha256") != original.get("loaded_library_sha256"):
             raise RuntimeError("Delivery manifest and original loaded library identity disagree")
         result["delivery_manifest"] = manifest
+        if not same_json(manifest.get("quality"), original["quality"]):
+            raise RuntimeError("Delivery manifest changes the verified quality results or warnings")
+        if digest(delivery / QUALITY_WARNING_REVIEW["file"]) != QUALITY_WARNING_REVIEW["sha256"]:
+            raise RuntimeError("Delivery archive changes or omits the original warning evidence")
         result["original_quality"] = original["quality"]
         if manifest.get("symbol_quality_costs") != original.get("symbol_quality_costs"):
             raise RuntimeError("Delivery manifest omits or changes the recorded symbol precision costs")
@@ -205,7 +209,7 @@ def main():
         result["archive_test_quality"] = read_quality(evidence / "quality-results.json")
         if result["archive_test_quality"]["regressions"]:
             raise RuntimeError("Extracted delivery examples introduced a quality regression")
-        # A package smoke run does not erase known failures from full acceptance.
+        # Extracted-package checks retain all warnings and frozen failures.
         result["quality"] = original["quality"]
         result["status"] = "mechanisms-passed"
     except BaseException as exc:

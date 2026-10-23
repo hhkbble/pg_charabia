@@ -1,8 +1,8 @@
-# Current architecture
+# Architecture
 
 pg_charabia is one Rust extension crate for PostgreSQL 18. It supplies text analysis through standard PostgreSQL Text Search objects. Indexes and queries consume that interface rather than an extension-specific index format.
 
-The [README](../README.md) owns public parameters, limits, installation, and required maintenance. [Development](development.md) owns builds, tests, debugging, and release validation.
+The [README](../README.md) introduces the extension. The [Usage reference](reference.md) owns public parameters, query semantics, limits, and quality issues. [Installation and maintenance](operations.md) owns installation, index maintenance, and backup requirements. [Development](development.md) owns builds, tests, debugging, and release validation.
 
 ## Components and identities
 
@@ -111,7 +111,7 @@ Component terms equal to full terms are omitted individually. Other components r
 Expansion accounting happens before stop processing, normalization and deduplication.
 Repeated leaves count toward the budget, then a bounded call-local cache reuses their English analysis.
 There is no backend parse cache or unbounded graph representation.
-The exact grammar, options, budgets and user tradeoffs belong in [ASCII symbols](../README.md#ascii-symbols) and [limits](../README.md#limits-and-known-quality-failures).
+The exact grammar, options, budgets and user tradeoffs belong in [ASCII symbols](reference.md#ascii-symbols) and [limits](reference.md#limits-and-known-quality-issues).
 
 ## Dictionary analysis
 
@@ -182,7 +182,7 @@ Native vector and query functions use the selected standard Configuration and Di
 
 The pinned pg_textsearch uses PostgreSQL configuration-based vector analysis for index and query terms. It implements BM25 bag-of-terms retrieval separately from native AND and phrase semantics. Native/English surface/stem alternatives can change its term frequencies, document lengths, scores, and storage size. Candidate consistency and ranking quality therefore need separate judgments.
 
-pg_textsearch's metapage configuration OID supports runtime analysis. Build and REINDEX resolve the stored `text_config` string again. This explains its rename/rebuild and dependency limitations, which are covered in [bm25.py](../tests/bm25.py) and [config.py](../tests/config.py). Required maintenance is in the [README](../README.md#analysis-changes-and-index-maintenance).
+pg_textsearch's metapage configuration OID supports runtime analysis. Build and REINDEX resolve the stored `text_config` string again. This explains its rename/rebuild and dependency limitations, which are covered in [bm25.py](../tests/bm25.py) and [config.py](../tests/config.py). Required actions are in [Analysis changes and index maintenance](operations.md#analysis-changes-and-index-maintenance).
 
 ## Original-text headline
 
@@ -241,7 +241,7 @@ The extension adds no custom WAL resource manager, mutable data files, or runtim
 
 After restart, pg_textsearch rebuilds derived state from its metapage, durable chain, and segments. See [index/state.c](https://github.com/timescale/pg_textsearch/blob/fa142d049d08eac45a263f5abc250c8877ae076e/src/index/state.c). Core/Generic redo does not call Charabia to reconstruct old terms. Queries and new writes after recovery need the correct installed analyzer.
 
-Physical recovery establishes database consistency at a target, not agreement between old postings and a new analysis policy. Nor does it restore external installation files. Logical dump recreates extension members from installed SQL and ordinary user objects from their definitions. These boundaries explain the [user backup requirements](../README.md#backup-and-recovery-requirements).
+Physical recovery establishes database consistency at a target, not agreement between old postings and a new analysis policy. Nor does it restore external installation files. Logical dump recreates extension members from installed SQL and ordinary user objects from their definitions. These boundaries explain the [user backup requirements](operations.md#backup-and-recovery).
 
 The retained [recovery test](../tests/recovery.py) exercises online backup, archived WAL, named-target restore, crash restart, cold initialization, GIN/BM25 paths, Chinese terms, and headline. Its scope is those controlled paths. It is not proof of every crash timing, high availability, logical decoding, or application-level integration.
 
@@ -254,4 +254,4 @@ The retained [recovery test](../tests/recovery.py) exercises online backup, arch
 - Standard Parser/Dictionary interfaces preserve index reuse and arbitrary native composition. They cannot carry private Parser metadata to Dictionary callbacks.
 - Standard headline preserves raw source and PG matching. It is a presentation step, not a phrase or Boolean match decision.
 
-Known quality failures and supported bounds remain explicit in the [README](../README.md#limits-and-known-quality-failures). There is no general lemmatizer, editable stopword platform, or separate application-specific integration layer.
+Known quality failures and supported bounds remain explicit in the [Usage reference](reference.md#limits-and-known-quality-issues). There is no general lemmatizer, editable stopword platform, or separate application-specific integration layer.
