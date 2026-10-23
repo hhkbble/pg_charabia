@@ -6,12 +6,89 @@ jobs:
   integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      PGCB_LINUX_CACHE: ${{ github.workspace }}/.cache/pgcb-linux-amd64
     steps:
       - uses: actions/checkout@v4
-      - name: Build and verify the actual release library
-        run: ./scripts/verify-linux-amd64
+      - name: Restore dependency and dictionary inputs
+        id: inputs
+        uses: actions/cache/restore@v4
+        with:
+          # Target builds are large; cache verified inputs, never PGDATA or evidence.
+          path: |
+            .cache/pgcb-linux-amd64/cargo/registry
+            .cache/pgcb-linux-amd64/cargo/git
+            .cache/pgcb-linux-amd64/lindera
+            .cache/pgcb-linux-amd64/resources
+          key: ${{ runner.os }}-amd64-pg18-inputs-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'docker/verify.Dockerfile', 'docker/environment.lock.json', 'resources/manifest.json') }}
+      - name: Make restored inputs accessible to the container user
+        shell: bash
+        run: |
+          mkdir -p "$PGCB_LINUX_CACHE"
+          # Cache restore uses the host UID; the verifier runs as container postgres.
+          sudo chmod -R a+rwX "$PGCB_LINUX_CACHE"
+      - name: Build and verify the release library (CI subset)
+        id: release
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          set -o pipefail
+          ./scripts/verify-linux-amd64 --suite unit,smoke,native,symbol,chain,headline,config,lifecycle,errors,stress 2>&1 | tee artifacts/ci-release.log
+      - name: Rust fmt and Clippy in the target environment
+        if: ${{ !cancelled() && steps.release.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          # Reuse the release runner's exact target cache and toolchain.
+          target_dir=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          reports = list(Path("artifacts").glob("*/*/run.json"))
+          if len(reports) != 1:
+              raise SystemExit("Expected one release runner report before linting")
+          report = json.loads(reports[0].read_text())
+          if report["features"] != "pg18" or report["platform"] != "linux-amd64":
+              raise SystemExit("Expected the Linux AMD64 release cache")
+          print(report["target_cache"])
+          PY
+          )
+          docker run --rm --platform linux/amd64 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=$PGCB_LINUX_CACHE,dst=/cache" \
+            --env "CARGO_TARGET_DIR=$target_dir" \
+            --entrypoint bash pg-charabia-verify:pg18-pgrx0193 -euo pipefail -c '
+              export PGRX_PG_CONFIG_PATH="$PG_CONFIG"
+              fmt_status=0
+              cargo fmt --all -- --check || fmt_status=$?
+              clippy_status=0
+              cargo clippy --locked --all-targets --no-default-features --features pg18 -- -D warnings || clippy_status=$?
+              test "$fmt_status" -eq 0 && test "$clippy_status" -eq 0
+            ' 2>&1 | tee artifacts/ci-lints.log
       - name: Supplemental guarded faults
-        run: ./scripts/verify-linux-amd64 --suite errors,lifecycle,stress --test-hooks --debug --no-build-image
+        if: ${{ !cancelled() && steps.release.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./scripts/verify-linux-amd64 --suite errors,lifecycle,stress --test-hooks --debug --no-build-image 2>&1 | tee artifacts/ci-hooks.log
+      - name: Save dependency and dictionary inputs
+        if: ${{ !cancelled() && steps.inputs.outcome == 'success' && steps.inputs.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/pgcb-linux-amd64/cargo/registry
+            .cache/pgcb-linux-amd64/cargo/git
+            .cache/pgcb-linux-amd64/lindera
+            .cache/pgcb-linux-amd64/resources
+          key: ${{ steps.inputs.outputs.cache-primary-key }}
+      - name: Make container evidence readable by the runner
+        if: always()
+        shell: bash
+        run: |
+          if [ -d artifacts ]; then
+            # PostgreSQL logs retain mode 0600 and the container's postgres UID.
+            sudo chown -hR -- "$(id -u):$(id -g)" artifacts
+            chmod -R u+rX artifacts
+          fi
       - name: Preserve evidence on success and failure
         if: always()
         uses: actions/upload-artifact@v4
