@@ -274,15 +274,13 @@ Keep the delivery report in `artifacts/` or `dist/`, recording source/package id
 
 ### GitHub publication
 
-The packager creates local files. GitHub upload and publication happen separately. The [v0.4.0 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
+The packager creates local files. GitHub upload and publication happen separately. The [v0.4.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.1) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
 
 1. Finish full Linux acceptance, local macOS development validation, and separate hooks checks on the same clean final commit.
 2. Generate the archive and SHA256 file with the existing packager, then pass extracted-package validation.
-3. Push the final tested commit normally and wait for its Actions. Then push only the new annotated `v0.4.0` tag and wait for its Actions. Preserve unrelated remote commits, tags, and assets. Stop if the target version, tag, or Release already exists.
+3. Push the final tested commit normally and wait for its Actions. Then push only the new annotated `v0.4.1` tag and wait for its Actions. Preserve unrelated remote commits, tags, and assets. Stop if the target version, tag, or Release already exists.
 4. Create a draft Release for the existing tag. Upload the complete packager archive and its SHA256 file without changing their structure.
 5. Download the draft assets and compare their hashes, source commit, manifest, and verification records with the tested package.
-6. Publish the Release and download its public assets again. Match the checksums, source commit, manifest, and packaged library to the accepted archive. Write Release notes from the actual previous-tag difference, including the changed default and required maintenance.
-7. After every 0.4.0 gate and public check passes, archive both old Releases completely in a new owned artifacts or dist directory. Retain metadata, body, asset IDs and bytes, checksum files, and tag objects with their targets. Check all hashes before deleting either old Release or its remote assets.
-8. Delete only the exact archived 0.3.0 and 0.3.1 Release and asset IDs. Keep their tags, Git history, and local packages. Check the old objects are unavailable and the retained tags and 0.4.0 assets are unchanged. If permissions or immutable Releases prevent deletion, keep them and report the incomplete retirement. Never use `--cleanup-tag`.
+6. Publish the Release and download its public assets again. Match the checksums, source commit, manifest, and packaged library to the accepted archive. Write Release notes from the actual previous-tag difference, including behavior changes and required maintenance. Preserve existing Releases and assets.
 
 Keep the binary inside the complete archive. GitHub's automatic source attachments do not replace that archive. A release must not claim support or production readiness beyond the recorded validation.

@@ -81,8 +81,8 @@ struct Builder<'a> {
     options: &'a Options,
     terms: StructuredTokenTerms,
     units: usize,
-    // Bounded by units. This cache belongs only to this token, not the backend.
-    words: Vec<(String, Vec<String>)>,
+    // Bounded by units. Each word's terms already remain in this token's output.
+    words: Vec<String>,
 }
 
 impl<'a> Builder<'a> {
@@ -130,18 +130,14 @@ impl<'a> Builder<'a> {
     fn word(&mut self, raw: &str) -> Result<(), AnalysisError> {
         // Count before stop processing or cache lookup, including repeated words.
         self.unit()?;
-        if let Some((_, terms)) = self.words.iter().find(|(word, _)| word == raw) {
-            let terms = terms.clone();
-            for term in terms {
-                self.push(term);
-            }
+        if self.words.iter().any(|word| word == raw) {
             return Ok(());
         }
         let terms = analysis::english_component(raw, &self.options.english)?;
-        for term in &terms {
-            self.push(term.clone());
+        for term in terms {
+            self.push(term);
         }
-        self.words.push((raw.to_owned(), terms));
+        self.words.push(raw.to_owned());
         Ok(())
     }
 
@@ -554,6 +550,24 @@ mod tests {
         }
         assert_eq!(builder.terms.components(), ["same"]);
         assert_eq!(builder.literal("same").unwrap_err().kind, ErrorKind::Limit);
+    }
+
+    #[test]
+    fn repeated_non_stop_words_keep_terms_and_count_each_unit() {
+        let actual = terms(StructuredTokenKind::Numword, "Running_Running_1");
+        assert_eq!(actual.full(), ["Running_Running_1", "running_running_1"]);
+        assert_eq!(actual.components(), ["running", "run", "1"]);
+
+        let options = options(StructuredTokenKind::Numword);
+        let mut builder = Builder::new(&options, vec!["root".into()]);
+        for _ in 0..32 {
+            builder.word("Running").unwrap();
+        }
+        assert_eq!(builder.terms.full(), ["root"]);
+        assert_eq!(builder.terms.components(), ["running", "run"]);
+        assert_eq!(builder.words, ["Running"]);
+        assert_eq!(builder.units, 32);
+        assert_eq!(builder.word("Running").unwrap_err().kind, ErrorKind::Limit);
     }
 
     #[test]

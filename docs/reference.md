@@ -268,7 +268,7 @@ Headline output is not a retrieval filter. Apply the actual match condition firs
 | `HighlightAll` | `false`. Conflicts with explicit MinWords/MaxWords or positive MaxFragments. |
 | `Escape` | `true`. Escape source text, not markers or the delimiter. |
 
-Unknown or duplicate options, invalid syntax, and conflicting or out-of-range fragment settings fail with `22023`. Weighted query operands and unsupported ShortWord values fail with `0A000`. Marker or delimiter lengths above 256 bytes and output limit errors use `54000`.
+Unknown or duplicate options, invalid option values, and conflicting or out-of-range fragment settings fail with `22023`. PostgreSQL rejects malformed option lists, including unterminated quoted values, with `42601` before the callback runs. Weighted query operands and unsupported ShortWord values fail with `0A000`. Marker or delimiter lengths above 256 bytes and output limit errors use `54000`.
 
 `Escape=true` escapes `&`, `<`, `>`, double quotes, and apostrophes in source text. Markers and delimiters remain trusted markup. Supply trusted markup. `Escape=false` leaves source HTML unescaped, which the caller must handle.
 

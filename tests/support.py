@@ -67,7 +67,10 @@ class Session:
         deadline = time.monotonic() + timeout
         while True:
             try:
-                line = self.lines.get(timeout=max(0.01, deadline-time.monotonic()))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise queue.Empty
+                line = self.lines.get(timeout=remaining)
             except queue.Empty as error:
                 self.cancel()
                 raise AssertionError("psql statement timed out: " + "\n".join(lines)) from error

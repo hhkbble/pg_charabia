@@ -5,6 +5,7 @@ import signal
 import sys
 import time
 from support import ANALYSIS_REVISION, FORMAT, Session, json_query, literal, native_config_sql, run, save
+from report_contract import RELEASE_VERSION
 
 def interrupted(signum, _frame):
     raise InterruptedError(f"Received signal {signum}")
@@ -55,7 +56,7 @@ finally:
 has_hooks = os.environ.get("PGCB_TEST_HOOKS") == "1"
 registered = int(run("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='charabia' AND p.proname LIKE 'test_%'"))
 assert registered == (2 if has_hooks else 0), registered
-assert json_query("SELECT charabia.analysis_info()") ["extension"] == "0.4.0"
+assert json_query("SELECT charabia.analysis_info()") ["extension"] == RELEASE_VERSION
 
 DOCUMENT = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running."
 run("CREATE SCHEMA errors_runtime")
@@ -89,6 +90,19 @@ def stats(session):
 
 def callback_live(value):
     return value["state_registered"]-value["state_released"]
+
+
+def checkpoint_interrupt(record, outcome, primary=None):
+    record["outcome"] = [{"output": value} if isinstance(value, str) else {"error": repr(value)}
+                         for value in outcome]
+    if outcome and isinstance(outcome[0], str):
+        record["output"] = outcome[0]
+    try:
+        save("errors-results.json", results)
+    except BaseException as error:
+        if primary is None:
+            raise
+        primary.add_note(f"Interrupt evidence save also failed: {error!r}")
 
 
 def mode_isolation(session):
@@ -171,16 +185,22 @@ def interrupt(session,reason,cleanup_failure=False,point="gettoken",structured=F
     session.value("SET statement_timeout='300ms'" if reason=="timeout" else "SET statement_timeout=0")
     before=stats(session)
     session.value("SELECT charabia.test_set_fault(" + literal(point) + ",'wait')")
+    statement=(STRUCTURED_HEADLINE if point.startswith("headline_") else STRUCTURED_HEALTHY) if structured else (HEADLINE if point.startswith("headline_") else HEALTHY)
     outcome=[]
+    record={"reason":reason,"point":point,"structured":structured,
+            "mode":"structured" if structured else "linguistic",
+            "config":"public.charabia_structured" if structured else "errors_runtime.healthy",
+            "query":statement,"pid":session.pid,"before":before,"status":"running"}
+    results.setdefault("interrupts",[]).append(record)
+    checkpoint_interrupt(record,outcome)
     def query():
         try:
-            statement=(STRUCTURED_HEADLINE if point.startswith("headline_") else STRUCTURED_HEALTHY) if structured else (HEADLINE if point.startswith("headline_") else HEALTHY)
             outcome.append(session.query(statement))
         except BaseException as error:
             outcome.append(error)
     worker=threading.Thread(target=query,name="pgcb-interrupt-"+reason)
-    worker.start()
     try:
+        worker.start()
         deadline=time.monotonic()+15
         while time.monotonic()<deadline:
             if run(f"SELECT application_name FROM pg_stat_activity WHERE pid={session.pid}",timeout=10)=="pgcb_hook_wait":
@@ -193,21 +213,29 @@ def interrupt(session,reason,cleanup_failure=False,point="gettoken",structured=F
         if reason=="cancel":
             assert run(f"SELECT pg_cancel_backend({session.pid})",timeout=10)=="t"
         worker.join(timeout=15)
+        checkpoint_interrupt(record,outcome)
         assert not worker.is_alive() and outcome and isinstance(outcome[0],str),outcome
         assert "57014" in outcome[0],outcome
         assert ("statement timeout" if reason=="timeout" else "due to user request") in outcome[0],outcome
         session.value("SET statement_timeout=0")
         after=stats(session)
+        record["after"]=after
+        checkpoint_interrupt(record,outcome)
         assert after["parser_created"]-before["parser_created"]==after["parser_dropped"]-before["parser_dropped"]==1,(before,after)
         assert callback_live(after)==callback_live(before),(before,after)
         assert "running" in session.value(HEALTHY)
         if structured:
             assert session.value(STRUCTURED_HEALTHY)=="t"
             assert session.value(STRUCTURED_HEADLINE)=="alpha <b>Running100</b> beta"
-        results.setdefault("interrupts",[]).append({"reason":reason,"point":point,"structured":structured,"output":outcome[0],"before":before,"after":after,"pid":session.pid})
+        record["status"]="passed"
+    except BaseException as error:
+        record.update(status="failed",error=repr(error))
+        checkpoint_interrupt(record,outcome,primary=error)
+        raise
     finally:
         primary_error=sys.exception()
         cleanup_errors=[]
+        cleanup_error=None
         try:
             for operation in ("pg_cancel_backend","pg_terminate_backend"):
                 if not worker.is_alive():
@@ -233,15 +261,19 @@ def interrupt(session,reason,cleanup_failure=False,point="gettoken",structured=F
                 finally:
                     worker.join(timeout=10)
         finally:
+            if worker.is_alive() or cleanup_errors:
+                message=f"Interrupt cleanup: alive={worker.is_alive()}, errors={cleanup_errors}"
+                record.update(status="failed",cleanup_error=message)
+                cleanup_error=AssertionError(message)
             results.setdefault("interrupt_cleanup",[]).append({
                 "reason":reason,"point":point,"failure_probe":cleanup_failure,
+                "mode":record["mode"],"structured":structured,"pid":session.pid,"query":statement,
                 "thread_exited":not worker.is_alive(),"errors":cleanup_errors})
-            save("errors-results.json",results)
-        if worker.is_alive() or cleanup_errors:
-            message=f"Interrupt cleanup: alive={worker.is_alive()}, errors={cleanup_errors}"
+            checkpoint_interrupt(record,outcome,primary=primary_error or cleanup_error)
+        if cleanup_error is not None:
             if primary_error is None:
-                raise AssertionError(message)
-            primary_error.add_note(message)
+                raise cleanup_error
+            primary_error.add_note(str(cleanup_error))
 
 
 def real_interrupt(reason,structured=False):
@@ -257,20 +289,28 @@ def real_interrupt(reason,structured=False):
         query = ("SELECT sum(length(ts_headline('public.charabia_structured','alpha Running100 beta '||g::text,'run'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g" if structured else
                  "SELECT sum(length(ts_headline('errors_runtime.healthy'," + literal(DOCUMENT) + " || g::text,'running'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g")
         outcome = []
+        record={"reason":reason,"point":"headline","structured":structured,
+                "mode":"structured" if structured else "linguistic",
+                "config":"public.charabia_structured" if structured else "errors_runtime.healthy",
+                "query":query,"pid":session.pid,"observed_active":False,"status":"running"}
+        results.setdefault("release_interrupts",[]).append(record)
+        checkpoint_interrupt(record,outcome)
         def execute():
             try:
                 outcome.append(session.query(query, timeout=30))
             except BaseException as error:
                 outcome.append(error)
         worker = threading.Thread(target=execute,name="pgcb-release-"+reason)
-        worker.start()
         observed = False
         try:
+            worker.start()
             deadline = time.monotonic()+15
             while worker.is_alive() and time.monotonic()<deadline:
                 active = run(f"SELECT state='active' AND query LIKE '%ts_headline%' FROM pg_stat_activity WHERE pid={session.pid}",timeout=10)
                 if active == "t":
                     observed = True
+                    record["observed_active"]=True
+                    checkpoint_interrupt(record,outcome)
                     break
                 time.sleep(0.02)
             if reason == "cancel":
@@ -278,6 +318,7 @@ def real_interrupt(reason,structured=False):
                 time.sleep(0.1)
                 assert run(f"SELECT pg_cancel_backend({session.pid})",timeout=10) == "t"
             worker.join(timeout=15)
+            checkpoint_interrupt(record,outcome)
             assert not worker.is_alive() and outcome and isinstance(outcome[0],str), outcome
             assert "57014" in outcome[0] and ("statement timeout" if reason == "timeout" else "due to user request") in outcome[0], outcome
             session.value("SET statement_timeout=0")
@@ -286,28 +327,46 @@ def real_interrupt(reason,structured=False):
             if structured:
                 assert session.value(STRUCTURED_HEALTHY)=="t"
                 assert session.value(STRUCTURED_HEADLINE)=="alpha <b>Running100</b> beta"
-            results.setdefault("release_interrupts",[]).append({"reason":reason,"structured":structured,"query":query,"output":outcome[0],"observed_active":observed,"pid":session.pid})
+            record["status"]="passed"
+        except BaseException as error:
+            record.update(status="failed",error=repr(error))
+            checkpoint_interrupt(record,outcome,primary=error)
+            raise
         finally:
             primary = sys.exception()
             errors = []
-            for operation in ("pg_cancel_backend","pg_terminate_backend"):
-                if not worker.is_alive():
-                    break
-                try:
-                    run(f"SELECT {operation}({session.pid})",check=False,timeout=10)
-                except BaseException as error:
-                    errors.append(repr(error))
-                worker.join(timeout=10)
-            if worker.is_alive():
-                session.process.kill()
-                worker.join(timeout=10)
-            results.setdefault("release_interrupt_cleanup",[]).append({"reason":reason,"thread_exited":not worker.is_alive(),"errors":errors})
-            save("errors-results.json",results)
-            if worker.is_alive() or errors:
-                message = f"Release query cleanup failed: alive={worker.is_alive()}, errors={errors}"
+            cleanup_error = None
+            try:
+                for operation in ("pg_cancel_backend","pg_terminate_backend"):
+                    if not worker.is_alive():
+                        break
+                    try:
+                        run(f"SELECT {operation}({session.pid})",check=False,timeout=10)
+                    except BaseException as error:
+                        errors.append(repr(error))
+                    finally:
+                        worker.join(timeout=10)
+                if worker.is_alive():
+                    try:
+                        session.process.kill()
+                    except BaseException as error:
+                        errors.append(f"owned psql kill: {error!r}")
+                    finally:
+                        worker.join(timeout=10)
+            finally:
+                if worker.is_alive() or errors:
+                    message = f"Release query cleanup failed: alive={worker.is_alive()}, errors={errors}"
+                    record.update(status="failed",cleanup_error=message)
+                    cleanup_error = AssertionError(message)
+                results.setdefault("release_interrupt_cleanup",[]).append({
+                    "reason":reason,"point":"headline","mode":record["mode"],
+                    "structured":structured,"pid":session.pid,"query":query,
+                    "thread_exited":not worker.is_alive(),"errors":errors})
+                checkpoint_interrupt(record,outcome,primary=primary or cleanup_error)
+            if cleanup_error is not None:
                 if primary is None:
-                    raise AssertionError(message)
-                primary.add_note(message)
+                    raise cleanup_error
+                primary.add_note(str(cleanup_error))
 
 
 try:
@@ -370,6 +429,11 @@ try:
             assert any("TimeoutExpired" in note for note in notes),notes
             assert results["interrupt_cleanup"][-1]["thread_exited"]
             assert results["interrupt_cleanup"][-1]["failure_probe"]
+            failure_record=results["interrupts"][-1]
+            assert failure_record["mode"]=="linguistic" and failure_record["pid"]==probe_pid, failure_record
+            assert failure_record["point"]=="headline_escape" and failure_record["query"]==HEADLINE, failure_record
+            assert failure_record["status"]=="failed" and "injected observer failure" in failure_record["error"], failure_record
+            assert failure_record["outcome"], failure_record
             deadline=time.monotonic()+5
             while run(f"SELECT count(*) FROM pg_stat_activity WHERE pid={probe_pid}")!="0":
                 assert time.monotonic()<deadline,"Owned probe backend did not exit"
@@ -379,6 +443,12 @@ try:
         else:
             raise AssertionError("Cleanup failure probe did not raise its primary failure")
 finally:
-    save("errors-results.json",results)
+    primary=sys.exception()
+    try:
+        save("errors-results.json",results)
+    except BaseException as error:
+        if primary is None:
+            raise
+        primary.add_note(f"Final error evidence save also failed: {error!r}")
     run("DROP SCHEMA errors_runtime CASCADE")
 print(json.dumps({"encoding_cases":len(results["encoding"]),"injected_faults":len(results["faults"]),"registration_faults":len(results.get("registration_faults",[])),"test_hooks":has_hooks}))

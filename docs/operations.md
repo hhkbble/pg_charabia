@@ -5,7 +5,7 @@ This guide covers installation, analysis changes, index maintenance, and backup 
 - [Supported environments](#supported-environments)
 - [Build from source](#build-from-source)
 - [Download and install](#download-and-install)
-- [Fresh 0.4.0 installation](#fresh-040-installation)
+- [Fresh installation](#fresh-installation)
 - [Optional pg_textsearch setup](#optional-pg_textsearch-setup)
 - [Schema ownership and permissions](#schema-ownership-and-permissions)
 - [Analysis changes and index maintenance](#analysis-changes-and-index-maintenance)
@@ -25,7 +25,7 @@ The project version and dependencies come from [Cargo.toml](../Cargo.toml) and [
 
 ## Build from source
 
-Source builds and locally generated release archives remain available alongside the [v0.4.0 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0).
+Source builds and locally generated release archives remain available alongside the [v0.4.1 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.1).
 
 Use the prerequisites and commands in [Build and test](development.md#build-and-test). The isolated runners build and stage the extension in a private PostgreSQL cluster. They do not install files into the target PostgreSQL distribution. A targeted build is not full release acceptance.
 
@@ -33,7 +33,7 @@ To generate a verified Linux AMD64 archive, follow [Release acceptance and packa
 
 ## Download and install
 
-Open the [v0.4.0 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
+Open the [v0.4.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.1). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
 
 On the Linux AMD64 target host, put both downloaded files in the same directory. Set `RELEASE_ARCHIVE` to the downloaded archive filename, without a directory prefix. Verify the archive before extracting it:
 
@@ -66,12 +66,12 @@ install -m 644 extension/*.control extension/*.sql "$("$PG_CONFIG" --sharedir)/e
 
 A macOS library cannot load into Linux PostgreSQL. Keep the complete package, checksums, resource manifest, and dependency notices after installation.
 
-## Fresh 0.4.0 installation
+## Fresh installation
 
-Version 0.4.0 is a new installation baseline. It does not provide 0.3.x
-compatibility object names or an extension upgrade path. Do not run `ALTER
-EXTENSION ... UPDATE` or relabel an old installation as 0.4.0. Install it in a
-fresh database from the complete verified 0.4.0 package:
+The 0.4 series uses the fresh installation baseline introduced in 0.4.0.
+Version 0.4.1 provides no compatibility object names or SQL upgrade script from
+earlier versions. Do not run `ALTER EXTENSION ... UPDATE` or relabel an old
+installation as 0.4.1. Install the complete verified 0.4.1 package in a fresh database:
 
 ```text
 CREATE EXTENSION pg_charabia;
@@ -80,7 +80,7 @@ SELECT extversion AS catalog_version,
 FROM pg_catalog.pg_extension WHERE extname='pg_charabia';
 ```
 
-Both versions must be `0.4.0`. Installation creates three configurations:
+Both versions must be `0.4.1`. Installation creates three configurations:
 
 - `public.charabia_linguistic` uses ordinary language analysis.
 - `public.charabia_structured` adds structured recognition and expansion. Select it explicitly.
@@ -114,7 +114,7 @@ For BM25, separately install the pg_textsearch build pinned in [environment.lock
 
 A database superuser runs `CREATE EXTENSION pg_charabia`. Installation reserves the fixed `charabia` schema and all three public configurations listed above. The extension is not relocatable. Conflicting objects cause atomic failure rather than replacement.
 
-If `charabia` already exists, the installer must own it and it must deny untrusted `CREATE` privileges. Otherwise, installation fails with `42501`. Installation grants `PUBLIC` schema `USAGE`, revokes `PUBLIC CREATE`, and leaves existing `public` schema permissions unchanged.
+If `charabia` already exists, the installer must own it and it must deny untrusted `CREATE` privileges. This includes inherited `CREATE` privileges and inherited authority to grant them. Otherwise, installation fails with `42501`. Installation grants `PUBLIC` schema `USAGE`, revokes `PUBLIC CREATE`, and leaves existing `public` schema permissions unchanged.
 
 Create custom objects in an application-owned schema with normal PostgreSQL permissions. Use schema-qualified names in applications and indexes. Unqualified names require a trusted `search_path`. Names and prefixes do not establish ownership or permission to delete an object.
 
@@ -149,7 +149,7 @@ For BM25 name changes, use `ALTER INDEX ... SET (text_config='new_schema.new_nam
 
 Logical dumps preserve ordinary dictionaries, parameters, mappings, owners, and dependencies, but restored objects receive new OIDs. Prepare roles, schema permissions, installed extensions, and external rules before restore. Validate subsequent ALTER/DROP operations, both modes, shared and independent Dictionary parameters, and original-text headline afterward.
 
-Restore a 0.4.0 logical backup into the matching fresh baseline. Default extension members are rebuilt from the installed package. User changes to those members are not saved as independent member definitions. Keep custom settings in ordinary application objects.
+Restore a logical backup into its matching version of the fresh baseline. Default extension members are rebuilt from the installed package. User changes to those members are not saved as independent member definitions. Keep custom settings in ordinary application objects.
 
 Point-in-time recovery (PITR) needs a complete cluster base backup and continuous archived write-ahead log (WAL) through the target. The target cannot precede the backup's earliest consistent point. Retain the following outside the database backup:
 
@@ -161,4 +161,4 @@ WAL does not restore installation directories or replay later configuration-file
 
 Prefer a named restore point after analysis maintenance finishes. If the target falls between a parameter change and its rebuilds, keep traffic closed and finish maintenance. Physical replay does not rerun historical SQL or text analysis. A consistent restore cannot fix a semantic mismatch already present at the target.
 
-After recovery, validate LSN/timeline, parameters, mappings, cold Dictionary initialization, loaded library hash, stored vectors, independent candidates, actual GIN/BM25 plans, and original-text headline in both modes. A physical 0.3.x recovery target still needs its exact old package; 0.4.0 is not a replacement for that package. Changes to binaries, redo components, or index formats require a matching recovery rehearsal. See [PostgreSQL PITR](https://www.postgresql.org/docs/18/continuous-archiving.html) and the [technical recovery boundary](architecture.md#persistent-state-and-recovery).
+After recovery, validate LSN/timeline, parameters, mappings, cold Dictionary initialization, loaded library hash, stored vectors, independent candidates, actual GIN/BM25 plans, and original-text headline in both modes. A physical 0.3.x recovery target still needs its exact old package; the current package is not a replacement for that package. Changes to binaries, redo components, or index formats require a matching recovery rehearsal. See [PostgreSQL PITR](https://www.postgresql.org/docs/18/continuous-archiving.html) and the [technical recovery boundary](architecture.md#persistent-state-and-recovery).

@@ -13,6 +13,8 @@ schema = 'pgcb_config_' + str(os.getpid())
 moved = schema + '_moved'
 owner = schema + '_owner'
 other = schema + '_other'
+guardian = schema + '_guardian'
+delegate = schema + '_delegate'
 restored = schema + '_restore'
 conflict = schema + '_install'
 report = {
@@ -81,6 +83,15 @@ def mapping(session, name, dictionary_name):
     value(session, f'ALTER TEXT SEARCH CONFIGURATION {name} ADD MAPPING FOR eng WITH {dictionary_name}')
 
 
+def roundtrip_terms(session):
+    return scalar_json(session, f"""SELECT jsonb_build_object(
+      'linguistic',to_tsvector('{schema}.roundtrip_linguistic','running')::text,
+      'structured',to_tsvector('{schema}.roundtrip_structured','running')::text,
+      'independent',to_tsvector('{schema}.roundtrip_independent','running')::text,
+      'number_linguistic',to_tsvector('{schema}.roundtrip_linguistic','100ms')::text,
+      'number_structured',to_tsvector('{schema}.roundtrip_structured','100ms')::text)""")
+
+
 def explicit_option_matrix(session):
     """Exercise INIT's finite SQL state space, not a language-quality oracle."""
     value(session, f"""CREATE TEMP TABLE route16_options(accepted int,rejected int);
@@ -115,11 +126,11 @@ def explicit_option_matrix(session):
 
 
 def fresh_baseline():
-    """Use the real staged 0.4.0 objects without an older-version SQL alias."""
+    """Use the real staged 0.4.1 objects without an older-version SQL alias."""
     stage = Path(os.environ['PGCB_EXTENSION_STAGE']).resolve()
-    check((stage / 'pg_charabia--0.4.0.sql').is_file()
+    check((stage / 'pg_charabia--0.4.1.sql').is_file()
           and not list(stage.glob('pg_charabia--0.3*.sql')),
-          'fresh staging contains 0.4.0 installation SQL and no 0.3.x path')
+          'fresh staging contains 0.4.1 installation SQL and no 0.3.x path')
     library = Path(os.environ['PGCB_LIBRARY_PATH'])
     check(hashlib.sha256(library.read_bytes()).hexdigest() == os.environ['PGCB_LIBRARY_SHA256'],
           'fresh baseline uses the identified current library')
@@ -136,8 +147,8 @@ def fresh_baseline():
         with Session(database) as s:
             check(value(s, 'SHOW default_text_search_config') == host_default,
                   'installation preserves the host default_text_search_config')
-            check(value(s, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'") == '0.4.0',
-                  'fresh CREATE EXTENSION installs 0.4.0')
+            check(value(s, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'") == '0.4.1',
+                  'fresh CREATE EXTENSION installs 0.4.1')
             check(value(s, "SELECT count(*) FROM pg_extension_update_paths('pg_charabia') "
                            "WHERE source LIKE '0.3.%' OR target LIKE '0.3.%'") == '0',
                   'fresh baseline exposes no old upgrade path')
@@ -241,6 +252,31 @@ try:
         value(s, 'GRANT CREATE ON SCHEMA charabia TO PUBLIC')
         error(s, 'CREATE EXTENSION pg_charabia', 'unsafe CREATE grant blocks schema adoption', '42501')
         value(s, 'REVOKE CREATE ON SCHEMA charabia FROM PUBLIC')
+        value(s, f'CREATE ROLE {guardian} SUPERUSER NOLOGIN; '
+                 f'CREATE ROLE {delegate} NOSUPERUSER NOLOGIN; '
+                 f'GRANT {guardian} TO {delegate} WITH INHERIT TRUE, SET FALSE; '
+                 f'GRANT CREATE ON SCHEMA charabia TO {guardian}')
+        check(scalar_json(s, f"SELECT jsonb_build_object('superuser',rolsuper,"
+                             f"'create',has_schema_privilege(oid,'charabia','CREATE'),"
+                             f"'can_set',pg_has_role(oid,'{guardian}','SET')) "
+                             f"FROM pg_roles WHERE rolname='{delegate}'") == {
+                                 'superuser': False, 'create': True, 'can_set': False},
+              'ordinary role inherits schema CREATE without inheriting SUPERUSER or SET ROLE')
+        error(s, 'CREATE EXTENSION pg_charabia',
+              'inherited CREATE through a superuser ACL blocks schema adoption', '42501')
+        value(s, f'REVOKE CREATE ON SCHEMA charabia FROM {guardian}; '
+                 f'ALTER SCHEMA charabia OWNER TO {guardian}; '
+                 f'REVOKE ALL ON SCHEMA charabia FROM {guardian}; SET ROLE {guardian}')
+        check(scalar_json(s, f"SELECT jsonb_build_object("
+                             f"'create',has_schema_privilege('{delegate}','charabia','CREATE'),"
+                             f"'grant',has_schema_privilege('{delegate}','charabia','CREATE WITH GRANT OPTION'))")
+              == {'create': False, 'grant': True},
+              'owner membership inherits implicit grant authority after ordinary CREATE is revoked')
+        error(s, 'CREATE EXTENSION pg_charabia',
+              'inherited owner grant authority blocks schema adoption', '42501')
+        value(s, 'RESET ROLE; ALTER SCHEMA charabia OWNER TO CURRENT_USER; '
+                 'GRANT USAGE,CREATE ON SCHEMA charabia TO CURRENT_USER')
+        value(s, f'REVOKE {guardian} FROM {delegate}')
         value(s, f'ALTER SCHEMA charabia OWNER TO {other}')
         error(s, 'CREATE EXTENSION pg_charabia', 'foreign namespace owner blocks installation', '42501')
         value(s, 'ALTER SCHEMA charabia OWNER TO CURRENT_USER')
@@ -418,6 +454,29 @@ try:
         old_oid = int(value(s, f"SELECT '{a}'::regconfig::oid"))
         saved_dictionary = catalog(s, renamed)
         saved_parallel = catalog(s, schema + '.vie')
+        dictionary(s, schema + '.roundtrip_shared',
+                   "Language='eng',Discard=false,Stem=true,Normalize=true,Filter=false,English=false")
+        dictionary(s, schema + '.roundtrip_separate',
+                   "Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false,English=false")
+        for mode in ('linguistic', 'structured'):
+            value(s, f'CREATE TEXT SEARCH CONFIGURATION {schema}.roundtrip_{mode}(COPY=public.charabia_{mode});'
+                     f'ALTER TEXT SEARCH CONFIGURATION {schema}.roundtrip_{mode} ALTER MAPPING FOR '
+                     'eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und '
+                     f'WITH {schema}.roundtrip_shared')
+        value(s, f'CREATE TEXT SEARCH CONFIGURATION {schema}.roundtrip_independent(COPY={schema}.roundtrip_linguistic);'
+                 f'ALTER TEXT SEARCH CONFIGURATION {schema}.roundtrip_independent ALTER MAPPING FOR '
+                 'eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und '
+                 f'WITH {schema}.roundtrip_separate')
+        # Controlled English mappings make these literal terms independent of detection.
+        roundtrip_expected = {
+            'linguistic': "'run':1 'running':1", 'structured': "'run':1 'running':1",
+            'independent': "'running':1", 'number_linguistic': "'100ms':1",
+            'number_structured': "'100':1 '100ms':1 'ms':1",
+        }
+        check(roundtrip_terms(s) == roundtrip_expected,
+              'logical backup fixture has independent mode and shared/separate Dictionary expectations')
+        saved_roundtrip = {name: catalog(s, schema + '.' + name)
+                           for name in ('roundtrip_shared', 'roundtrip_separate')}
         value(s, 'RESET ROLE')
         value(s, 'SET ROLE ' + other)
         error(s, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=false)', 'foreign owner cannot alter dictionary', '42501')
@@ -531,6 +590,51 @@ try:
               'dump/restore preserves English parameters and owner with a new OID', restored_parallel)
         check(direct(target, schema + '.four', 'ABBREVIATE') == ['abbrevıate','abbrevıa','abbreviate','abbrevi'],
               'restored Dictionary reconstructs four alternatives from immutable resources')
+        check(roundtrip_terms(target) == roundtrip_expected,
+              'logical restore preserves literal vectors and ordinary versus atomic positions in both modes')
+        for name, previous in saved_roundtrip.items():
+            current = catalog(target, schema + '.' + name)
+            check(current['oid'] != previous['oid'] and current['owner'] == owner
+                  and current['options'] == previous['options'],
+                  'logical restore reconstructs ' + name + ' with a new OID and preserved options', current)
+        restored_mappings = scalar_json(target, f"""SELECT jsonb_agg(jsonb_build_object(
+          'name',c.cfgname,'owner',c.cfgowner::regrole::text,'parser',p.prsname,
+          'dictionary',m.mapdict::regdictionary::text) ORDER BY c.cfgname)
+          FROM pg_ts_config c JOIN pg_ts_parser p ON p.oid=c.cfgparser
+          JOIN pg_ts_config_map m ON m.mapcfg=c.oid AND m.maptokentype=1 AND m.mapseqno=1
+          WHERE c.cfgnamespace='{schema}'::regnamespace AND c.cfgname LIKE 'roundtrip_%'""")
+        check(restored_mappings == [
+            {'name': 'roundtrip_independent', 'owner': owner, 'parser': 'linguistic_parser',
+             'dictionary': schema + '.roundtrip_separate'},
+            {'name': 'roundtrip_linguistic', 'owner': owner, 'parser': 'linguistic_parser',
+             'dictionary': schema + '.roundtrip_shared'},
+            {'name': 'roundtrip_structured', 'owner': owner, 'parser': 'structured_parser',
+             'dictionary': schema + '.roundtrip_shared'},
+        ], 'logical restore retains actual Parsers, owners, and shared versus independent mappings', restored_mappings)
+        for mode, kinds in (('linguistic', ['word']), ('structured', ['numword'])):
+            config = schema + '.roundtrip_' + mode
+            check(scalar_json(target, "SELECT jsonb_agg(kind ORDER BY byte_start) FROM "
+                              f"charabia.analyze('100ms','{config}')") == kinds,
+                  'restored ' + mode + ' configuration resolves its actual Parser mode')
+            check(value(target, f"SELECT ts_headline('{config}','Running','run'::tsquery,'HighlightAll=true')")
+                  == '<b>Running</b>', 'restored ' + mode + ' headline retains original case')
+        check(scalar_json(target, f"SELECT jsonb_build_object("
+                                  f"'usage',has_schema_privilege('{other}','{schema}','USAGE'),"
+                                  f"'create',has_schema_privilege('{other}','{schema}','CREATE'))")
+              == {'usage': True, 'create': False}, 'logical restore preserves application schema ACL')
+        value(target, 'RESET ROLE; SET ROLE ' + other)
+        check(roundtrip_terms(target) == roundtrip_expected,
+              'restored schema USAGE permits ordinary callers to use both analysis modes')
+        error(target, f'ALTER TEXT SEARCH DICTIONARY {schema}.roundtrip_shared(Stem=false)',
+              'logical restore preserves Dictionary owner protection', '42501')
+        value(target, 'RESET ROLE; SET ROLE ' + owner)
+        value(target, f'ALTER TEXT SEARCH DICTIONARY {schema}.roundtrip_shared(Stem=false)')
+        check(roundtrip_terms(target) == dict(roundtrip_expected, linguistic="'running':1", structured="'running':1"),
+              'restored shared ALTER changes both modes without changing the independent Dictionary')
+        value(target, f'ALTER TEXT SEARCH DICTIONARY {schema}.roundtrip_separate(Stem=true)')
+        check(roundtrip_terms(target) == dict(roundtrip_expected, linguistic="'running':1",
+                                              structured="'running':1", independent="'run':1 'running':1"),
+              'restored independent ALTER changes only its own configuration')
         value(target, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)')
         check(direct(target, schema + '.vie', 'running') == ['running'],
               'restored English parameter can be changed using ordinary DDL')
@@ -564,7 +668,8 @@ finally:
     primary = sys.exception()
     for statement in [f'DROP DATABASE IF EXISTS {restored}', f'DROP DATABASE IF EXISTS {conflict}',
                       f'DROP SCHEMA IF EXISTS {schema} CASCADE', f'DROP SCHEMA IF EXISTS {moved} CASCADE',
-                      f'DROP ROLE IF EXISTS {owner}', f'DROP ROLE IF EXISTS {other}']:
+                      f'DROP ROLE IF EXISTS {owner}', f'DROP ROLE IF EXISTS {other}',
+                      f'DROP ROLE IF EXISTS {delegate}', f'DROP ROLE IF EXISTS {guardian}']:
         try:
             command(statement)
         except BaseException as exc:

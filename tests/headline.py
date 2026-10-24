@@ -33,6 +33,25 @@ def headline(session, raw, query="'cafe'::tsquery", options="HighlightAll=true",
     return value
 
 
+def option_error_layers(session):
+    """PG option-list syntax errors precede callback value validation."""
+    for mode in ("linguistic", "structured"):
+        config = "public.charabia_" + mode
+        for options, state in (("HighlightAll", "42601"),
+                               ('StartSel="unterminated', "42601"),
+                               ("Escape=perhaps", "22023")):
+            sql = ("SELECT ts_headline(" + literal(config) + ",'CAFÉ','cafe'::tsquery," +
+                   literal(options) + ")")
+            output = session.query(sql)
+            evidence = {"mode": mode, "config": config, "sql": sql,
+                        "expected_state": state, "output": output}
+            report["errors"].append(evidence)
+            check("ERROR:" in output and state in output,
+                  "headline option errors retain the SQLSTATE of their parsing layer", evidence)
+            check(headline(session, "CAFÉ", config=config) == "<b>CAFÉ</b>",
+                  "same backend recovers after mode-specific option parsing errors", evidence)
+
+
 
 def dual_mode_source_cases(session):
     """Literal source spans distinguish ordinary words from atomic structures."""
@@ -299,6 +318,7 @@ def merge_and_parallel_cases(session):
 try:
     with Session() as session:
         dual_mode_source_cases(session)
+        option_error_layers(session)
         # No oracle is obtained from analyze()/lexize(): raw equality is a separate
         # invariant and fixed expected highlights originate in upstream/probe facts.
         for raw in ("中文 café cafe\u0301 CAFÉ & < > \" '", "\t\n café\r\n\t",

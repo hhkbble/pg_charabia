@@ -3,6 +3,7 @@
 import hashlib
 import html
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -39,6 +40,13 @@ def nodes(value):
 
 def index_nodes(plan, index):
     return [node for node in nodes(plan) if node.get("Node Type") == "Index Scan" and node.get("Index Name") == index]
+
+
+def scores_are_finite_and_ordered(rows):
+    """Check numeric validity and SQL ordering without a relevance or tie oracle."""
+    scores = [row["score"] for row in rows]
+    return (all(type(score) in (int, float) and math.isfinite(score) for score in scores)
+            and all(left <= right for left, right in zip(scores, scores[1:])))
 
 
 class ModeSuite:
@@ -249,6 +257,7 @@ class ModeSuite:
                     label = f"{phase}/{cache}/{mode}/{case['name']}"
                     record = dict(case, cache=cache, mode=self.mode, plan_mode=mode, analysis_revision=ANALYSIS_REVISION, default_plan=default, plan=plan, scored=scored, **oracle)
                     stage["queries"].append(record)
+                    self.require(scores_are_finite_and_ordered(scored), label + ": scores are not finite numbers in ascending order")
                     self.require(len(oracle["all_ids"]) < LIMIT, label + ": LIMIT truncates oracle")
                     target = index_nodes(plan, case["index"])
                     if case.get("empty_analysis"):
@@ -363,6 +372,7 @@ class ModeSuite:
         ids = sorted(row["id"] for row in rows)
         record = dict(label=label,mode=self.mode,config=config,index=index,query=query,plan=plan,rows=rows,oracle=oracle,expected=expected)
         self.result.setdefault("focused_queries",[]).append(record)
+        self.require(scores_are_finite_and_ordered(rows), label + ": scores are not finite numbers in ascending order")
         target = index_nodes(plan,index)
         self.require(target and all(n.get("Actual Loops",0)>0 for n in target), label + ": missing executed target index")
         self.require(ids == oracle, label + f": actual {ids} disagree with native overlap {oracle}")
@@ -404,6 +414,7 @@ class ModeSuite:
             corpus_context=dict(rows=corpus,index_options=options,
                 basis="Actual complete table before top-k; background rows affect corpus statistics. Stored vector positions are diagnostics, not a universal BM25 length oracle."),
             query_analysis_cost="BM25 and query_any each analyze original query once through separate PG interfaces")
+        self.require(scores_are_finite_and_ordered(rows), "top-k scores are not finite numbers in ascending order")
         target = index_nodes(plan,"docs_bm25")
         p_nodes = [n for n in nodes(plan) if n.get("Subplan Name") == "CTE p"]
         self.require(target and all(n.get("Actual Loops",0)>0 for n in target), "top-k headline did not use target BM25 index")
@@ -509,6 +520,7 @@ class ModeSuite:
                         ranking="Observed order/scores; no arbitrary tie ordering, score neutrality, or structural-equality claim")
                     record["queries"].append(observation)
                     self.checkpoint()
+                    self.require(scores_are_finite_and_ordered(scored), name + ": structured scores are not finite numbers in ascending order")
                     target = index_nodes(plan, "structured_bm25")
                     self.require(target and all(n.get("Actual Loops", 0) > 0 for n in target), name + ": structured BM25 index did not execute")
                     self.require(ids == oracle["overlap"], name + ": structured BM25/native-overlap inconsistency")
@@ -546,6 +558,7 @@ class ModeSuite:
         plan, rows = self.run("SET enable_seqscan=off;EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF)" + topk +
             ";SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]')FROM(" + topk + ")r;", "structured-topk-headline")
         record["topk"] = dict(plan=plan, rows=rows, query_analysis_cost="One query_any evaluation plus the necessary independent BM25 query analysis")
+        self.require(scores_are_finite_and_ordered(rows), "structured top-k scores are not finite numbers in ascending order")
         target = index_nodes(plan, "structured_bm25")
         p_nodes = [n for n in nodes(plan) if n.get("Subplan Name") == "CTE p"]
         self.require(target and all(n.get("Actual Loops", 0) > 0 for n in target), "structured top-k did not execute BM25")

@@ -62,7 +62,7 @@ try:
         record["status"] = "passed"
         checkpoint()
     first_info = [item for item in json_lines(results["examples"][0]["output"]) if "extension" in item]
-    check(len(first_info)==1 and first_info[0]["extension"]=="0.4.0" and first_info[0]["language_count"]==16,
+    check(len(first_info)==1 and first_info[0]["extension"]=="0.4.1" and first_info[0]["language_count"]==16,
           "README loads this native interface release",first_info)
     check(first_info[0].get("structured_tokens",{}).get("dictionary_count")==5 and
           [row["kind"] for row in first_info[0]["structured_tokens"]["types"]]==["url","host","email","file","numword"],

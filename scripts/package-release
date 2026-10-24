@@ -22,6 +22,14 @@ def copy_committed_sources(delivery, commit):
     paths = ("LICENSE", "README.md", "AGENTS.md", ".gitattributes", ".gitignore", ".cargo", "scripts", "tests", "docs", "src", "sql", "resources", "docker",
              "Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "pg_charabia.control")
     entries = subprocess.check_output(["git", "ls-tree", "-rz", "--full-tree", commit, "--", *paths], cwd=ROOT)
+    # The verified stage can contain local resource files. Replace each source
+    # root in this owned temporary delivery with the exact tested Git snapshot.
+    for relative in paths:
+        target = delivery / relative
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        elif target.exists() or target.is_symlink():
+            target.unlink()
     copied = set()
     for entry in entries.split(b"\0"):
         if not entry:

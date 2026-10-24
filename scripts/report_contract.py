@@ -8,7 +8,7 @@ import re
 FORMAT = 3
 PROVENANCE_FORMAT = 2
 MODES = ("linguistic", "structured")
-RELEASE_VERSION = "0.4.0"
+RELEASE_VERSION = "0.4.1"
 ANALYSIS_REVISION = "route16-dual-mode-1"
 LANGUAGE_CODES = ("eng", "deu", "nld", "rus", "spa", "fra", "por", "ita", "ara", "tur", "cmn", "jpn", "kor", "vie", "tha", "und")
 ENGLISH_ELIGIBLE = frozenset(("deu", "nld", "spa", "fra", "por", "ita", "tur", "vie"))

@@ -14,12 +14,12 @@ Linux AMD64 is the release build and validation target. macOS ARM64 has an isola
 
 ## Installation
 
-Download the Linux AMD64 package and its SHA256 file from the [v0.4.0 release](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0). The complete archive includes the extension binary, source, resources, notices, and verification evidence.
+Download the Linux AMD64 package and its SHA256 file from the [v0.4.1 release](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.1). The complete archive includes the extension binary, source, resources, notices, and verification evidence.
 
 - [Build from source](docs/development.md#build-and-test) with the pinned prerequisites and isolated runners.
 - [Download, verify, and install the release archive](docs/operations.md#download-and-install) into a matching Linux AMD64 PostgreSQL 18 installation.
 
-Version 0.4.0 is a fresh installation baseline. It has no SQL upgrade path from 0.3.x. Keep the exact old package for old recovery targets. Recreate application definitions and analysis in a new database when moving existing source text to this baseline.
+Version 0.4.1 uses the fresh installation baseline introduced in 0.4.0. It has no SQL upgrade script from earlier versions. Keep the exact old package for old recovery targets. Recreate application definitions and analysis in a new database when moving existing source text to this baseline.
 
 The SQL below assumes that extension files are installed. A database superuser runs `CREATE EXTENSION pg_charabia`. Installation reserves the fixed `charabia` schema and the three configurations named above. Read [schema ownership and permissions](docs/operations.md#schema-ownership-and-permissions) before installation.
 

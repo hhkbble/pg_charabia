@@ -873,6 +873,82 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 verify_checksums(ancestor / "package")
 
+    def test_interrupt_evidence_write_failure_preserves_primary(self):
+        module = ast.parse((ROOT / "tests/errors.py").read_text())
+        helper = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "checkpoint_interrupt")
+        def fail_save(*args):
+            raise OSError("controlled evidence failure")
+        namespace = dict(save=fail_save, results={})
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "tests/errors.py", "exec"), namespace)
+        checkpoint = namespace["checkpoint_interrupt"]
+        primary = AssertionError("first failure")
+        record = {}
+        checkpoint(record, ["original backend output"], primary=primary)
+        self.assertEqual(record["output"], "original backend output")
+        self.assertEqual(record["outcome"], [{"output": "original backend output"}])
+        self.assertIn("controlled evidence failure", primary.__notes__[0])
+        with self.assertRaisesRegex(OSError, "controlled evidence failure"):
+            checkpoint({}, [])
+
+    def test_bm25_scores_require_finite_numbers_in_order(self):
+        import math
+        module = ast.parse((ROOT / "tests/bm25.py").read_text())
+        helper = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "scores_are_finite_and_ordered")
+        namespace = dict(math=math)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "tests/bm25.py", "exec"), namespace)
+        valid = namespace["scores_are_finite_and_ordered"]
+        for score in (None, "NaN", "Infinity", True, float("nan"), float("inf"), -float("inf")):
+            self.assertFalse(valid([{"score": score}]), repr(score))
+        self.assertFalse(valid([{"score": -1}, {"score": -2}]))
+        self.assertTrue(valid([{"score": -2}, {"score": -1.0}, {"score": -1}, {"score": 0}]))
+        self.assertTrue(valid([]))
+
+    def test_session_deadline_applies_while_output_is_available(self):
+        import types
+        module = ast.parse((ROOT / "tests/support.py").read_text())
+        session = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Session")
+        query = next(node for node in session.body if isinstance(node, ast.FunctionDef) and node.name == "query")
+        identifier = types.SimpleNamespace(hex="owned_deadline_fixture")
+        clock = iter((0, 0.25, 2))
+        namespace = dict(time=types.SimpleNamespace(monotonic=lambda: next(clock)),
+                         uuid=types.SimpleNamespace(uuid4=lambda: identifier), queue=__import__("queue"))
+        exec(compile(ast.Module(body=[query], type_ignores=[]), "tests/support.py", "exec"), namespace)
+        lines = namespace["queue"].Queue()
+        lines.put("response before deadline")
+        lines.put("pgcb_" + identifier.hex)
+        cancellations = []
+        owned = types.SimpleNamespace(process=types.SimpleNamespace(stdin=io.StringIO()), lines=lines,
+                                      cancel=lambda: cancellations.append(True))
+        with self.assertRaisesRegex(AssertionError, "psql statement timed out: response before deadline"):
+            namespace["query"](owned, "SELECT controlled_output", timeout=1)
+        self.assertEqual(cancellations, [True])
+
+    def test_staged_resources_exclude_untracked_files(self):
+        module = ast.parse((ROOT / "scripts/run-environment.py").read_text())
+        helper = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "copy_tracked_resources")
+        namespace = dict(Path=Path, subprocess=subprocess, shutil=shutil)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "scripts/run-environment.py", "exec"), namespace)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repository"
+            root.mkdir()
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            tracked = root / "resources/nested/tracked.txt"
+            tracked.parent.mkdir(parents=True)
+            tracked.write_bytes(b"Committed resource.\n")
+            subprocess.run(["git", "-C", str(root), "add", "resources"], check=True)
+            local = root / "resources/.DS_Store"
+            local.write_bytes(b"Retain local data.\n")
+            tracked.write_bytes(b"Current tracked resource.\n")
+            destination = Path(directory) / "stage"
+            namespace["copy_tracked_resources"](root, destination)
+            self.assertEqual(sorted(p.relative_to(destination).as_posix() for p in destination.rglob("*") if p.is_file()),
+                             ["nested/tracked.txt"])
+            self.assertEqual((destination / "nested/tracked.txt").read_bytes(), tracked.read_bytes())
+            self.assertEqual(local.read_bytes(), b"Retain local data.\n")
+
     def test_package_source_copy_excludes_ignored_descendants(self):
         # A synthetic report and library test assembly only. They are never
         # accepted as PostgreSQL or release verification evidence.
@@ -904,7 +980,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             git("add", ".")
             git("commit", "--quiet", "-m", "Freeze package-copy fixture")
             commit = git("rev-parse", "HEAD")
-            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data"):
+            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data", "resources/.DS_Store", "resources/__pycache__/local.pyc"):
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"Ignored local material must stay outside delivery.\n")
@@ -915,6 +991,9 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             library = package / "extension/pg_charabia.so"
             library.write_bytes(b"Synthetic assembly fixture. Never load this file.\n")
             library_hash = digest(library)
+            # A clean checkout can still stage ignored resources. Retain these
+            # bytes in the verified fixture to exercise the complete assembly path.
+            shutil.copytree(root / "resources", package / "resources")
             (package/"extension"/f"pg_charabia--{RELEASE_VERSION}.sql").write_text("-- Synthetic source-copy fixture. Never load this.\n")
             # These are source-copy assembly fixtures, never runtime/release evidence.
             resource_path=root/"resources/manifest.json"
@@ -947,9 +1026,9 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                 self.assertEqual(source.extractfile(prefix + "docs/nested/source.md").read(), nested.read_bytes())
                 self.assertEqual(source.extractfile(prefix + ".cargo/config.toml").read(), (root / ".cargo/config.toml").read_bytes())
                 self.assertFalse(any(name.startswith(".cargo/local-only/") for name in members))
-                for name in ("docs/research", "docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data"):
+                for name in ("docs/research", "docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data", "resources/.DS_Store", "resources/__pycache__/local.pyc"):
                     self.assertNotIn(name, members)
-            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data"):
+            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data", "resources/.DS_Store", "resources/__pycache__/local.pyc"):
                 self.assertEqual((root / name).read_bytes(), b"Ignored local material must stay outside delivery.\n")
 
     def test_checksums_cover_every_file_and_forbid_escape(self):

@@ -2,9 +2,8 @@ DO $schema$
 BEGIN
  IF EXISTS(SELECT FROM pg_catalog.pg_namespace n WHERE n.nspname='charabia'
    AND (n.nspowner<>current_user::regrole OR EXISTS(
-     SELECT FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a
-     WHERE a.privilege_type='CREATE' AND a.grantee<>n.nspowner
-       AND (a.grantee=0 OR NOT EXISTS(SELECT FROM pg_catalog.pg_roles r WHERE r.oid=a.grantee AND r.rolsuper)))))
+     SELECT FROM pg_catalog.pg_roles r WHERE NOT r.rolsuper
+       AND pg_catalog.has_schema_privilege(r.oid,n.oid,'CREATE,CREATE WITH GRANT OPTION'))))
  THEN RAISE EXCEPTION 'charabia schema must be owned by the installer and deny untrusted CREATE' USING ERRCODE='42501'; END IF;
 END
 $schema$;

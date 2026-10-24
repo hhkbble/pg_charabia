@@ -26,6 +26,22 @@ def sha256(path):
             digest.update(chunk)
     return digest.hexdigest()
 
+def copy_tracked_resources(root, destination):
+    """Stage working-tree resources without ignored or local-only files."""
+    entries = subprocess.check_output(["git", "-c", f"safe.directory={root}", "ls-files", "-z", "--", "resources"], cwd=root)
+    destination.mkdir()
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        relative = Path(entry.decode("utf-8"))
+        source = root / relative
+        if source.is_symlink() or not source.is_file():
+            raise ValueError(f"Resource must be a regular tracked file: {relative}")
+        target = destination / relative.relative_to("resources")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", required=True, choices=("macos-arm64", "linux-amd64"))
@@ -182,7 +198,7 @@ def main():
             command(["otool", "-L", library], "library-dependencies")
         package_out = evidence / "package"
         shutil.copytree(test_dir / "stage", package_out)
-        shutil.copytree(ROOT / "resources", package_out / "resources")
+        copy_tracked_resources(ROOT, package_out / "resources")
         metadata = json.loads((evidence / "cargo-metadata.log").read_text())
         resource_manifest = json.loads((ROOT / "resources/manifest.json").read_text())
         charabia_package = next(p for p in metadata["packages"] if p["name"] == "charabia" and p["version"] == resource_manifest["charabia"])
