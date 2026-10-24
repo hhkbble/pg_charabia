@@ -1,0 +1,2 @@
+-- Version 0.3.1 keeps all SQL objects, options, mappings, and OIDs unchanged.
+-- Install the matching library and end existing backends before updating.

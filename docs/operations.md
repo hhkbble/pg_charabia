@@ -5,6 +5,7 @@ This guide covers installation, analysis changes, index maintenance, and backup 
 - [Supported environments](#supported-environments)
 - [Build from source](#build-from-source)
 - [Download and install](#download-and-install)
+- [Upgrade from 0.3.0 to 0.3.1](#upgrade-from-030-to-031)
 - [Optional pg_textsearch setup](#optional-pg_textsearch-setup)
 - [Schema ownership and permissions](#schema-ownership-and-permissions)
 - [Analysis changes and index maintenance](#analysis-changes-and-index-maintenance)
@@ -24,7 +25,7 @@ The project version and dependencies come from [Cargo.toml](../Cargo.toml) and [
 
 ## Build from source
 
-Source builds and locally generated release archives remain available alongside the [v0.3.0 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.0).
+Source builds and locally generated release archives remain available alongside the [v0.3.1 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1).
 
 Use the prerequisites and commands in [Build and test](development.md#build-and-test). The isolated runners build and stage the extension in a private PostgreSQL cluster. They do not install files into the target PostgreSQL distribution. A targeted build is not full release acceptance.
 
@@ -32,7 +33,7 @@ To generate a verified Linux AMD64 archive, follow [Release acceptance and packa
 
 ## Download and install
 
-Open the [v0.3.0 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.0). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
+Open the [v0.3.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
 
 On the Linux AMD64 target host, put both downloaded files in the same directory. Set `RELEASE_ARCHIVE` to the downloaded archive filename, without a directory prefix. Verify the archive before extracting it:
 
@@ -64,6 +65,36 @@ install -m 644 extension/*.control extension/*.sql "$("$PG_CONFIG" --sharedir)/e
 ```
 
 A macOS library cannot load into Linux PostgreSQL. Keep the complete package, checksums, resource manifest, and dependency notices after installation.
+
+## Upgrade from 0.3.0 to 0.3.1
+
+Version 0.3.1 keeps the SQL objects and dictionary defaults from 0.3.0.
+The upgrade script updates the catalog version without replacing user objects.
+Existing backends keep their loaded library until they exit.
+
+The email recognizer no longer accepts a valid prefix or suffix inside a malformed mailbox envelope.
+Existing vectors and indexes can retain terms from that earlier recognition.
+If indexed documents contain such input, apply the [maintenance table](#analysis-changes-and-index-maintenance) to every affected configuration and index.
+This includes copied configurations that use the Parser's email type.
+Recompute stored vectors from source text before rebuilding their indexes.
+
+1. Retain the current package, backup, source text, custom object definitions, and external dictionary rules.
+2. Pause affected reads and writes.
+3. Close existing database sessions that can load pg_charabia.
+4. Follow [Download and install](#download-and-install) to verify and install the complete 0.3.1 package on each PostgreSQL host.
+5. In each database with pg_charabia, open a fresh superuser session and run the statements below.
+6. Complete the required vector and index maintenance before reopening traffic.
+
+```text
+ALTER EXTENSION pg_charabia UPDATE TO '0.3.1';
+SELECT extversion AS catalog_version,
+       charabia.analysis_info()->>'extension' AS library_version
+FROM pg_catalog.pg_extension WHERE extname='pg_charabia';
+```
+
+Both versions must be `0.3.1` in the fresh session.
+Validate expected document IDs, actual GIN/BM25 plans, and original-text headline after maintenance.
+Retain the old package for backups and recovery targets that require its exact library.
 
 ## Optional pg_textsearch setup
 

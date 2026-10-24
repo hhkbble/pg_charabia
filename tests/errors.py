@@ -51,7 +51,7 @@ finally:
 has_hooks = os.environ.get("PGCB_TEST_HOOKS") == "1"
 registered = int(run("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='charabia' AND p.proname LIKE 'test_%'"))
 assert registered == (2 if has_hooks else 0), registered
-assert json_query("SELECT charabia.analysis_info()") ["extension"] == "0.3.0"
+assert json_query("SELECT charabia.analysis_info()") ["extension"] == "0.3.1"
 
 DOCUMENT = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running."
 run("CREATE SCHEMA errors_runtime")

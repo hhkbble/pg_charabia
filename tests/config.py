@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Native Text Search object ownership, ALTER/cache behavior and real restore."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -113,9 +114,144 @@ def explicit_option_matrix(session):
     value(session, 'DROP TABLE route16_options')
 
 
+def upgrade_noop():
+    """Exercise the native version transition with current SQL and the current library."""
+    temporary = Path(os.environ['PGCB_TEMP_DIR']).resolve()
+    stage = Path(os.environ['PGCB_EXTENSION_STAGE']).resolve()
+    marker = temporary / '.pg-charabia-owner'
+    check(marker.is_file() and not marker.is_symlink() and marker.read_text() == EVIDENCE.name
+          and stage == temporary / 'stage/extension',
+          'upgrade fixture writes only inside the current owned staging directory')
+    source = stage / 'pg_charabia--0.3.1.sql'
+    upgrade = stage / 'pg_charabia--0.3.0--0.3.1.sql'
+    alias = stage / 'pg_charabia--0.3.0.sql'
+    library = Path(os.environ['PGCB_LIBRARY_PATH'])
+    contents = source.read_bytes()
+    source_hash = hashlib.sha256(contents).hexdigest()
+    check(upgrade.is_file() and hashlib.sha256(library.read_bytes()).hexdigest() == os.environ['PGCB_LIBRARY_SHA256'],
+          'upgrade script and the identified current library are staged')
+    database = schema + '_upgrade'
+    evidence = report['upgrade'] = {
+        'database': database, 'source_sql': str(source), 'source_sql_sha256': source_hash,
+        'upgrade_sql': str(upgrade), 'upgrade_sql_sha256': hashlib.sha256(upgrade.read_bytes()).hexdigest(),
+        'library': str(library), 'library_sha256': os.environ['PGCB_LIBRARY_SHA256'],
+        'basis': 'The source installation DDL is byte-identical to v0.3.0. Current complete staged SQL is temporarily aliased as 0.3.0 to test the no-op catalog transition; this is not an old-library compatibility test.',
+    }
+    checkpoint()
+    alias_identity = None
+    created = False
+    try:
+        # Exclusive creation preserves any preexisting file. The source is the
+        # just-built (or extracted-package) SQL, never an earlier package.
+        with alias.open('xb') as handle:
+            stat = os.fstat(handle.fileno())
+            alias_identity = (stat.st_dev, stat.st_ino)
+            handle.write(contents)
+        evidence['alias_sql_sha256'] = hashlib.sha256(alias.read_bytes()).hexdigest()
+        check(evidence['alias_sql_sha256'] == source_hash, 'old-version fixture uses the exact current installation SQL')
+        command(f'CREATE DATABASE {database} TEMPLATE template0')
+        created = True
+        command("CREATE EXTENSION pg_charabia VERSION '0.3.0'", database)
+        with Session(database) as session:
+            check(value(session, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'") == '0.3.0',
+                  'native CREATE installs the old catalog version for the upgrade fixture')
+            check(scalar_json(session, 'SELECT charabia.analysis_info()')['extension'] == '0.3.1',
+                  'old catalog fixture already runs the current 0.3.1 library')
+            value(session, f'CREATE SCHEMA app AUTHORIZATION {owner}; SET ROLE {owner}')
+            value(session, """CREATE TEXT SEARCH DICTIONARY app.words(
+                TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,
+                Stem=false,Normalize=false,Filter=false,English=false);
+                CREATE TEXT SEARCH DICTIONARY app.units(
+                TEMPLATE=charabia.structured_template,Kind='numword',Discard=false,Stem=false,Normalize=false);
+                CREATE TEXT SEARCH CONFIGURATION app.search(COPY=public.charabia);
+                ALTER TEXT SEARCH CONFIGURATION app.search ALTER MAPPING FOR
+                eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und WITH app.words;
+                ALTER TEXT SEARCH CONFIGURATION app.search ALTER MAPPING FOR numword WITH app.units;
+                CREATE TABLE app.docs(id integer PRIMARY KEY,body text NOT NULL,vector tsvector NOT NULL);
+                INSERT INTO app.docs VALUES(1,'running',$vector$'running':1$vector$::tsvector),
+                    (2,'banana',$vector$'banana':1$vector$::tsvector);
+                CREATE INDEX upgrade_gin ON app.docs USING gin(to_tsvector('app.search',body));
+                RESET ROLE""")
+            check(direct(session, 'app.words', 'CAFÉ') == ['café']
+                  and direct(session, 'app.words', 'running') == ['running'],
+                  'upgrade fixture has independent non-default dictionary options')
+            snapshot = """SELECT jsonb_build_object(
+                'extension',(SELECT to_jsonb(e)-'extversion' FROM pg_extension e WHERE extname='pg_charabia'),
+                'members',(SELECT jsonb_agg(jsonb_build_array(classid::regclass::text,objid,objsubid) ORDER BY classid,objid,objsubid)
+                    FROM pg_depend WHERE refclassid='pg_extension'::regclass
+                    AND refobjid=(SELECT oid FROM pg_extension WHERE extname='pg_charabia') AND deptype='e'),
+                'namespaces',(SELECT jsonb_agg(to_jsonb(n) ORDER BY oid) FROM pg_namespace n WHERE nspname IN('charabia','app')),
+                'functions',(SELECT jsonb_agg(to_jsonb(p) ORDER BY oid) FROM pg_proc p WHERE pronamespace='charabia'::regnamespace),
+                'parsers',(SELECT jsonb_agg(to_jsonb(p) ORDER BY oid) FROM pg_ts_parser p WHERE prsnamespace='charabia'::regnamespace),
+                'templates',(SELECT jsonb_agg(to_jsonb(t) ORDER BY oid) FROM pg_ts_template t WHERE tmplnamespace='charabia'::regnamespace),
+                'dictionaries',(SELECT jsonb_agg(to_jsonb(d) ORDER BY oid) FROM pg_ts_dict d WHERE dictnamespace IN('charabia'::regnamespace,'app'::regnamespace)),
+                'configurations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY oid) FROM pg_ts_config c WHERE oid IN('public.charabia'::regconfig,'app.search'::regconfig)),
+                'mappings',(SELECT jsonb_agg(to_jsonb(m) ORDER BY mapcfg,maptokentype,mapseqno) FROM pg_ts_config_map m WHERE mapcfg IN('public.charabia'::regconfig,'app.search'::regconfig)),
+                'relations',(SELECT jsonb_agg(jsonb_build_object('oid',oid,'name',relname,'owner',relowner,'kind',relkind,'options',reloptions) ORDER BY oid)
+                    FROM pg_class WHERE relnamespace='app'::regnamespace),
+                'index_definition',pg_get_indexdef('app.upgrade_gin'::regclass),
+                'rows',(SELECT jsonb_agg(to_jsonb(d) ORDER BY id) FROM app.docs d))"""
+
+            def observe(label):
+                mappings = (Path(f'/proc/{session.pid}/maps').read_text()
+                            if os.environ['PGCB_PLATFORM'] == 'linux-amd64'
+                            else subprocess.check_output(['lsof', '-p', str(session.pid)], text=True))
+                (EVIDENCE / ('upgrade-' + label + '-backend-maps.txt')).write_text(mappings)
+                check(any(path in mappings for path in (str(library), str(library.resolve())))
+                      and hashlib.sha256(library.read_bytes()).hexdigest() == evidence['library_sha256'],
+                      'upgrade ' + label + ' backend maps the exact current library')
+                value(session, 'SET enable_seqscan=off')
+                query = "SELECT id FROM app.docs WHERE to_tsvector('app.search',body)@@'running'::tsquery"
+                plan = scalar_json(session, 'EXPLAIN(ANALYZE,FORMAT JSON,COSTS OFF,TIMING OFF) ' + query)
+                plan_nodes = [plan[0]['Plan']]
+                for node in plan_nodes:
+                    plan_nodes.extend(node.get('Plans', []))
+                check(any(node.get('Index Name') == 'upgrade_gin' and node.get('Node Type') == 'Bitmap Index Scan'
+                          and node.get('Actual Loops', 0) > 0 for node in plan_nodes),
+                      'upgrade ' + label + ' executes the preserved GIN index', plan)
+                check(scalar_json(session, "SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb) FROM(" + query + ')q') == [1],
+                      'upgrade ' + label + ' preserves the independently specified search result')
+                value(session, 'RESET enable_seqscan')
+                return scalar_json(session, snapshot)
+
+            evidence['backend_pid'] = session.pid
+            evidence['before'] = observe('before')
+            checkpoint()
+            value(session, "ALTER EXTENSION pg_charabia UPDATE TO '0.3.1'")
+            evidence['after'] = observe('after')
+            evidence['catalog_version'] = value(session, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'")
+            check(evidence['catalog_version'] == '0.3.1', 'native UPDATE advances the extension catalog to 0.3.1')
+            check(evidence['before'] == evidence['after'],
+                  'no-op upgrade preserves default and user OIDs, ownership, options, mappings, data and indexes')
+    finally:
+        primary = sys.exception()
+        cleanup = []
+        if created:
+            try:
+                command(f'DROP DATABASE {database}')
+                created = False
+            except BaseException as exc:
+                cleanup.append(repr(exc))
+        if alias_identity is not None:
+            try:
+                stat = alias.lstat()
+                if alias.is_symlink() or (stat.st_dev, stat.st_ino) != alias_identity or hashlib.sha256(alias.read_bytes()).hexdigest() != source_hash:
+                    raise AssertionError('Upgrade alias ownership or contents changed; retained ' + str(alias))
+                alias.unlink()
+            except BaseException as exc:
+                cleanup.append(repr(exc))
+        evidence['cleanup'] = {'database_removed': not created, 'alias_removed': alias_identity is not None and not alias.exists(), 'errors': cleanup}
+        checkpoint()
+        if cleanup:
+            if primary is None:
+                raise AssertionError(cleanup)
+            primary.add_note('upgrade fixture cleanup failed: ' + repr(cleanup))
+
+
 try:
     command(f'CREATE ROLE {owner}; CREATE ROLE {other}; CREATE SCHEMA {schema} AUTHORIZATION {owner}; '
             f'CREATE SCHEMA {moved} AUTHORIZATION {owner}; GRANT USAGE ON SCHEMA {schema},{moved} TO {other}')
+    upgrade_noop()
     # Failed installation must not overwrite a public object or adopt an unsafe namespace.
     command(f'CREATE DATABASE {conflict} TEMPLATE template0')
     command('CREATE TEXT SEARCH CONFIGURATION public.charabia(COPY=pg_catalog.simple)', conflict)

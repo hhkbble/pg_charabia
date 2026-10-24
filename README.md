@@ -14,10 +14,12 @@ Linux AMD64 is the release build and validation target. macOS ARM64 has an isola
 
 ## Installation
 
-Download the Linux AMD64 package and its SHA256 file from the [v0.3.0 release](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.0). The complete archive includes the extension binary, source, resources, notices, and verification evidence.
+Download the Linux AMD64 package and its SHA256 file from the [v0.3.1 release](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1). The complete archive includes the extension binary, source, resources, notices, and verification evidence.
 
 - [Build from source](docs/development.md#build-and-test) with the pinned prerequisites and isolated runners.
 - [Download, verify, and install the release archive](docs/operations.md#download-and-install) into a matching Linux AMD64 PostgreSQL 18 installation.
+
+For an existing 0.3.0 installation, follow the [upgrade procedure](docs/operations.md#upgrade-from-030-to-031).
 
 The SQL below assumes that extension files are installed. A database superuser runs `CREATE EXTENSION pg_charabia`. Installation reserves the fixed `charabia` schema and `public.charabia` configuration. Read [schema ownership and permissions](docs/operations.md#schema-ownership-and-permissions) before installation.
 
@@ -100,7 +102,7 @@ Validate complete documents and queries against the 262144-byte input limit befo
 
 Short queries, mixed-language text, and phrase searches can miss expected matches. Structured token components can match scattered words or shared parts. Headline is a presentation step, not a retrieval filter. See [structured token semantics](docs/reference.md#structured-ascii-tokens) and [headline rules](docs/reference.md#headline).
 
-BM25 has known false matches and ranking errors in v0.3.0, including false matches for German `die`. Review the [known BM25 issues](docs/reference.md#known-bm25-issues) and test representative documents and queries before adoption.
+BM25 retains the known false matches and ranking errors reported in v0.3.0, including false matches for German `die`. Review the [known BM25 issues](docs/reference.md#known-bm25-issues) and test representative documents and queries before adoption.
 
 Changes to dictionaries, mappings, chains, or resources can invalidate indexed analysis. Stored vectors need recomputation. REINDEX alone reuses an ordinary stored vector. Follow [analysis changes and index maintenance](docs/operations.md#analysis-changes-and-index-maintenance) for the required action for each representation.
 

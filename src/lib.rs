@@ -21,7 +21,7 @@ mod structured_tokens;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
 
-const ANALYSIS_REVISION: &str = "route16-structured-tokens-1";
+const ANALYSIS_REVISION: &str = "route16-structured-tokens-2";
 
 #[pg_extern(sql = false)]
 fn analysis_info() -> JsonB {

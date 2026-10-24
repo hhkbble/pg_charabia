@@ -68,6 +68,20 @@ def fragment_positions(session):
                       "query": query, "expected": expected, "actual": actual,
                       "basis": "PG18 hlCover and no-cover first MinWords fallback; explicit Stop hole"})
 
+        raw = "outside &<> first second third alpha &<> the &<> beta tail &<> outside"
+        # The exact three-word cover leaves the surrounding entries out. Its
+        # punctuation is source text, not caller markup or additional words.
+        for escaping, expected in (
+            ("true", "<b>alpha</b> &amp;&lt;&gt; the &amp;&lt;&gt; <b>beta</b>"),
+            ("false", "<b>alpha</b> &<> the &<> <b>beta</b>"),
+        ):
+            actual = headline(session, raw, "'alpha <2> beta'::tsquery",
+                              options + ",Escape=" + escaping, config)
+            check(actual == expected,
+                  "fragment rendering preserves only the selected original text and its escape policy", {
+                      "raw": raw, "escape": escaping, "expected": expected, "actual": actual,
+                      "basis": "fixed English Stop hole and PG18 three-word cover; literal source escaping"})
+
         # An unambiguous English prefix makes run/running two operands for one
         # source word. The three-word budget counts that word once and Stop once.
         raw = ("The children were running through the garden while the teachers were reading "

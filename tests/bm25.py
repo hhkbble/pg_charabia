@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import time
 from support import Session, literal, native_config_sql, record_quality_cases
+from report_contract import FORMAT, quality_case, validate_quality, verified_status
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = json.loads((ROOT / "tests/fixtures/bm25/corpus.json").read_text())
@@ -68,9 +69,7 @@ class Suite:
         if any(item["id"] == case_id for item in self.pending_quality):
             raise AssertionError("Duplicate pending domain assertion: " + case_id)
         self.pending_quality.append(dict(id=case_id, **fields))
-        signature = fields.get("known_signature")
-        frozen_match = signature is not None and all(fields[key] == signature[key] for key in ("input", "query", "config", "expected", "actual"))
-        status = "known-domain-failure" if frozen_match else "domain-failure" if fields["actual"] != fields["expected"] else "unreviewed-improvement" if signature else "passed"
+        status = quality_case(case_id, **fields)["status"]
         self.result.setdefault("deferred_domain_assertions", []).append(dict(
             id=case_id, expected=fields["expected"], actual=fields["actual"], status=status))
         self.result["pending_quality"] = self.pending_quality
@@ -849,7 +848,8 @@ END$fixture$;"""
             self.result["mechanism_status"]="passed"
             self.checkpoint()
             self.flush_quality()
-            self.result["quality_status"]="passed"
+            self.result["quality"] = validate_quality({"format": FORMAT, "cases": self.result["domain_quality"]})
+            self.result["quality_status"] = verified_status(self.result["quality"])
             self.result["status"] = "passed"
         except BaseException as error:
             failure = error

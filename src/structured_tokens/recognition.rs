@@ -345,6 +345,23 @@ fn lexical_char(b: u8) -> bool {
         )
 }
 
+fn email_boundaries(run: &str, start: usize, end: usize) -> bool {
+    let bytes = run.as_bytes();
+    // LinkFinder can skip a leading dot or an invalid consecutive-dot local part.
+    if start > 0 && bytes[start - 1] == b'.' {
+        return false;
+    }
+    // A single sentence-ending dot is punctuation. Further mailbox characters
+    // or an attached port must not turn a malformed envelope into a valid prefix.
+    let tail = bytes[end..].strip_prefix(b".").unwrap_or(&bytes[end..]);
+    let Some((&next, rest)) = tail.split_first() else {
+        return true;
+    };
+    !next.is_ascii_alphanumeric()
+        && !matches!(next, b'.' | b'_' | b'+' | b'-' | b'@')
+        && !(next == b':' && rest.first().is_some_and(|&b| lexical_char(b) || b == b':'))
+}
+
 fn scalar_envelope(input: &str, start: usize, end: usize) -> bool {
     !input[..start]
         .chars()
@@ -509,7 +526,7 @@ fn scan_run(
     for link in finder.links(run) {
         let start = run_start + link.start();
         let end = run_start + link.end();
-        if !overlaps(&blocked, start, end) {
+        if !overlaps(&blocked, start, end) && email_boundaries(run, link.start(), link.end()) {
             push(input, start, end, StructuredTokenKind::Email, candidates);
         }
     }
@@ -724,6 +741,8 @@ mod tests {
         for raw in [
             ".bad@example.com",
             "bad..local@example.com",
+            "a@b@example.com",
+            "a@@b@example.com",
             "a@example.com:80",
             "a@[::1]",
             "é@example.com",
@@ -741,6 +760,45 @@ mod tests {
         ] {
             assert!(parse(StructuredTokenKind::File, raw).is_some(), "{raw}");
         }
+    }
+
+    #[test]
+    fn email_candidates_do_not_shorten_malformed_mailboxes() {
+        for raw in [
+            ".bad@example.com",
+            "bad..local@example.com",
+            "a@example.com:80",
+            "a@example.com:abc",
+            "a@example.com..",
+            "a@example.com+tag",
+        ] {
+            assert!(
+                observed(raw)
+                    .iter()
+                    .all(|(_, kind)| *kind != StructuredTokenKind::Email),
+                "malformed mailbox supplied an email substring: {raw}"
+            );
+        }
+        for raw in [
+            "a@example.com",
+            "a@example.com tail",
+            "a@example.com,tail",
+            "(a@example.com)",
+            "a@example.com.",
+            "a@example.com: text",
+        ] {
+            assert_eq!(
+                observed(raw),
+                [("a@example.com", StructuredTokenKind::Email)]
+            );
+        }
+        assert_eq!(
+            observed("User+tag@Example.com root@localhost"),
+            [
+                ("User+tag@Example.com", StructuredTokenKind::Email),
+                ("root@localhost", StructuredTokenKind::Email),
+            ]
+        );
     }
 
     #[test]

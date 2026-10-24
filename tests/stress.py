@@ -76,6 +76,35 @@ def bounded_contexts(samples):
     assert max(item["bytes"] for item in samples) - min(item["bytes"] for item in samples) < MIB, samples
 
 
+def request_rss_summary(samples):
+    """Judge the same six post-warmup samples without counting shared buffers."""
+    first = statistics.median(sample["rss_bytes"] for sample in samples[:3])
+    last = statistics.median(sample["rss_bytes"] for sample in samples[-3:])
+    record = {
+        "sample_cycles": [sample["cycle"] for sample in samples],
+        "rss_first_three_median_bytes": first,
+        "rss_last_three_median_bytes": last,
+        "rss_median_growth_bytes": last - first,
+        "rss_growth_tolerance_bytes": MIB,
+        "raw_total_rss_gate_passed": last - first <= MIB,
+    }
+    if LINUX:
+        nonshared_first = statistics.median(sample["rss_nonshared_bytes"] for sample in samples[:3])
+        nonshared_last = statistics.median(sample["rss_nonshared_bytes"] for sample in samples[-3:])
+        record.update({
+            "rss_nonshared_first_three_median_bytes": nonshared_first,
+            "rss_nonshared_last_three_median_bytes": nonshared_last,
+            "rss_nonshared_median_growth_bytes": nonshared_last - nonshared_first,
+            "nonshared_rss_gate_passed": nonshared_last - nonshared_first <= MIB,
+            "rss_gate_metric": "Linux status VmRSS - RssShmem (RssAnon + RssFile)",
+        })
+        record["rss_gate_passed"] = record["nonshared_rss_gate_passed"]
+    else:
+        record["rss_gate_metric"] = "total backend RSS"
+        record["rss_gate_passed"] = record["raw_total_rss_gate_passed"]
+    return record
+
+
 def parallel_execution():
     with Session() as session:
         session.value(
@@ -176,7 +205,11 @@ def repeated_requests():
                 assert after["parser_created"] == after["parser_dropped"], after
                 assert after["state_registered"] - before["state_registered"] == 500, (before, after)
                 assert after["state_released"] - before["state_released"] == 500, (before, after)
-        bounded_contexts(results["memory"][2:])
+        measured = results["memory"][2:]
+        results["requests_rss"] = request_rss_summary(measured)
+        checkpoint()
+        bounded_contexts(measured)
+        assert results["requests_rss"]["rss_gate_passed"], results["requests_rss"]
         if HAS_HOOKS:
             results["test_counters"] = hooks(session)
 
@@ -210,7 +243,11 @@ def repeated_structured_requests():
                 assert after["dictionary_created"] == before["dictionary_created"], (before, after)
                 assert after["dictionary_live_fst_bytes"] == 0, after
                 assert after["dictionary_live_referenced_fst_bytes"] == before["dictionary_live_referenced_fst_bytes"], (before, after)
-        bounded_contexts(samples[2:])
+        measured = samples[2:]
+        results["structured_requests"]["rss"] = request_rss_summary(measured)
+        checkpoint()
+        bounded_contexts(measured)
+        assert results["structured_requests"]["rss"]["rss_gate_passed"], results["structured_requests"]["rss"]
 
 
 def cache_invalidation(structured=False):

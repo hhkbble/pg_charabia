@@ -15,7 +15,7 @@ import tempfile
 import time
 import tomllib
 
-from report_contract import DEFAULT_OBJECTS_QUERY, FORMAT, RELEASE_VERSION, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_default_objects, require_known_quality_cases, require_recovery_report, require_static_info, select_suites, verified_status
+from report_contract import DEFAULT_OBJECTS_QUERY, FORMAT, RELEASE_VERSION, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_bm25_report, require_default_objects, require_known_quality_cases, require_recovery_report, require_static_info, same_json, select_suites, verified_status
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -345,7 +345,7 @@ def main():
         expected_public = [{"name": name, "arguments": arguments, "returns": returns, "security_definer": False, "volatility": "s", "parallel": "r", "columns": columns} for name, arguments, returns, columns in (
             ("analysis_info", "", "jsonb", None), ("analyze", "text", "record", analyze_columns), ("query_any", "text, regconfig", "tsquery", None))]
         if public_abi != expected_public:
-            raise RuntimeError(f"Installed public diagnostic ABI differs from the 0.3.0 contract: {public_abi}")
+            raise RuntimeError(f"Installed public diagnostic ABI differs from the release contract: {public_abi}")
         result["public_api_abi_verified"] = True
         command(psql + ["-c", "SELECT version(); SELECT extname, extversion FROM pg_extension ORDER BY 1; SHOW dynamic_library_path; SHOW extension_control_path;"], "database-identity")
         # A persistent backend loads this exact staged library; its mappings prove identity.
@@ -389,6 +389,8 @@ def main():
                 command(psql + ["-f", sql], f"suite-{suite}-sql")
             if python.is_file():
                 command([sys.executable, python], f"suite-{suite}-python")
+            if suite == "bm25":
+                result["bm25_quality"] = require_bm25_report(json.loads((evidence / "bm25-results.json").read_text()))
             if suite == "recovery":
                 recovery_path = evidence / "recovery/results.json"
                 if not recovery_path.is_file():
@@ -410,6 +412,8 @@ def main():
         result["quality"] = read_quality(evidence / "quality-results.json")
         if "bm25" in selected:
             require_known_quality_cases(result["quality"])
+            if not same_json(result["bm25_quality"], result["quality"]):
+                raise RuntimeError("BM25 quality summary differs from the shared quality registry")
         if result["quality"]["regressions"]:
             raise RuntimeError(f"Unreviewed quality regressions: {result['quality']['regressions']}")
         result["status"] = "mechanisms-passed"

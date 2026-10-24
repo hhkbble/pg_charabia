@@ -148,7 +148,8 @@ stay unchanged; returning to the old false result is now a regression. The phras
 case remains unresolved. A diagnostic control or new failure cannot expand the
 exemption set.
 
-The [reviewed release warning policy](#reviewed-release-warnings) defines the temporary v0.3.0 packaging exceptions separately from those frozen cases.
+The [reviewed release warning policy](#reviewed-release-warnings) defines the temporary packaging exceptions separately from those frozen cases.
+Version 0.3.1 retains the exact exceptions introduced in v0.3.0.
 
 Quality summaries include separate `passed`, `known-failure`, `warning`, and `regression` counts. Their `warnings` list and `warning_review` identity are retained in reports and the delivery manifest. Full acceptance requires every named reviewed case, not a matching total. The extracted-package verifier checks the original warning evidence and preserves the full acceptance summary.
 
@@ -172,7 +173,8 @@ Performance observations separate detection, ASCII scanning/validation, componen
 
 ### Reviewed release warnings
 
-Release v0.3.0 temporarily accepts 47 reviewed BM25 differences as `warning`.
+Release v0.3.0 introduced temporary acceptance of 47 reviewed BM25 differences as `warning`.
+Release v0.3.1 retains exactly the same 47 cases and signatures.
 They cover extra candidates across prepared plans and index lifecycle stages,
 German `die` false matches, and the confirmed TopK ranking failure.
 These records remain quality failures and do not count as quality PASS.
@@ -273,7 +275,7 @@ Keep the delivery report in `artifacts/` or `dist/`, recording source/package id
 
 ### GitHub publication
 
-The packager creates local files. GitHub upload and publication happen separately. The [v0.3.0 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.0) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
+The packager creates local files. GitHub upload and publication happen separately. The [v0.3.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
 
 1. Finish full Linux acceptance, local macOS development validation, and separate hooks checks on the same clean final commit.
 2. Generate the archive and SHA256 file with the existing packager, then pass extracted-package validation.

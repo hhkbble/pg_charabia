@@ -40,30 +40,35 @@ REPORT['structured_expectation_basis'] = {
 def save():
     (OUT/'results.json').write_text(json.dumps(REPORT,ensure_ascii=False,indent=2)+'\n')
 
-def command(argv,label,check=True,timeout=120):
+def command(argv,label,check=True,timeout=120,sql_text=None):
     argv=list(map(str,argv)); start=time.monotonic()
-    entry={'argv':argv,'label':label,'exit':'running'}
+    stem=f'{len(REPORT["commands"])+1:03d}-{label}'
+    stdout=OUT/(stem+'.stdout');stderr=OUT/(stem+'.stderr')
+    entry={'argv':argv,'label':label,'exit':'running','stdout':stdout.name,'stderr':stderr.name}
+    if sql_text is not None:
+        sql_path=OUT/(stem+'.sql')
+        sql_path.write_text(sql_text+'\n')
+        entry['sql']=sql_path.name
     REPORT['commands'].append(entry);save()
     try:
         result=subprocess.run(argv,env=ENV,text=True,capture_output=True,timeout=timeout)
     except subprocess.TimeoutExpired as error:
         def text(value):return value.decode(errors='replace')if isinstance(value,bytes)else value or ''
-        (OUT/(label+'.stdout')).write_text(text(error.stdout))
-        (OUT/(label+'.stderr')).write_text(text(error.stderr))
+        stdout.write_text(text(error.stdout))
+        stderr.write_text(text(error.stderr))
         entry.update(exit='timeout',seconds=time.monotonic()-start,timeout_seconds=timeout);save()
         raise
     except BaseException as error:
         entry.update(exit='interrupted'if isinstance(error,InterruptedError)else'exception',error=repr(error),seconds=time.monotonic()-start);save()
         raise
-    (OUT/(label+'.stdout')).write_text(result.stdout)
-    (OUT/(label+'.stderr')).write_text(result.stderr)
+    stdout.write_text(result.stdout)
+    stderr.write_text(result.stderr)
     entry.update(exit=result.returncode,seconds=time.monotonic()-start);save()
     if check and result.returncode:raise RuntimeError(f'{label}: {result.returncode}: {result.stderr[-1600:]}')
     return result.stdout.strip()
 
 def sql(text,label,database='postgres'):
-    (OUT/(label+'.sql')).write_text(text+'\n')
-    return command([BIN/'psql','-XAtq','-v','ON_ERROR_STOP=1','-d',database,'-c',text],label)
+    return command([BIN/'psql','-XAtq','-v','ON_ERROR_STOP=1','-d',database,'-c',text],label,sql_text=text)
 
 def check(ok,label,evidence=None):
     REPORT['checks'].append({'label':label,'ok':bool(ok),'evidence':evidence});save()
@@ -347,7 +352,7 @@ try:
     lib.rename(held)
     try:
         missing=command([BIN/'psql','-XAtq','-v','ON_ERROR_STOP=1','-c',"SELECT to_tsvector('lab.cfg',"+literal(ENGLISH)+")"],'missing-external-library',check=False)
-        failure=(OUT/'missing-external-library.stderr').read_text()
+        failure=(OUT/REPORT['commands'][-1]['stderr']).read_text()
         check('could not access file' in failure and 'pg_charabia' in failure,'restored catalog does not replace a missing external library',failure)
     finally:
         held.rename(lib)

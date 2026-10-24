@@ -5,8 +5,8 @@ from pathlib import Path
 import re
 
 FORMAT = 2
-RELEASE_VERSION = "0.3.0"
-ANALYSIS_REVISION = "route16-structured-tokens-1"
+RELEASE_VERSION = "0.3.1"
+ANALYSIS_REVISION = "route16-structured-tokens-2"
 LANGUAGE_CODES = ("eng", "deu", "nld", "rus", "spa", "fra", "por", "ita", "ara", "tur", "cmn", "jpn", "kor", "vie", "tha", "und")
 ENGLISH_ELIGIBLE = frozenset(("deu", "nld", "spa", "fra", "por", "ita", "tur", "vie"))
 LANGUAGE_SCRIPTS = dict(zip(LANGUAGE_CODES, ("Latin", "Latin", "Latin", "Cyrillic", "Latin", "Latin", "Latin", "Latin", "Arabic", "Latin", "Cj", "Cj", "Hangul", "Latin", "Thai", "Other")))
@@ -26,7 +26,7 @@ REVIEWED_QUALITY_RESOLUTIONS = {
 }
 
 
-# Temporary v0.3.0 policy: exact reviewed records only, never a name pattern.
+# Unchanged warnings introduced in v0.3.0: exact reviewed records only, never a name pattern.
 QUALITY_WARNING_REVIEW = {
     "file": "tests/fixtures/quality-warnings-original.json",
     "sha256": "ae335da2f89aae7eb10e59ab86aaf3f8233488cddafa06371b6ae9a2d8243b22",
@@ -230,12 +230,12 @@ def select_suites(groups, platform, root):
 def require_static_info(info, expected):
     """Check static identity independently of user configuration or live FSTs."""
     if not isinstance(info, dict) or set(info) != STATIC_INFO_FIELDS:
-        raise ValueError("analysis_info must expose exactly the static 0.3.0 identity fields")
+        raise ValueError("analysis_info must expose exactly the static release identity fields")
     mismatches = {key: {"expected": value, "actual": info.get(key)} for key, value in expected.items() if not same_json(info.get(key), value)}
     if mismatches:
         raise ValueError(f"analysis_info static identity differs from the build inputs: {mismatches}")
     if info["extension"] != RELEASE_VERSION or type(info["language_count"]) is not int or info["language_count"] != len(LANGUAGE_CODES):
-        raise ValueError("analysis_info requires release 0.3.0 and 16 language dictionaries")
+        raise ValueError("analysis_info requires the current release and 16 language dictionaries")
     if info["analysis_revision"] != ANALYSIS_REVISION:
         raise ValueError("analysis_info requires the current analysis_revision")
     for field in ("cargo_lock_sha256", "resource_manifest_sha256", "resource_fingerprint"):
@@ -399,6 +399,18 @@ def verified_status(quality):
     return "verified-with-known-quality-failures" if quality["known_failures"] else "verified"
 
 
+def require_bm25_report(report):
+    """Keep the suite's quality disclosure consistent with its actual cases."""
+    quality = validate_quality({"format": FORMAT, "cases": report.get("domain_quality")})
+    if report.get("mechanism_status") != "passed" or report.get("status") != "passed":
+        raise ValueError("BM25 mechanisms did not pass")
+    if quality["regressions"] or report.get("quality_status") != verified_status(quality):
+        raise ValueError("BM25 quality status disagrees with its cases")
+    if not same_json(report.get("quality"), quality):
+        raise ValueError("BM25 quality summary disagrees with its cases")
+    return quality
+
+
 def verify_checksums(package):
     package = Path(package).absolute()
     # copytree follows directory symlinks. Reject them before checking the file
@@ -446,6 +458,10 @@ def require_release_report(report):
     missing = REVIEWED_QUALITY_WARNINGS - {case["id"] for case in quality["cases"]}
     if missing:
         raise ValueError(f"Missing reviewed quality warning cases: {sorted(missing)}")
+    bm25_quality = validate_quality(report.get("bm25_quality", {}))
+    if not same_json(bm25_quality, quality):
+        raise ValueError("BM25 quality cases disagree with the release report")
+    require_known_quality_cases(bm25_quality)
     for key in ("counts", "warnings", "warning_review", "known_failures", "regressions"):
         if key not in report["quality"]:
             raise ValueError(f"Missing quality warning disclosure: {key}")

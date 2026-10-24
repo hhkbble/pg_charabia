@@ -742,7 +742,9 @@ pub unsafe fn headline(
         // remains live across the guarded palloc performed by pg_string.
         let original = unsafe { *(*prs).words.add(index) };
         let selected = unsafe { *scratch_words.add(index) };
-        let escaped = if original.repeated() == 0 {
+        // Core renders only entries in the selected fragments. Keep the full
+        // validation above, but do not allocate escapes for discarded text.
+        let escaped = if original.repeated() == 0 && selected.in_() != 0 {
             let raw = unsafe { input(original.word.cast(), original.len() as i32) };
             let rendered = headline_checked(crate::headline::escape_html(raw, policy.escape));
             if matches!(rendered, std::borrow::Cow::Owned(_)) {

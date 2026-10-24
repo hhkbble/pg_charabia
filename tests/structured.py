@@ -168,6 +168,28 @@ def main():
                     check(not any(row["token_type"] == "url" for row in rows),
                           "an invalid whole envelope never becomes a valid URL prefix", rows)
 
+            for ordinal, raw in enumerate((
+                ".bad@example.com", "bad..local@example.com", "a@b@example.com", "a@@b@example.com",
+                "a@example.com:80",
+                "a@example.com:abc", "a@example.com..", "a@example.com+tag",
+            )):
+                rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) "
+                    "FROM charabia.analyze(" + literal(raw) + ")a", f"malformed-email-{ordinal}", True)
+                check("".join(row["raw"] for row in rows) == raw and
+                      not any(row["token_type"] == "email" for row in rows),
+                      "a malformed mailbox retains all source text without a shortened email token", rows)
+                check(direct(session, "charabia.email", raw, f"malformed-email-direct-{ordinal}") is None,
+                      "the email dictionary rejects the same malformed full mailbox", raw)
+            for ordinal, raw in enumerate((
+                "a@example.com", "a@example.com tail", "a@example.com,tail",
+                "(a@example.com)", "a@example.com.", "a@example.com: text",
+            )):
+                rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) "
+                    "FROM charabia.analyze(" + literal(raw) + ")a", f"email-boundary-{ordinal}", True)
+                check("".join(row["raw"] for row in rows) == raw and
+                      [row["raw"] for row in rows if row["token_type"] == "email"] == ["a@example.com"],
+                      "normal punctuation and whitespace retain the complete email token", rows)
+
             full_cases = [
                 ("url", "HTTPS://Example.COM:00080/A/../%7e?q=%2F#Part",
                  "https://example.com:00080/A/../%7e?q=%2F#Part"),
@@ -229,6 +251,15 @@ def main():
                   "one atomic structured token preserves the outside distance and has no internal phrase positions")
             check(matches(session, config, "100ms", "to_tsquery(" + literal(config) + ",'100m:*')", "prefix"),
                   "prefix flags apply to the real analyzed structured token operands")
+            prefix_query = "to_tsquery(" + literal(config) + ",'100mill:*')"
+            for literal_vector, expected in (("'100':1 'millisecond':1", True), ("'1000':1 'millisecond':1", True),
+                                             ("'100':1", False), ("'1000':1", False),
+                                             ("'millisecond':1", False)):
+                actual = sql(session, "SELECT " + literal(literal_vector) + "::tsvector @@ " + prefix_query,
+                             "component-prefix-vector") == "t"
+                check(actual == expected,
+                      "component-only prefix matching still requires every member of the AND group", {
+                          "vector": literal_vector, "expected": expected, "actual": actual})
 
             # Native ALTER preserves omitted parameters and recomputes removed defaults.
             sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + ".parts("

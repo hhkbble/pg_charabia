@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Pure checks for suite selection, quality classification and release refusal."""
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -7,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import statistics
 from pathlib import Path
 import subprocess
 import sys
@@ -14,12 +16,73 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import QUALITY_FIELDS, QUALITY_WARNING_REVIEW, REVIEWED_QUALITY_WARNINGS, reviewed_quality_warnings, ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, structured_token_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import QUALITY_FIELDS, QUALITY_WARNING_REVIEW, REVIEWED_QUALITY_WARNINGS, reviewed_quality_warnings, ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, structured_token_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_bm25_report, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class ContractTests(unittest.TestCase):
+    def test_bm25_quality_summary_cannot_turn_warnings_into_pass(self):
+        cases = self.report()["quality"]["cases"]
+        for rows, expected in (
+            ([quality_case("independent-pass", input="alpha", query="alpha", config="public.charabia", expected=True, actual=True)], "verified"),
+            ([case for case in cases if case["status"] == "known-failure"], "verified-with-known-quality-failures"),
+            (cases, "verified-with-quality-warnings"),
+        ):
+            quality = validate_quality({"format": FORMAT, "cases": rows})
+            report = dict(status="passed", mechanism_status="passed", domain_quality=rows,
+                          quality=quality, quality_status=expected)
+            self.assertEqual(require_bm25_report(report), quality)
+            for forged in ("passed", "verified-with-known-quality-failures" if expected == "verified" else "verified"):
+                with self.assertRaisesRegex(ValueError, "quality status"):
+                    require_bm25_report(dict(report, quality_status=forged))
+            altered = copy.deepcopy(report)
+            altered["quality"]["counts"]["passed"] += 1
+            with self.assertRaisesRegex(ValueError, "summary"):
+                require_bm25_report(altered)
+        report = self.report()
+        report["bm25_quality"] = validate_quality({"format": FORMAT, "cases": [
+            case for case in cases if case["status"] != "warning"
+        ]})
+        with self.assertRaisesRegex(ValueError, "BM25 quality cases disagree"):
+            require_release_report(report)
+
+    def test_request_rss_gate_rejects_private_growth_without_ignoring_shared_growth(self):
+        module = ast.parse((ROOT / "tests/stress.py").read_text())
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "request_rss_summary")
+        namespace = {"statistics": statistics, "MIB": 1024 * 1024, "LINUX": True}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "tests/stress.py", "exec"), namespace)
+        summary = namespace["request_rss_summary"]
+        mib = namespace["MIB"]
+        for growth, expected in ((mib, True), (mib + 1, False), (-1, True)):
+            samples = [dict(cycle=cycle, rss_bytes=10*mib+(growth if cycle >= 3 else 0),
+                            rss_nonshared_bytes=5*mib+(growth if cycle >= 3 else 0)) for cycle in range(6)]
+            self.assertEqual(summary(samples)["rss_gate_passed"], expected)
+        shared_growth = [dict(cycle=cycle, rss_bytes=(10 if cycle < 3 else 12)*mib,
+                              rss_nonshared_bytes=5*mib) for cycle in range(6)]
+        observed = summary(shared_growth)
+        self.assertTrue(observed["rss_gate_passed"])
+        self.assertFalse(observed["raw_total_rss_gate_passed"])
+        self.assertEqual(observed["rss_median_growth_bytes"], 2*mib)
+
+    def test_recovery_keeps_first_failure_when_a_command_label_repeats(self):
+        module = ast.parse((ROOT / "tests/recovery.py").read_text())
+        functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in ("save", "command")]
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            report = {"commands": []}
+            namespace = dict(OUT=out, REPORT=report, ENV=os.environ.copy(), time=time, subprocess=subprocess, json=json)
+            exec(compile(ast.Module(body=functions, type_ignores=[]), "tests/recovery.py", "exec"), namespace)
+            command = namespace["command"]
+            command([sys.executable, "-c", "import sys; print('FIRST_FAILURE',file=sys.stderr);sys.exit(1)"], "repeat", check=False)
+            command([sys.executable, "-c", "print('SECOND_SUCCESS')"], "repeat")
+            first, second = report["commands"]
+            self.assertEqual([first["exit"], second["exit"]], [1, 0])
+            self.assertNotEqual(first["stderr"], second["stderr"])
+            self.assertEqual((out / first["stderr"]).read_text(), "FIRST_FAILURE\n")
+            self.assertEqual((out / second["stdout"]).read_text(), "SECOND_SUCCESS\n")
+
     def test_outer_cleanup_preserves_unproven_inner_data(self):
         # This exercises the actual outer wrapper with a fake Docker CLI, not
         # PostgreSQL behavior. Target integration still runs in real containers.
@@ -347,6 +410,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                 "pg_textsearch": {"loaded_backend_verified": True},
                 "commands": [{"label": label, "exit_code": 0} for label in labels] + [{"label": f"suite-{suite}-python", "exit_code": 0} for suite in SUITES if suite != "unit"]}
         report["quality"] = validate_quality(report["quality"])
+        report["bm25_quality"] = report["quality"]
         return report
 
     def info(self):
@@ -522,7 +586,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             names = ("scripts/package-release", "scripts/report_contract.py", "LICENSE", "README.md",
-                     "Cargo.toml", "Cargo.lock", "build.rs", "AGENTS.md", ".gitattributes", "rust-toolchain.toml", "pg_charabia.control", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz",
+                     "Cargo.toml", "Cargo.lock", "build.rs", "AGENTS.md", ".gitattributes", ".cargo/config.toml", "rust-toolchain.toml", "pg_charabia.control", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz",
                      "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json", "tests/fixtures/quality-warnings-original.json")
             for name in names:
                 target = root / name
@@ -538,7 +602,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             nested = root / "docs/nested/source.md"
             nested.parent.mkdir(parents=True)
             nested.write_bytes(b"Tracked nested documentation.\n")
-            (root / ".gitignore").write_text("docs/research/\n**/.DS_Store\n**/__pycache__/\nscripts/local-only/\nevidence/\ndist/\n")
+            (root / ".gitignore").write_text("docs/research/\n**/.DS_Store\n**/__pycache__/\nscripts/local-only/\n.cargo/local-only/\nevidence/\ndist/\n")
             def git(*args):
                 return subprocess.check_output(["git", "-c", "user.name=Package contract test",
                     "-c", "user.email=package-test@example.invalid", "-c", "core.hooksPath=/dev/null",
@@ -547,7 +611,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             git("add", ".")
             git("commit", "--quiet", "-m", "Freeze package-copy fixture")
             commit = git("rev-parse", "HEAD")
-            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data"):
+            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data"):
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"Ignored local material must stay outside delivery.\n")
@@ -587,9 +651,11 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                 prefix = archive.name.removesuffix(".tar.gz") + "/"
                 members = {item.name.removeprefix(prefix) for item in source.getmembers()}
                 self.assertEqual(source.extractfile(prefix + "docs/nested/source.md").read(), nested.read_bytes())
-                for name in ("docs/research", "docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data"):
+                self.assertEqual(source.extractfile(prefix + ".cargo/config.toml").read(), (root / ".cargo/config.toml").read_bytes())
+                self.assertFalse(any(name.startswith(".cargo/local-only/") for name in members))
+                for name in ("docs/research", "docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data"):
                     self.assertNotIn(name, members)
-            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data"):
+            for name in ("docs/research/.DS_Store", "docs/.DS_Store", "scripts/local-only/data", ".cargo/local-only/data"):
                 self.assertEqual((root / name).read_bytes(), b"Ignored local material must stay outside delivery.\n")
 
     def test_checksums_cover_every_file_and_forbid_escape(self):

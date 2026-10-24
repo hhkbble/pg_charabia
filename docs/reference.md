@@ -233,7 +233,7 @@ Unknown or duplicate options, invalid syntax, and conflicting or out-of-range fr
 | Input | UTF8 database, valid UTF-8, no NUL, at most 262144 bytes per text or query input. |
 | BM25 | Validate the complete document and query before upstream slicing. The Parser cannot recover the original full length. Keep a document CHECK like the quick start. |
 | Raw token | At least 2047 bytes becomes display-only pieces of at most 2046 bytes, split on Unicode scalar boundaries. Default mappings do not index these pieces. A long structured token candidate follows this ordinary/display path instead of indexing a shortened full form. |
-| Structured token expansion | At most 32 units after camel splitting/whole-word recovery and before Stop processing or deduplication. Structural literals also count. At most 66 emitted terms and 16 KiB of final term bytes per structured token. Exceeding a budget fails with `54000`, without truncation. |
+| Structured token expansion | At most 32 units after camel splitting/whole-word recovery and before Stop processing or deduplication. Structural literals also count, except a literal identical to a complete form. At most 66 emitted terms and 16 KiB of final term bytes per structured token. Exceeding a budget fails with `54000`, without truncation. |
 | Final term | PostgreSQL stores a 2047-byte term and ignores a 2048-byte term. Diagnostic output does not prove indexability. |
 | Positions | Positions saturate at 16383. A stored vector keeps at most 255 positions per term. |
 | Headline | Each escaped entry is at most 65535 bytes. Output is at most 8 MiB per callback/string. Limit errors use `54000`. |
@@ -260,8 +260,8 @@ any custom settings against representative documents and queries.
 
 ### Known BM25 issues
 
-In v0.3.0, BM25 can return extra results for queries such as `running`, `aimées`,
-and `hördes`. Extra matches occur with custom and generic prepared plans.
+In v0.3.1, BM25 retains the extra results reported in v0.3.0 for queries such as
+`running`, `aimées`, and `hördes`. Extra matches occur with custom and generic prepared plans.
 The `running` difference also occurs after index updates, maintenance, and
 server restarts.
 

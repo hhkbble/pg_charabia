@@ -533,14 +533,18 @@ fn branch(
             LexizeOutcome::Filter(surface)
         }
     } else {
-        let stem = stemmer.filter(|_| stem_eligible(&key)).map(|stemmer| {
-            let stem = stemmer.stem(&key);
-            if options.normalize {
-                finalize(&stem, language)
-            } else {
-                stem.nfc().collect()
-            }
-        });
+        let stem = stemmer
+            .filter(|_| stem_eligible(&key))
+            .map(|stemmer| stemmer.stem(&key))
+            // An unchanged stem has the same finalized spelling as the surface.
+            .filter(|stem| stem.as_ref() != key)
+            .map(|stem| {
+                if options.normalize {
+                    finalize(&stem, language)
+                } else {
+                    stem.nfc().collect()
+                }
+            });
         let mut terms = Terms::new(surface);
         if let Some(stem) = stem {
             if let Some(terms) = &mut terms {
@@ -762,6 +766,35 @@ mod tests {
         assert_eq!(terms("run", Language::Eng, true), ["run"]);
         assert_eq!(terms("123", Language::Eng, true), ["123"]);
         assert_eq!(terms("foo_bar", Language::Eng, true), ["foo_bar"]);
+    }
+
+    #[test]
+    fn unchanged_stems_keep_one_surface_with_either_normalization_setting() {
+        let language = LanguageId::ENG;
+        for (fold, expected) in [(false, "café"), (true, "cafe")] {
+            for stem in [false, true] {
+                assert_eq!(
+                    normalize(
+                        "CAFÉ",
+                        language,
+                        &options(language, false, stem, fold, false, false)
+                    )
+                    .unwrap()
+                    .into_terms(),
+                    [expected]
+                );
+            }
+            assert_eq!(
+                normalize(
+                    "running",
+                    language,
+                    &options(language, false, true, fold, false, false)
+                )
+                .unwrap()
+                .into_terms(),
+                ["running", "run"]
+            );
+        }
     }
 
     #[test]
