@@ -98,9 +98,9 @@ BM25 matches a bag of terms. Native AND, phrase, and structured token component 
 
 Validate complete documents and queries against the 262144-byte input limit before BM25 slices them. Keep the document CHECK from the quick start. See [all limits and known quality issues](docs/reference.md#limits-and-known-quality-issues).
 
-Short-query and mixed-language errors remain possible. The `cats were running` phrase case remains unresolved. Structured token components can match scattered words or shared parts. Headline is a presentation step, not a retrieval filter. See [structured token semantics](docs/reference.md#structured-ascii-tokens) and [headline rules](docs/reference.md#headline).
+Short queries, mixed-language text, and phrase searches can miss expected matches. Structured token components can match scattered words or shared parts. Headline is a presentation step, not a retrieval filter. See [structured token semantics](docs/reference.md#structured-ascii-tokens) and [headline rules](docs/reference.md#headline).
 
-Release v0.3.0 temporarily accepts [47 exact BM25 quality warnings](docs/reference.md#reviewed-release-warnings), including extra matches, German `die` false matches, and a TopK ranking failure. Warnings remain quality failures and do not count as quality PASS. New differences, complete-candidate loss, and mechanism failures still block release.
+BM25 has known false matches and ranking errors in v0.3.0, including false matches for German `die`. Review the [known BM25 issues](docs/reference.md#known-bm25-issues) and test representative documents and queries before adoption.
 
 Changes to dictionaries, mappings, chains, or resources can invalidate indexed analysis. Stored vectors need recomputation. REINDEX alone reuses an ordinary stored vector. Follow [analysis changes and index maintenance](docs/operations.md#analysis-changes-and-index-maintenance) for the required action for each representation.
 

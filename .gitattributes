@@ -2,3 +2,7 @@
 resources/notices/ESDB-Copyright.txt whitespace=-blank-at-eol
 resources/notices/CC-BY-SA-4.0.txt whitespace=-blank-at-eof
 resources/english/attribution/kaikki-English.html whitespace=-blank-at-eol
+
+# Exclude Python test and maintenance scripts from language statistics.
+tests/**/*.py linguist-detectable=false
+scripts/**/*.py linguist-detectable=false

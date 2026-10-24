@@ -148,7 +148,7 @@ stay unchanged; returning to the old false result is now a regression. The phras
 case remains unresolved. A diagnostic control or new failure cannot expand the
 exemption set.
 
-The temporary v0.3.0 warning policy is separate from those frozen exceptions. Only the explicitly listed records in [report_contract.py](../scripts/report_contract.py) qualify. Every case ID, input, query, configuration, expected value, and actual value must match exactly. The SHA256-pinned [original failure report](../tests/fixtures/quality-warnings-original.json) remains unchanged and ships in the archive. See the [user warning boundary](reference.md#reviewed-release-warnings).
+The [reviewed release warning policy](#reviewed-release-warnings) defines the temporary v0.3.0 packaging exceptions separately from those frozen cases.
 
 Quality summaries include separate `passed`, `known-failure`, `warning`, and `regression` counts. Their `warnings` list and `warning_review` identity are retained in reports and the delivery manifest. Full acceptance requires every named reviewed case, not a matching total. The extracted-package verifier checks the original warning evidence and preserves the full acceptance summary.
 
@@ -169,6 +169,32 @@ and state, not the static data. Reference counters are not resident-memory
 measurements. Do not relax thresholds to obtain a pass. Worker-launch counts alone do not prove analysis ran in workers.
 
 Performance observations separate detection, ASCII scanning/validation, component expansion, preparation, FST cold/warm cost, filtering, dual terms, index build/size, writes, queries, and headline. Preserve raw samples and relevance labels. Scores and ranks are separate observations. Label emulated results and avoid unsupported SLA claims.
+
+### Reviewed release warnings
+
+Release v0.3.0 temporarily accepts 47 reviewed BM25 differences as `warning`.
+They cover extra candidates across prepared plans and index lifecycle stages,
+German `die` false matches, and the confirmed TopK ranking failure.
+These records remain quality failures and do not count as quality PASS.
+See the [Usage reference](reference.md#known-bm25-issues) for their effect on users.
+
+Only the cases explicitly named in [report_contract.py](../scripts/report_contract.py)
+qualify. Every case ID, input, query, configuration, expected result, and actual
+result must match the reviewed record exactly. Names, prefixes, and record
+counts cannot grant a warning. Any signature change needs review and blocks
+release under this policy.
+
+The complete [original failure report](../tests/fixtures/quality-warnings-original.json)
+is retained byte for byte from run `20261023T221121Z-73050-amd64-inner`.
+Its SHA256 is pinned by the report contract. The release archive includes that
+original report and the current warning records through its source,
+verification evidence, and delivery manifest.
+
+The warning policy does not expand the existing frozen phrase exception or
+change the reviewed `den` and `var` resolutions. The TopK warning does not
+disable complete-candidate checks, actual index execution, LIMIT checks, or
+headline assertions. All blocking conditions in
+[Test organization and expectations](#test-organization-and-expectations) still apply.
 
 ## Failure diagnosis and cleanup
 
@@ -208,6 +234,8 @@ This establishes the tested recovery paths, not a high-availability platform, lo
 ## Release acceptance and packaging
 
 Complete implementation, tests, and static documentation before freezing a clean source commit. Run default full Linux release acceptance, the local macOS development flow, and separate same-commit hooks checks. The actual current library must build/load in Linux AMD64 + PostgreSQL 18.
+
+Apply the [reviewed release warning policy](#reviewed-release-warnings) when assessing quality results for packaging.
 
 The packager requires the complete successful release report, clean tested/current checkouts, the same commit, lock/manifest, and actual loaded-library hash. Partial suites, missing recovery evidence, old report formats, hooks/debug builds, and existing output names are rejected. No public upload or deployment occurs.
 

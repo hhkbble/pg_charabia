@@ -242,26 +242,33 @@ For JSON headline, limits apply to each string, not the complete JSON value. The
 
 Short-query and mixed-language errors remain possible. Japanese and Korean
 segmentation does not extract base forms or guarantee inflection matching.
-The retained [quality cases](../tests/fixtures/quality-known.json) preserve the
-original inputs and failure records. The [report contract](../scripts/report_contract.py)
-records reviewed resolutions for `den` and `var` with English enabled. Their
-original records remain unchanged. Returning to the old false result is a regression.
-The short `cats were running` phrase remains unresolved. The reviewed resolutions
-do not add any failure exemption. English alternatives can
-also retain a foreign stopword such as German `die`, causing a false match.
+
+A phrase query for `cats were running` can miss an English document that contains
+that exact phrase. With stopword removal disabled, a BM25 search for the same
+words can still return extra results.
+
+English alternatives can retain a foreign stopword such as German `die`,
+causing a false match in both native FTS and BM25.
 Use an explicit `English=false` dictionary when that tradeoff is unsuitable.
 
-Explicit controls do not establish that defaults satisfy every domain case.
-Alternatives do not guarantee cross-form or phrase recall. They change BM25
-term frequencies, document lengths, scores, and potentially ranks. Performance
-and ranking reports keep these observations separate from index consistency.
+Language and dictionary settings do not guarantee matching across word forms or
+correct phrase results. English alternatives change BM25 term frequencies,
+document lengths, scores, and potentially ranks. Test the default analysis and
+any custom settings against representative documents and queries.
 
-### Reviewed release warnings
+<a id="reviewed-release-warnings"></a>
 
-Release v0.3.0 temporarily accepts 47 reviewed BM25 differences as `warning`. They cover extra candidates across prepared plans and index lifecycle stages, German `die` false matches, and the confirmed TopK ranking failure. These records remain quality failures and do not count as quality PASS.
+### Known BM25 issues
 
-The [report contract](../scripts/report_contract.py) explicitly names each eligible case. Its case ID, input, query, configuration, expected result, and actual result must match the reviewed record exactly. Names, prefixes, and record counts cannot grant a warning. Any signature change needs review and blocks release under this policy.
+In v0.3.0, BM25 can return extra results for queries such as `running`, `aimées`,
+and `hördes`. Extra matches occur with custom and generic prepared plans.
+The `running` difference also occurs after index updates, maintenance, and
+server restarts.
 
-The complete [original failure report](../tests/fixtures/quality-warnings-original.json) is retained byte for byte from run `20261023T221121Z-73050-amd64-inner`. Its SHA256 is pinned by the report contract. The release archive includes that original report and the current warning records through its source, verification evidence, and delivery manifest.
+BM25 also has a known ranking error. A query such as `全文 running` can rank an
+unexpected document first. Check result relevance and ordering before relying
+on the first few matches.
 
-The existing frozen phrase exception and reviewed `den`/`var` resolutions remain unchanged. New differences, complete-candidate loss, and mechanism failures still block release. The TopK warning does not disable complete-candidate checks, actual index execution, LIMIT checks, or headline assertions. See [Development](development.md#test-organization-and-expectations) for report and packaging rules.
+The release archive includes the original observations and verification
+evidence. See [Development](development.md#reviewed-release-warnings) for report
+and release acceptance rules.

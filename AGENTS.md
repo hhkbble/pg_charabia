@@ -20,6 +20,7 @@ Read versions and features from [Cargo.toml](Cargo.toml), [Cargo.lock](Cargo.loc
 ## Edit within scope
 
 - Keep one extension crate. Preserve public behavior and dependencies unless the task authorizes a change.
+- Keep README focused on first-time users: purpose, prerequisites, installation entry points, and runnable examples. Place implementation details in Architecture and contributor workflows in Development.
 - Keep each detailed topic in its assigned document. Link to its owner instead of copying parameter tables or procedures.
 - Preserve licenses, notices, raw evidence, existing packages, and user files. Keep one-use validation adapters outside tracked files.
 - For FFI changes, preserve RAII registration, the non-fallible pointer handoff, exact state types, END take, and unique reset destruction. Read [ownership and errors](docs/architecture.md#ownership-and-errors) before changing these boundaries.
