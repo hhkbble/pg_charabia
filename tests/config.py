@@ -77,7 +77,7 @@ def dictionary(session, name, options="Language='eng'"):
 
 
 def mapping(session, name, dictionary_name):
-    value(session, f'CREATE TEXT SEARCH CONFIGURATION {name}(PARSER=charabia.parser)')
+    value(session, f'CREATE TEXT SEARCH CONFIGURATION {name}(PARSER=charabia.linguistic_parser)')
     value(session, f'ALTER TEXT SEARCH CONFIGURATION {name} ADD MAPPING FOR eng WITH {dictionary_name}')
 
 
@@ -114,158 +114,129 @@ def explicit_option_matrix(session):
     value(session, 'DROP TABLE route16_options')
 
 
-def upgrade_noop():
-    """Exercise the native version transition with current SQL and the current library."""
-    temporary = Path(os.environ['PGCB_TEMP_DIR']).resolve()
+def fresh_baseline():
+    """Use the real staged 0.4.0 objects without an older-version SQL alias."""
     stage = Path(os.environ['PGCB_EXTENSION_STAGE']).resolve()
-    marker = temporary / '.pg-charabia-owner'
-    check(marker.is_file() and not marker.is_symlink() and marker.read_text() == EVIDENCE.name
-          and stage == temporary / 'stage/extension',
-          'upgrade fixture writes only inside the current owned staging directory')
-    source = stage / 'pg_charabia--0.3.1.sql'
-    upgrade = stage / 'pg_charabia--0.3.0--0.3.1.sql'
-    alias = stage / 'pg_charabia--0.3.0.sql'
+    check((stage / 'pg_charabia--0.4.0.sql').is_file()
+          and not list(stage.glob('pg_charabia--0.3*.sql')),
+          'fresh staging contains 0.4.0 installation SQL and no 0.3.x path')
     library = Path(os.environ['PGCB_LIBRARY_PATH'])
-    contents = source.read_bytes()
-    source_hash = hashlib.sha256(contents).hexdigest()
-    check(upgrade.is_file() and hashlib.sha256(library.read_bytes()).hexdigest() == os.environ['PGCB_LIBRARY_SHA256'],
-          'upgrade script and the identified current library are staged')
-    database = schema + '_upgrade'
-    evidence = report['upgrade'] = {
-        'database': database, 'source_sql': str(source), 'source_sql_sha256': source_hash,
-        'upgrade_sql': str(upgrade), 'upgrade_sql_sha256': hashlib.sha256(upgrade.read_bytes()).hexdigest(),
-        'library': str(library), 'library_sha256': os.environ['PGCB_LIBRARY_SHA256'],
-        'basis': 'The source installation DDL is byte-identical to v0.3.0. Current complete staged SQL is temporarily aliased as 0.3.0 to test the no-op catalog transition; this is not an old-library compatibility test.',
-    }
-    checkpoint()
-    alias_identity = None
+    check(hashlib.sha256(library.read_bytes()).hexdigest() == os.environ['PGCB_LIBRARY_SHA256'],
+          'fresh baseline uses the identified current library')
+    database = schema + '_fresh'
+    report['fresh_baseline'] = {'database': database, 'library': str(library),
+                                'library_sha256': os.environ['PGCB_LIBRARY_SHA256']}
     created = False
     try:
-        # Exclusive creation preserves any preexisting file. The source is the
-        # just-built (or extracted-package) SQL, never an earlier package.
-        with alias.open('xb') as handle:
-            stat = os.fstat(handle.fileno())
-            alias_identity = (stat.st_dev, stat.st_ino)
-            handle.write(contents)
-        evidence['alias_sql_sha256'] = hashlib.sha256(alias.read_bytes()).hexdigest()
-        check(evidence['alias_sql_sha256'] == source_hash, 'old-version fixture uses the exact current installation SQL')
         command(f'CREATE DATABASE {database} TEMPLATE template0')
         created = True
-        command("CREATE EXTENSION pg_charabia VERSION '0.3.0'", database)
-        with Session(database) as session:
-            check(value(session, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'") == '0.3.0',
-                  'native CREATE installs the old catalog version for the upgrade fixture')
-            check(scalar_json(session, 'SELECT charabia.analysis_info()')['extension'] == '0.3.1',
-                  'old catalog fixture already runs the current 0.3.1 library')
-            value(session, f'CREATE SCHEMA app AUTHORIZATION {owner}; SET ROLE {owner}')
-            value(session, """CREATE TEXT SEARCH DICTIONARY app.words(
-                TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,
-                Stem=false,Normalize=false,Filter=false,English=false);
-                CREATE TEXT SEARCH DICTIONARY app.units(
-                TEMPLATE=charabia.structured_template,Kind='numword',Discard=false,Stem=false,Normalize=false);
-                CREATE TEXT SEARCH CONFIGURATION app.search(COPY=public.charabia);
-                ALTER TEXT SEARCH CONFIGURATION app.search ALTER MAPPING FOR
-                eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und WITH app.words;
-                ALTER TEXT SEARCH CONFIGURATION app.search ALTER MAPPING FOR numword WITH app.units;
-                CREATE TABLE app.docs(id integer PRIMARY KEY,body text NOT NULL,vector tsvector NOT NULL);
-                INSERT INTO app.docs VALUES(1,'running',$vector$'running':1$vector$::tsvector),
-                    (2,'banana',$vector$'banana':1$vector$::tsvector);
-                CREATE INDEX upgrade_gin ON app.docs USING gin(to_tsvector('app.search',body));
-                RESET ROLE""")
-            check(direct(session, 'app.words', 'CAFÉ') == ['café']
-                  and direct(session, 'app.words', 'running') == ['running'],
-                  'upgrade fixture has independent non-default dictionary options')
-            snapshot = """SELECT jsonb_build_object(
-                'extension',(SELECT to_jsonb(e)-'extversion' FROM pg_extension e WHERE extname='pg_charabia'),
-                'members',(SELECT jsonb_agg(jsonb_build_array(classid::regclass::text,objid,objsubid) ORDER BY classid,objid,objsubid)
-                    FROM pg_depend WHERE refclassid='pg_extension'::regclass
-                    AND refobjid=(SELECT oid FROM pg_extension WHERE extname='pg_charabia') AND deptype='e'),
-                'namespaces',(SELECT jsonb_agg(to_jsonb(n) ORDER BY oid) FROM pg_namespace n WHERE nspname IN('charabia','app')),
-                'functions',(SELECT jsonb_agg(to_jsonb(p) ORDER BY oid) FROM pg_proc p WHERE pronamespace='charabia'::regnamespace),
-                'parsers',(SELECT jsonb_agg(to_jsonb(p) ORDER BY oid) FROM pg_ts_parser p WHERE prsnamespace='charabia'::regnamespace),
-                'templates',(SELECT jsonb_agg(to_jsonb(t) ORDER BY oid) FROM pg_ts_template t WHERE tmplnamespace='charabia'::regnamespace),
-                'dictionaries',(SELECT jsonb_agg(to_jsonb(d) ORDER BY oid) FROM pg_ts_dict d WHERE dictnamespace IN('charabia'::regnamespace,'app'::regnamespace)),
-                'configurations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY oid) FROM pg_ts_config c WHERE oid IN('public.charabia'::regconfig,'app.search'::regconfig)),
-                'mappings',(SELECT jsonb_agg(to_jsonb(m) ORDER BY mapcfg,maptokentype,mapseqno) FROM pg_ts_config_map m WHERE mapcfg IN('public.charabia'::regconfig,'app.search'::regconfig)),
-                'relations',(SELECT jsonb_agg(jsonb_build_object('oid',oid,'name',relname,'owner',relowner,'kind',relkind,'options',reloptions) ORDER BY oid)
-                    FROM pg_class WHERE relnamespace='app'::regnamespace),
-                'index_definition',pg_get_indexdef('app.upgrade_gin'::regclass),
-                'rows',(SELECT jsonb_agg(to_jsonb(d) ORDER BY id) FROM app.docs d))"""
-
-            def observe(label):
-                mappings = (Path(f'/proc/{session.pid}/maps').read_text()
-                            if os.environ['PGCB_PLATFORM'] == 'linux-amd64'
-                            else subprocess.check_output(['lsof', '-p', str(session.pid)], text=True))
-                (EVIDENCE / ('upgrade-' + label + '-backend-maps.txt')).write_text(mappings)
-                check(any(path in mappings for path in (str(library), str(library.resolve())))
-                      and hashlib.sha256(library.read_bytes()).hexdigest() == evidence['library_sha256'],
-                      'upgrade ' + label + ' backend maps the exact current library')
-                value(session, 'SET enable_seqscan=off')
-                query = "SELECT id FROM app.docs WHERE to_tsvector('app.search',body)@@'running'::tsquery"
-                plan = scalar_json(session, 'EXPLAIN(ANALYZE,FORMAT JSON,COSTS OFF,TIMING OFF) ' + query)
-                plan_nodes = [plan[0]['Plan']]
-                for node in plan_nodes:
-                    plan_nodes.extend(node.get('Plans', []))
-                check(any(node.get('Index Name') == 'upgrade_gin' and node.get('Node Type') == 'Bitmap Index Scan'
-                          and node.get('Actual Loops', 0) > 0 for node in plan_nodes),
-                      'upgrade ' + label + ' executes the preserved GIN index', plan)
-                check(scalar_json(session, "SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb) FROM(" + query + ')q') == [1],
-                      'upgrade ' + label + ' preserves the independently specified search result')
-                value(session, 'RESET enable_seqscan')
-                return scalar_json(session, snapshot)
-
-            evidence['backend_pid'] = session.pid
-            evidence['before'] = observe('before')
-            checkpoint()
-            value(session, "ALTER EXTENSION pg_charabia UPDATE TO '0.3.1'")
-            evidence['after'] = observe('after')
-            evidence['catalog_version'] = value(session, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'")
-            check(evidence['catalog_version'] == '0.3.1', 'native UPDATE advances the extension catalog to 0.3.1')
-            check(evidence['before'] == evidence['after'],
-                  'no-op upgrade preserves default and user OIDs, ownership, options, mappings, data and indexes')
+        with Session(database) as before_install:
+            host_default = value(before_install, 'SHOW default_text_search_config')
+        command('CREATE EXTENSION pg_charabia', database)
+        with Session(database) as s:
+            check(value(s, 'SHOW default_text_search_config') == host_default,
+                  'installation preserves the host default_text_search_config')
+            check(value(s, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'") == '0.4.0',
+                  'fresh CREATE EXTENSION installs 0.4.0')
+            check(value(s, "SELECT count(*) FROM pg_extension_update_paths('pg_charabia') "
+                           "WHERE source LIKE '0.3.%' OR target LIKE '0.3.%'") == '0',
+                  'fresh baseline exposes no old upgrade path')
+            check(scalar_json(s, """SELECT jsonb_build_object(
+                'parser_equal',(SELECT cfgparser FROM pg_ts_config WHERE oid='public.charabia'::regconfig)=
+                    (SELECT cfgparser FROM pg_ts_config WHERE oid='public.charabia_linguistic'::regconfig),
+                'mappings_equal',(SELECT jsonb_agg(jsonb_build_array(maptokentype,mapseqno,mapdict) ORDER BY maptokentype,mapseqno)
+                    FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=
+                    (SELECT jsonb_agg(jsonb_build_array(maptokentype,mapseqno,mapdict) ORDER BY maptokentype,mapseqno)
+                    FROM pg_ts_config_map WHERE mapcfg='public.charabia_linguistic'::regconfig),
+                'three_configs',(SELECT count(*)=3 FROM pg_ts_config WHERE cfgnamespace='public'::regnamespace
+                    AND cfgname IN('charabia','charabia_linguistic','charabia_structured')),
+                'no_old_parser',NOT EXISTS(SELECT 1 FROM pg_ts_parser WHERE prsnamespace='charabia'::regnamespace AND prsname='parser'))""") == {
+                    'parser_equal': True, 'mappings_equal': True, 'three_configs': True, 'no_old_parser': True},
+                  'default and linguistic start equal with distinct configuration OIDs and no old Parser')
+            value(s, 'BEGIN')
+            value(s, 'ALTER TEXT SEARCH CONFIGURATION public.charabia ALTER MAPPING FOR '
+                     'eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und WITH pg_catalog.simple')
+            check(value(s, "SELECT mapdict='charabia.eng'::regdictionary FROM pg_ts_config_map "
+                           "WHERE mapcfg='public.charabia_linguistic'::regconfig AND maptokentype=1") == 't',
+                  'default mapping edits do not synchronize the linguistic configuration')
+            check(value(s, "SELECT charabia.query_any('running')::text") == "'running'"
+                  and value(s, "SELECT charabia.query_any('running','public.charabia')::text") == "'running'"
+                  and value(s, "SELECT charabia.query_any('running','public.charabia_linguistic')::text") == "'running' | 'run'",
+                  'omitted query config executes actual default mappings rather than the named linguistic configuration')
+            check(scalar_json(s, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) FROM charabia.analyze('100ms')a")
+                  == scalar_json(s, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) FROM charabia.analyze('100ms','public.charabia')a"),
+                  'omitted analyze config equals explicit default Parser facts independently of mapping edits')
+            check(value(s, 'SHOW default_text_search_config') == host_default,
+                  'configuration mapping changes preserve the host default_text_search_config')
+            value(s, 'ROLLBACK')
+            value(s, "CREATE SCHEMA app; CREATE TEXT SEARCH CONFIGURATION app.ling(COPY=public.charabia_linguistic);"
+                     "CREATE TEXT SEARCH CONFIGURATION app.structured(COPY=public.charabia_structured);")
+            dictionary(s, 'app.shared', "Language='eng',Discard=false,Stem=true,Normalize=true,Filter=false,English=false")
+            for config in ('app.ling', 'app.structured'):
+                value(s, f"ALTER TEXT SEARCH CONFIGURATION {config} ALTER MAPPING FOR "
+                         "eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und WITH app.shared")
+            def run_matches():
+                return scalar_json(s, "SELECT jsonb_agg(to_tsvector(config::regconfig,'running') @@ 'run'::tsquery ORDER BY config) "
+                                      "FROM unnest(ARRAY['app.ling','app.structured'])config")
+            check(run_matches() == [True, True], 'both mode mappings execute the same shared stemming Dictionary')
+            value(s, 'ALTER TEXT SEARCH DICTIONARY app.shared(Stem=false)')
+            check(run_matches() == [False, False], 'shared ALTER changes real terms in both modes')
+            value(s, 'ALTER TEXT SEARCH DICTIONARY app.shared(Stem=true)')
+            value(s, 'ALTER TEXT SEARCH CONFIGURATION app.ling RENAME TO renamed; CREATE SCHEMA moved;'
+                     'ALTER TEXT SEARCH CONFIGURATION app.renamed SET SCHEMA moved')
+            check(scalar_json(s, "SELECT jsonb_agg(raw ORDER BY byte_start) FROM charabia.analyze('100ms','moved.renamed')") == ['100ms'],
+                  'COPY and configuration rename/schema move retain linguistic diagnostic mode')
+            for mode in ('linguistic', 'structured'):
+                config = 'moved.renamed' if mode == 'linguistic' else 'app.structured'
+                before = scalar_json(s, f"SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) FROM charabia.analyze('100ms','{config}')a")
+                value(s, 'BEGIN')
+                value(s, f'ALTER TEXT SEARCH PARSER charabia.{mode}_parser RENAME TO renamed_parser;'
+                         'ALTER TEXT SEARCH PARSER charabia.renamed_parser SET SCHEMA app;'
+                         f'ALTER FUNCTION charabia.{mode}_parser_start(internal,integer) RENAME TO renamed_start;'
+                         'ALTER FUNCTION charabia.renamed_start(internal,integer) SET SCHEMA app')
+                after = scalar_json(s, f"SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) FROM charabia.analyze('100ms','{config}')a")
+                check(after == before, mode + ' diagnostics retain mode through Parser and START rename/schema move')
+                value(s, 'ROLLBACK')
+            value(s, "CREATE TEXT SEARCH PARSER app.same_callbacks("
+                     "START=charabia.linguistic_parser_start,GETTOKEN=charabia.parser_gettoken,"
+                     "END=charabia.parser_end,LEXTYPES=charabia.linguistic_parser_lextypes,HEADLINE=charabia.parser_headline);"
+                     "CREATE TEXT SEARCH CONFIGURATION app.external(PARSER=app.same_callbacks);"
+                     "ALTER TEXT SEARCH CONFIGURATION app.external ADD MAPPING FOR "
+                     "eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und WITH pg_catalog.simple")
+            check(value(s, "SELECT charabia.query_any('100ms','app.external')::text") == "'100ms'",
+                  'external Parser can execute the exact same native callbacks')
+            error(s, "SELECT * FROM charabia.analyze('100ms','app.external')",
+                  'diagnostic rejects non-member Parser even when every callback is shared', '0A000')
+            error(s, "SELECT * FROM charabia.analyze('alpha','pg_catalog.simple')",
+                  'diagnostic rejects an external Parser', '0A000')
+            check(value(s, "SELECT charabia.query_any('alpha beta','pg_catalog.simple')::text") == "'alpha' | 'beta'",
+                  'query_any retains support for arbitrary native configurations')
     finally:
-        primary = sys.exception()
-        cleanup = []
         if created:
-            try:
-                command(f'DROP DATABASE {database}')
-                created = False
-            except BaseException as exc:
-                cleanup.append(repr(exc))
-        if alias_identity is not None:
-            try:
-                stat = alias.lstat()
-                if alias.is_symlink() or (stat.st_dev, stat.st_ino) != alias_identity or hashlib.sha256(alias.read_bytes()).hexdigest() != source_hash:
-                    raise AssertionError('Upgrade alias ownership or contents changed; retained ' + str(alias))
-                alias.unlink()
-            except BaseException as exc:
-                cleanup.append(repr(exc))
-        evidence['cleanup'] = {'database_removed': not created, 'alias_removed': alias_identity is not None and not alias.exists(), 'errors': cleanup}
-        checkpoint()
-        if cleanup:
-            if primary is None:
-                raise AssertionError(cleanup)
-            primary.add_note('upgrade fixture cleanup failed: ' + repr(cleanup))
+            command(f'DROP DATABASE {database}')
+
 
 
 try:
     command(f'CREATE ROLE {owner}; CREATE ROLE {other}; CREATE SCHEMA {schema} AUTHORIZATION {owner}; '
             f'CREATE SCHEMA {moved} AUTHORIZATION {owner}; GRANT USAGE ON SCHEMA {schema},{moved} TO {other}')
-    upgrade_noop()
+    fresh_baseline()
     # Failed installation must not overwrite a public object or adopt an unsafe namespace.
     command(f'CREATE DATABASE {conflict} TEMPLATE template0')
-    command('CREATE TEXT SEARCH CONFIGURATION public.charabia(COPY=pg_catalog.simple)', conflict)
     with Session(conflict) as s:
-        before = value(s, "SELECT 'public.charabia'::regconfig::oid")
-        # PG18 DefineTSConfiguration reaches CatalogTupleInsert; its native
-        # pg_ts_config_cfgname_index uniqueness check raises 23505 (preserved
-        # first failure: artifacts/20261021T192358Z-88998/suite-config-python.log).
-        error(s, 'CREATE EXTENSION pg_charabia', 'public default conflict fails atomically', '23505')
-        check(value(s, "SELECT 'public.charabia'::regconfig::oid") == before,
-              'failed installation preserves the preexisting public configuration')
-        check(value(s, "SELECT count(*) FROM pg_extension WHERE extname='pg_charabia'") == '0',
-              'failed conflict installation leaves no extension membership')
-        value(s, 'DROP TEXT SEARCH CONFIGURATION public.charabia')
+        for config_name in ('charabia', 'charabia_linguistic', 'charabia_structured'):
+            value(s, f'CREATE TEXT SEARCH CONFIGURATION public.{config_name}(COPY=pg_catalog.simple)')
+            before = value(s, f"SELECT 'public.{config_name}'::regconfig::oid")
+            # PG18 native catalog uniqueness raises 23505; installation must roll back.
+            error(s, 'CREATE EXTENSION pg_charabia', config_name + ' conflict fails atomically', '23505')
+            check(value(s, f"SELECT 'public.{config_name}'::regconfig::oid") == before,
+                  config_name + ' failed installation preserves the user object')
+            check(value(s, "SELECT count(*) FROM pg_extension WHERE extname='pg_charabia'") == '0',
+                  config_name + ' failed installation leaves no extension membership')
+            check(value(s, "SELECT count(*) FROM pg_ts_config WHERE cfgnamespace='public'::regnamespace "
+                           "AND cfgname IN('charabia','charabia_linguistic','charabia_structured')") == '1',
+                  config_name + ' failure leaves no partially installed configurations')
+            value(s, f'DROP TEXT SEARCH CONFIGURATION public.{config_name}')
         value(s, 'CREATE SCHEMA IF NOT EXISTS charabia')
         value(s, 'GRANT CREATE ON SCHEMA charabia TO PUBLIC')
         error(s, 'CREATE EXTENSION pg_charabia', 'unsafe CREATE grant blocks schema adoption', '42501')
@@ -419,7 +390,7 @@ try:
 
         # A partial configuration and external Dictionary are ordinary valid PG objects.
         partial = schema + '.partial'
-        value(s, f'CREATE TEXT SEARCH CONFIGURATION {partial}(PARSER=charabia.parser)')
+        value(s, f'CREATE TEXT SEARCH CONFIGURATION {partial}(PARSER=charabia.linguistic_parser)')
         value(s, f'ALTER TEXT SEARCH CONFIGURATION {partial} ADD MAPPING FOR eng WITH pg_catalog.simple')
         check(value(s, f"SELECT plainto_tsquery('{partial}','The children were running through the garden while their teachers were reading books.')::text") != '',
               'partial external mapping is accepted by native query analysis')
@@ -452,7 +423,7 @@ try:
         error(s, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=false)', 'foreign owner cannot alter dictionary', '42501')
         error(s, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=false,Stem=false)',
               'foreign owner cannot alter English parameters', '42501')
-        error(s, f'CREATE TEXT SEARCH CONFIGURATION {schema}.forbidden(PARSER=charabia.parser)',
+        error(s, f'CREATE TEXT SEARCH CONFIGURATION {schema}.forbidden(PARSER=charabia.linguistic_parser)',
               'target schema CREATE permission is enforced', '42501')
         error(s, 'CREATE FUNCTION charabia.untrusted()RETURNS int LANGUAGE sql AS $$SELECT 1$$',
               'internal schema denies untrusted CREATE', '42501')
@@ -490,6 +461,43 @@ try:
         value(writer, f'ALTER TEXT SEARCH DICTIONARY {schema}.vie(English=true,Stem=true)')
         check(direct(reader, schema + '.vie', 'running') == ['running','run'],
               'second English commit rebuilds the reader using shared resources')
+        routes = 'eng,deu,nld,rus,spa,fra,por,ita,ara,tur,cmn,jpn,kor,vie,tha,und'
+        dictionary(writer, schema + '.cache_literal',
+                   "Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false,English=false")
+        for mode in ('linguistic', 'structured'):
+            cached_config = schema + '.cache_' + mode
+            value(writer, f'CREATE TEXT SEARCH CONFIGURATION {cached_config}(COPY=public.charabia_{mode});'
+                          f'ALTER TEXT SEARCH CONFIGURATION {cached_config} ALTER MAPPING FOR {routes} WITH {renamed}')
+            value(reader, f"PREPARE cached_{mode}(text) AS SELECT to_tsvector('{cached_config}',$1) @@ 'run'::tsquery")
+            value(reader, f"PREPARE mapped_{mode}(text) AS SELECT charabia.query_any($1,'{cached_config}')::text")
+        def cached_matches(session, prepared=False):
+            return [value(session, f"EXECUTE cached_{mode}('running')" if prepared else
+                          f"SELECT to_tsvector('{schema}.cache_{mode}','running') @@ 'run'::tsquery")
+                    for mode in ('linguistic', 'structured')]
+        check(cached_matches(reader, True) == ['t', 't'],
+              'parameterized plans warm both mode mappings and the shared Dictionary')
+        value(writer, 'BEGIN')
+        value(writer, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=false)')
+        check(cached_matches(writer) == ['f', 'f'] and cached_matches(reader, True) == ['t', 't'],
+              'uncommitted shared parameters stay local across both mode plans')
+        value(writer, 'ROLLBACK')
+        check(cached_matches(reader, True) == ['t', 't'], 'rollback preserves both warm parameterized mode plans')
+        value(writer, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=false)')
+        check(cached_matches(reader, True) == ['f', 'f'],
+              'committed shared ALTER invalidates both parameterized mode plans')
+        value(writer, f'ALTER TEXT SEARCH DICTIONARY {renamed}(Stem=true)')
+        check(cached_matches(reader, True) == ['t', 't'], 'restored shared parameters rebuild both mode plans')
+        value(writer, f'ALTER TEXT SEARCH CONFIGURATION {schema}.cache_linguistic ALTER MAPPING FOR {routes} WITH {schema}.cache_literal')
+        check(value(reader, "EXECUTE mapped_linguistic('running')") == "'running'"
+              and value(reader, "EXECUTE mapped_structured('running')") == "'running' | 'run'",
+              'committed mapping invalidation changes one actual plan without synchronizing the other mode')
+        for mode in ('linguistic', 'structured'):
+            value(reader, f'DEALLOCATE cached_{mode}; DEALLOCATE mapped_{mode}')
+        # These ordinary fixtures are covered by their own isolated assertions;
+        # leave the retained baseline dump/restore fixture's object set unchanged.
+        value(writer, f'DROP TEXT SEARCH CONFIGURATION {schema}.cache_linguistic;'
+                      f'DROP TEXT SEARCH CONFIGURATION {schema}.cache_structured;'
+                      f'DROP TEXT SEARCH DICTIONARY {schema}.cache_literal')
         report['cache_backends'] = {'reader': reader.pid, 'writer': writer.pid}
         checkpoint()
 

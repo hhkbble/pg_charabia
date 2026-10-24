@@ -1,6 +1,6 @@
 [package]
 name = "pg_charabia"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.97.1"
 description = "Charabia multilingual analysis for PostgreSQL text search"

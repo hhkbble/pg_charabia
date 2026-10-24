@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real BM25 plans/candidates; independent domain quality remains separate."""
+import hashlib
 import html
 import json
 import os
@@ -7,7 +8,8 @@ from pathlib import Path
 import subprocess
 import time
 from support import Session, literal, native_config_sql, record_quality_cases
-from report_contract import FORMAT, quality_case, validate_quality, verified_status
+from report_contract import (ANALYSIS_REVISION, DEFAULT_CONFIGS, FORMAT, MODES, quality_case,
+                             require_bm25_case_coverage, validate_quality, verified_status)
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = json.loads((ROOT / "tests/fixtures/bm25/corpus.json").read_text())
@@ -39,13 +41,17 @@ def index_nodes(plan, index):
     return [node for node in nodes(plan) if node.get("Node Type") == "Index Scan" and node.get("Index Name") == index]
 
 
-class Suite:
-    def __init__(self):
+class ModeSuite:
+    def __init__(self, mode):
+        self.mode = mode
+        self.config = DEFAULT_CONFIGS[mode]
+        self.parser = "charabia." + mode + "_parser"
         self.evidence = Path(os.environ["PGCB_RUN_DIR"])
         self.temp = Path(os.environ["PGCB_TEMP_DIR"])
         self.bindir = Path(subprocess.check_output([os.environ["PG_CONFIG"], "--bindir"], text=True).strip())
         self.psql = [str(self.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1"]
-        self.result = {"status": "running", "fixture_basis": FIXTURE["basis"], "stages": [], "commands": [],
+        self.result = {"format": FORMAT, "mode": mode, "config": self.config,
+                       "analysis_revision": ANALYSIS_REVISION, "status": "running", "fixture_basis": FIXTURE["basis"], "stages": [], "commands": [],
                        "assertions": 0, "domain_quality": [], "scores": [], "configuration_states": []}
         self.sequence = 0
         self.deleted = set()
@@ -53,9 +59,9 @@ class Suite:
         self.pending_quality = []
 
     def checkpoint(self):
-        temporary = self.evidence / "bm25-results.json.tmp"
+        temporary = self.evidence / f"bm25-{self.mode}-results.json.tmp"
         temporary.write_text(json.dumps(self.result, ensure_ascii=False, indent=2) + "\n")
-        temporary.replace(self.evidence / "bm25-results.json")
+        temporary.replace(self.evidence / f"bm25-{self.mode}-results.json")
 
     def require(self, condition, message):
         self.checkpoint()
@@ -66,22 +72,22 @@ class Suite:
     def queue_quality(self, case_id, **fields):
         # Preserve every domain assertion, but collect independent mechanism
         # evidence before the shared contract rejects any unreviewed result.
+        fields.update(mode=self.mode, analysis_revision=ANALYSIS_REVISION)
         if any(item["id"] == case_id for item in self.pending_quality):
             raise AssertionError("Duplicate pending domain assertion: " + case_id)
         self.pending_quality.append(dict(id=case_id, **fields))
-        status = quality_case(case_id, **fields)["status"]
+        case = quality_case(case_id, **fields)
+        self.result["domain_quality"].append(case)
+        status = case["status"]
         self.result.setdefault("deferred_domain_assertions", []).append(dict(
-            id=case_id, expected=fields["expected"], actual=fields["actual"], status=status))
+            id=case_id, mode=self.mode, config=fields["config"], analysis_revision=ANALYSIS_REVISION,
+            expected=fields["expected"], actual=fields["actual"], status=status))
         self.result["pending_quality"] = self.pending_quality
-        self.checkpoint()
-
-    def flush_quality(self):
-        self.result["domain_quality"] = record_quality_cases(self.pending_quality)
         self.checkpoint()
 
     def run(self, sql, label):
         self.sequence += 1
-        stem = f"bm25-{self.sequence:03d}-{label}"
+        stem = f"bm25-{self.mode}-{self.sequence:03d}-{label}"
         (self.evidence / (stem + ".sql")).write_text(sql)
         started = time.monotonic()
         try:
@@ -106,7 +112,7 @@ class Suite:
 
     def session_value(self, session, sql, label):
         self.sequence += 1
-        stem = f"bm25-{self.sequence:03d}-{label}"
+        stem = f"bm25-{self.mode}-{self.sequence:03d}-{label}"
         (self.evidence / (stem + ".sql")).write_text(sql)
         try:
             output = session.query(sql)
@@ -120,14 +126,71 @@ class Suite:
             raise AssertionError(label + ": " + output)
         return json.loads(output)
 
+    def analysis_context(self):
+        """Retain the full scoring corpus and ASTs independently of ID assertions."""
+        query_rows = [(item["name"], item["text"]) for item in FIXTURE["queries"]]
+        known = json.loads((ROOT / "tests/fixtures/quality-known.json").read_text())["cases"]
+        query_rows.extend((name, item["query"]) for name, item in known.items())
+        die = json.loads((ROOT / "tests/fixtures/bm25/route16-quality.json").read_text())["die"]
+        query_rows.append(("german-die-precision", die["query"]))
+        query_rows.append(("bm25-topk-domain", "全文 running"))
+        values = ",".join("(" + literal(name) + "," + literal(query) + ")" for name, query in query_rows)
+        cfg = literal(self.config)
+        documents, queries, options = self.run(
+            "SELECT jsonb_agg(jsonb_build_object('id',d.id,'body',d.body,"
+            f"'analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze(d.body,{cfg})a),"
+            f"'vector',to_tsvector({cfg},d.body)::text,"
+            f"'tf',(SELECT jsonb_object_agg(lexeme,cardinality(positions))FROM unnest(to_tsvector({cfg},d.body))),"
+            f"'dl',(SELECT coalesce(sum(cardinality(positions)),0)FROM unnest(to_tsvector({cfg},d.body))))ORDER BY d.id)"
+            "FROM bm25_test.docs d;"
+            "SELECT jsonb_agg(jsonb_build_object('name',q.name,'input',q.raw,"
+            f"'analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze(q.raw,{cfg})a),"
+            f"'vector',to_tsvector({cfg},q.raw)::text,"
+            f"'plain',plainto_tsquery({cfg},q.raw)::text,'phrase',phraseto_tsquery({cfg},q.raw)::text,"
+            f"'any',charabia.query_any(q.raw,{cfg})::text)ORDER BY q.name)FROM(VALUES {values})q(name,raw);"
+            "SELECT to_jsonb(reloptions)FROM pg_class WHERE oid='bm25_test.docs_bm25'::regclass;",
+            "full-corpus-analysis-context")
+        self.result["analysis_context"] = dict(mode=self.mode, config=self.config,
+            documents=documents, queries=queries, index_options=options,
+            basis="All 17 semantic documents and 81 background rows; Parser facts, ASTs, vectors and TF/dl are observations, not domain expected results or decoded BM25 fieldnorms.")
+        self.require([[row["id"], row["body"]] for row in documents] ==
+                     FIXTURE["documents"] + [[number, "cobaltxylophone"] for number in range(100, 181)],
+                     "full scoring corpus differs from the unchanged semantic fixture and background recipe")
+
+    def historical_comparisons(self):
+        """Compare exact historical fields without granting failure exemptions."""
+        sources = {}
+        for name in ("quality-known.json", "quality-warnings-original.json"):
+            path = ROOT / "tests/fixtures" / name
+            payload = path.read_bytes()
+            rows = json.loads(payload)["cases"]
+            records = rows.items() if isinstance(rows, dict) else ((row["id"], row) for row in rows)
+            for case_id, row in records:
+                sources.setdefault(case_id, (str(path.relative_to(ROOT)), hashlib.sha256(payload).hexdigest(), row))
+        comparisons = []
+        for case in self.result["domain_quality"]:
+            if case["id"] not in sources:
+                continue
+            path, digest, original = sources[case["id"]]
+            fields = {field: case[field] == original[field] for field in ("input", "query", "expected", "actual")}
+            comparisons.append(dict(id=case["id"], mode=self.mode, config=case["config"],
+                source=path, source_sha256=digest, original=original, comparisons=fields,
+                observed_signature=case.get("observed_signature"),
+                same_config=case["config"] == original["config"],
+                identical_domain_fields=all(fields.values()),
+                same_failure=all(fields.values()) and case["expected"] != case["actual"],
+                decision="Comparison evidence only; source/path equivalence and each mode's exception require independent review."))
+        self.result["historical_comparisons"] = comparisons
+        self.checkpoint()
+
     def populate(self):
         rows = ",".join(f"({number},{literal(body)})" for number, body in FIXTURE["documents"])
-        self.run(native_config_sql("bm25_test.no_stop", stem=True, discard=False) +
-                 native_config_sql("bm25_test.no_stem", stem=False, discard=False) +
+        self.run(native_config_sql("bm25_test.no_stop", stem=True, discard=False, mode=self.mode) +
+                 native_config_sql("bm25_test.no_stem", stem=False, discard=False, mode=self.mode) +
                  f"INSERT INTO bm25_test.docs VALUES {rows};\n"
                  "INSERT INTO bm25_test.docs SELECT g,'cobaltxylophone' FROM generate_series(100,180)g;\n"
                  "INSERT INTO bm25_test.no_stop_docs SELECT * FROM bm25_test.docs;\n"
-                 "CREATE INDEX docs_bm25 ON bm25_test.docs USING bm25(body)WITH(text_config='public.charabia');\n"
+                 f"CREATE INDEX docs_bm25 ON bm25_test.docs USING bm25(body)WITH(text_config='{self.config}');\n"
                  "CREATE INDEX no_stop_bm25 ON bm25_test.no_stop_docs USING bm25(body)WITH(text_config='bm25_test.no_stop');\n"
                  "CREATE INDEX ranking_bm25 ON bm25_test.ranking_docs USING bm25(body)WITH(text_config='bm25_test.no_stem');\n"
                  "ANALYZE bm25_test.docs; ANALYZE bm25_test.no_stop_docs;", "bulk-build")
@@ -136,7 +199,7 @@ class Suite:
         for item in FIXTURE["queries"]:
             if not full and item["name"] not in ("chinese", "english_case", "surface_running", "unknown"):
                 continue
-            case = dict(item, table="docs", index="docs_bm25", config="public.charabia")
+            case = dict(item, table="docs", index="docs_bm25", config=self.config)
             if "expected_ids" in item:
                 expected = set(item["expected_ids"]) - self.deleted
                 if item["name"] in ("chinese", "english_case", "surface_running"):
@@ -145,13 +208,13 @@ class Suite:
             yield case
         if full:
             yield dict(name="expression-boundary", text="PostgreSQL", table="expression_docs", index="expression_bm25",
-                config="public.charabia", expression="(title||' '||body)", expected_ids=[1])
+                config=self.config, expression="(title||' '||body)", expected_ids=[1])
             yield dict(name="array-boundary", text="PostgreSQL", table="array_docs", index="array_bm25",
-                config="public.charabia", expression="parts", native_expression="array_to_string(parts,' ')", expected_ids=[1])
+                config=self.config, expression="parts", native_expression="array_to_string(parts,' ')", expected_ids=[1])
             yield dict(name="frequency-cap", text="echo", table="frequency_docs", index="frequency_bm25",
-                config="public.charabia", expected_ids=[1])
+                config=self.config, expected_ids=[1])
             yield dict(name="position-cap", text="tailword", table="frequency_docs", index="frequency_bm25",
-                config="public.charabia", expected_ids=[2])
+                config=self.config, expected_ids=[2])
             yield dict(name="frequency-ranking", text="rankcanary", table="ranking_docs", index="ranking_bm25",
                 config="bm25_test.no_stem", expected_ids=[1,2], expected_order=[2,1])
 
@@ -184,7 +247,7 @@ class Suite:
                     default, plan, scored, oracle = values[number*4:number*4+4]
                     actual = [value["id"] for value in scored]
                     label = f"{phase}/{cache}/{mode}/{case['name']}"
-                    record = dict(case, cache=cache, mode=mode, default_plan=default, plan=plan, scored=scored, **oracle)
+                    record = dict(case, cache=cache, mode=self.mode, plan_mode=mode, analysis_revision=ANALYSIS_REVISION, default_plan=default, plan=plan, scored=scored, **oracle)
                     stage["queries"].append(record)
                     self.require(len(oracle["all_ids"]) < LIMIT, label + ": LIMIT truncates oracle")
                     target = index_nodes(plan, case["index"])
@@ -218,15 +281,15 @@ class Suite:
                             input=FIXTURE["documents"] if case["table"] == "docs" else case["table"],
                             query=case["text"], config=case["config"], expected=case["expected_ids"], actual=sorted(actual))
                     if oracle["query_lexemes"]:
-                        self.result["scores"].append({"phase":phase,"case":case["name"],"cache":cache,"mode":mode,
+                        self.result["scores"].append({"phase":phase,"case":case["name"],"cache":cache,"mode":self.mode,"config":case["config"],"plan_mode":mode,
                             "score_and_rank":scored,"note":"Observed scores/ranks; no floating-point golden or score-neutrality claim"})
                 counts = values[-1]
                 expected_key = "generic_plans" if mode == "force_generic_plan" else "custom_plans"
                 other_key = "custom_plans" if mode == "force_generic_plan" else "generic_plans"
                 self.require(all(v[expected_key]>0 and v[other_key]==0 for v in counts), "prepared mode was not actually exercised")
-                stage["prepared_counts"].append(dict(cache=cache,mode=mode,counts=counts))
+                stage["prepared_counts"].append(dict(cache=cache,mode=self.mode,plan_mode=mode,counts=counts))
                 self.checkpoint()
-        print(f"BM25 {phase}: actual plans/candidates checked", flush=True)
+        print(f"BM25 {self.mode}/{phase}: actual plans/candidates checked", flush=True)
 
     def known_quality(self):
         frozen = json.loads((ROOT / "tests/fixtures/quality-known.json").read_text())["cases"]
@@ -234,37 +297,42 @@ class Suite:
         for case_id, case in frozen.items():
             q, body = literal(case["query"]), literal(case["input"])
             phrase = case_id == "english-short-phrase"
-            query_expression = f"phraseto_tsquery('public.charabia',{q})" if phrase else f"charabia.query_any({q})"
+            query_expression = f"phraseto_tsquery('{self.config}',{q})" if phrase else f"charabia.query_any({q},'{self.config}')"
             observation = self.run(
-                f"SELECT jsonb_build_object('query_analysis',(SELECT jsonb_agg(to_jsonb(a)) FROM charabia.analyze({q})a),"
-                f"'document_analysis',(SELECT jsonb_agg(to_jsonb(a)) FROM charabia.analyze({body})a),"
-                f"'document_vector',to_tsvector('public.charabia',{body})::text,"
-                f"'document_lexemes',tsvector_to_array(to_tsvector('public.charabia',{body})),"
-                f"'query_lexemes',tsvector_to_array(to_tsvector('public.charabia',{q})),"
+                f"SELECT jsonb_build_object('query_analysis',(SELECT jsonb_agg(to_jsonb(a)) FROM charabia.analyze({q},'{self.config}')a),"
+                f"'document_analysis',(SELECT jsonb_agg(to_jsonb(a)) FROM charabia.analyze({body},'{self.config}')a),"
+                f"'document_vector',to_tsvector('{self.config}',{body})::text,"
+                f"'document_lexemes',tsvector_to_array(to_tsvector('{self.config}',{body})),"
+                f"'query_lexemes',tsvector_to_array(to_tsvector('{self.config}',{q})),"
                 f"'dictionary_decisions',(SELECT jsonb_agg(jsonb_build_object('raw',a.raw,'language',a.language,"
-                f"'lexemes',ts_lexize(('charabia.'||a.language)::regdictionary,a.raw)))FROM charabia.analyze({q})a WHERE a.kind='word'),"
+                f"'lexemes',ts_lexize(('charabia.'||a.language)::regdictionary,a.raw)))FROM charabia.analyze({q},'{self.config}')a WHERE a.kind='word'),"
                 f"'query',{query_expression}::text,"
-                f"'actual',to_tsvector('public.charabia',{body}) @@ {query_expression});", "known-" + case_id)[0]
-            self.result["known_quality"].append(dict(id=case_id, frozen=case, observation=observation,
+                f"'actual',to_tsvector('{self.config}',{body}) @@ {query_expression});", "known-" + case_id)[0]
+            self.result["known_quality"].append(dict(id=case_id, mode=self.mode, config=self.config, frozen=case, observation=observation,
                 note="Original domain expectation and failure signature retained; current analysis is reviewed separately"))
             # A new candidate set must not pretend dan/swe/nob are reachable.
             # Actual selected languages and dictionary results above are evidence,
-            # not expected values. Only the exact frozen signature is exempt.
+            # not expected values. A failure requires an exact per-mode review.
             analysis = [a for a in observation["query_analysis"] or [] if a["kind"] == "word"]
             self.require(bool(analysis), case_id + ": query no longer has a real Word token")
             if observation["query_lexemes"]:
                 observation["default_bag_ids"] = self.check_query(
-                    "public.charabia", "docs", "docs_bm25", case["query"], None, "current-default-bag-" + case_id)
+                    self.config, "docs", "docs_bm25", case["query"], None, "current-default-bag-" + case_id)
             else:
                 guarded = ("SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM(SELECT id FROM bm25_test.docs "
-                    f"WHERE numnode(charabia.query_any({q}))>0 ORDER BY body <@> to_bm25query({q},'bm25_test.docs_bm25') LIMIT 100)r")
+                    f"WHERE numnode(charabia.query_any({q},'{self.config}'))>0 ORDER BY body <@> to_bm25query({q},'bm25_test.docs_bm25') LIMIT 100)r")
                 guarded_ids = self.run(guarded, "known-guarded-bag-" + case_id)[0]
                 observation["explicit_empty_guard_bm25_ids"] = guarded_ids
                 self.require(guarded_ids == [], case_id + ": empty-query guard did not suppress fallback rows")
             if phrase:
-                same_context = self.run(f"SELECT to_jsonb(to_tsvector('public.charabia',{body}) @@ phraseto_tsquery('public.charabia',{body}));", "same-context-phrase")[0]
+                same_context = self.run(f"SELECT to_jsonb(to_tsvector('{self.config}',{body}) @@ phraseto_tsquery('{self.config}',{body}));", "same-context-phrase")[0]
                 self.require(same_context is True, "same-context positions/variants failed independently of short-query selection")
-            self.queue_quality(case_id, **dict(case, actual=observation["actual"]), known_signature=dict(case))
+            signature = ({"query_ast": observation["query"], "document_vector": observation["document_vector"]}
+                         if phrase else None)
+            fields = dict(case, config=self.config, actual=observation["actual"])
+            if signature is not None:
+                fields["observed_signature"] = signature
+            self.queue_quality(case_id, **fields, known_signature=dict(case))
             config, table, index = "bm25_test.no_stop", "no_stop_docs", "no_stop_bm25"
             cfg = literal(config)
             restored = self.run(f"SELECT to_jsonb(to_tsvector({cfg},{body}) @@ " +
@@ -293,7 +361,7 @@ class Suite:
             f"WHERE tsvector_to_array(to_tsvector({literal(config)},body)) && "
             f"tsvector_to_array(to_tsvector({literal(config)},{literal(query)}));", label)
         ids = sorted(row["id"] for row in rows)
-        record = dict(label=label,config=config,index=index,query=query,plan=plan,rows=rows,oracle=oracle,expected=expected)
+        record = dict(label=label,mode=self.mode,config=config,index=index,query=query,plan=plan,rows=rows,oracle=oracle,expected=expected)
         self.result.setdefault("focused_queries",[]).append(record)
         target = index_nodes(plan,index)
         self.require(target and all(n.get("Actual Loops",0)>0 for n in target), label + ": missing executed target index")
@@ -306,33 +374,33 @@ class Suite:
 
     def bag_and_headline(self):
         # BM25 bag-of-terms and native AND/phrase have different domain meanings.
-        any_query, plain = self.run("SELECT to_jsonb(charabia.query_any('全文 banana')::text);"
-            "SELECT to_jsonb(ARRAY(SELECT id FROM bm25_test.docs WHERE to_tsvector('public.charabia',body) "
-            "@@ plainto_tsquery('public.charabia','全文 banana') ORDER BY id));", "bag-versus-and")
+        any_query, plain = self.run(f"SELECT to_jsonb(charabia.query_any('全文 banana','{self.config}')::text);"
+            f"SELECT to_jsonb(ARRAY(SELECT id FROM bm25_test.docs WHERE to_tsvector('{self.config}',body) "
+            f"@@ plainto_tsquery('{self.config}','全文 banana') ORDER BY id));", "bag-versus-and")
         self.require(" | " in any_query and " & " not in any_query and plain == [], "query_any does not represent plain OR")
-        self.check_query("public.charabia","docs","docs_bm25","全文 banana",[2,10],"bag-independent-candidates",
+        self.check_query(self.config,"docs","docs_bm25","全文 banana",[2,10],"bag-independent-candidates",
                          domain_case_id="bm25-bag-independent-candidates")
         raw_query = "全文 running"
         # Background rows affect ranking even when they are not candidates.
         # Keep the quality input frozen, but retain the complete scoring corpus.
         corpus, options = self.run(
             "SELECT jsonb_agg(jsonb_build_object('id',id,'body',body,"
-            "'vector',to_tsvector('public.charabia',body)::text,"
+            f"'vector',to_tsvector('{self.config}',body)::text,"
             "'stored_vector_positions',(SELECT coalesce(sum(cardinality(positions)),0)"
-            "FROM unnest(to_tsvector('public.charabia',body))))ORDER BY id)FROM bm25_test.docs;"
+            f"FROM unnest(to_tsvector('{self.config}',body))))ORDER BY id)FROM bm25_test.docs;"
             "SELECT to_jsonb(reloptions)FROM pg_class WHERE oid='bm25_test.docs_bm25'::regclass;",
             "topk-complete-corpus-context")
         self.require([[row["id"],row["body"]] for row in corpus] ==
                      FIXTURE["documents"] + [[number,"cobaltxylophone"] for number in range(100,181)],
                      "top-k corpus differs from the semantic fixture and background recipe")
-        ranked = ("WITH p AS MATERIALIZED(SELECT charabia.query_any(" + literal(raw_query) + ",'public.charabia')AS q),"
+        ranked = ("WITH p AS MATERIALIZED(SELECT charabia.query_any(" + literal(raw_query) + f",'{self.config}')AS q),"
             "ranked AS MATERIALIZED(SELECT id,body,body <@> to_bm25query(" + literal(raw_query) + ",'bm25_test.docs_bm25')AS score "
             "FROM bm25_test.docs WHERE(SELECT numnode(q)>0 FROM p)ORDER BY body <@> to_bm25query(" +
             literal(raw_query) + ",'bm25_test.docs_bm25')LIMIT 1)SELECT r.id,r.score,r.body,"
-            "ts_headline('public.charabia',r.body,p.q,'HighlightAll=true')AS headline FROM ranked r CROSS JOIN p ORDER BY r.score")
+            f"ts_headline('{self.config}',r.body,p.q,'HighlightAll=true')AS headline FROM ranked r CROSS JOIN p ORDER BY r.score")
         plan, rows = self.run("EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF) " + ranked +
             ";SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]'::jsonb)FROM("+ranked+")r;", "materialized-query-topk-headline")
-        self.result["topk_headline"] = dict(query=raw_query,sql=ranked,plan=plan,rows=rows,
+        self.result["topk_headline"] = dict(mode=self.mode,config=self.config,query=raw_query,sql=ranked,plan=plan,rows=rows,
             corpus_context=dict(rows=corpus,index_options=options,
                 basis="Actual complete table before top-k; background rows affect corpus statistics. Stored vector positions are diagnostics, not a universal BM25 length oracle."),
             query_analysis_cost="BM25 and query_any each analyze original query once through separate PG interfaces")
@@ -343,15 +411,21 @@ class Suite:
                      "query_any CTE was not constructed exactly once")
         oracle = self.run(
             "SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb)FROM bm25_test.docs "
-            "WHERE tsvector_to_array(to_tsvector('public.charabia',body)) && "
-            "tsvector_to_array(to_tsvector('public.charabia'," + literal(raw_query) + "));",
+            f"WHERE tsvector_to_array(to_tsvector('{self.config}',body)) && "
+            f"tsvector_to_array(to_tsvector('{self.config}'," + literal(raw_query) + "));",
             "materialized-query-topk-native-overlap")[0]
         self.result["topk_headline"].update(native_overlap_ids=oracle,
             original_domain_expectation={"rows":1,"allowed_ids":[1,2]})
         self.require(len(rows) == min(1, len(oracle)) and all(row["id"] in oracle for row in rows),
                      "top-k row is not a real native-overlap candidate or violates LIMIT")
+        query_context = next(item for item in self.result["analysis_context"]["queries"]
+                             if item["name"] == "bm25-topk-domain")
+        self.require(query_context["input"] == raw_query, "TopK AST context has a different original query")
+        self.result["topk_headline"]["query_context"] = query_context
         self.queue_quality("bm25-topk-domain", input=FIXTURE["documents"], query=raw_query,
-            config="public.charabia", expected=True, actual=len(rows)==1 and rows[0]["id"] in (1,2))
+            config=self.config, expected=True, actual=len(rows)==1 and rows[0]["id"] in (1,2),
+            observed_signature={"query_ast": query_context["any"], "candidate_ids": oracle,
+                                "winner_ids": [row["id"] for row in rows]})
         for row in rows:
             restored = html.unescape(row["headline"].replace("<b>","").replace("</b>",""))
             self.require(restored == row["body"] and "<b>" in row["headline"], "top-k headline lost source or matching terms")
@@ -377,14 +451,14 @@ class Suite:
         config = "bm25_test.structured_tokens"
         rows = ",".join(f"({number},{literal(body)})" for number, body in documents)
         record = self.result["structured_tokens"] = {
-            "status": "running", "documents": documents, "queries": [],
+            "status": "running", "mode": self.mode, "config": config, "documents": documents, "queries": [],
             "basis": "Fixed literal structures, English running -> run, same-position full OR component-AND policy; not extension-generated expectations",
             "quality_boundary": "The native overlap oracle checks index consistency only; fixed IDs check this controlled corpus. Scattered components and bag widening are reported separately from structural equality.",
         }
         self.checkpoint()
         self.run("CREATE TEXT SEARCH DICTIONARY bm25_test.structured_words(TEMPLATE=charabia.linguistic_template,"
             "Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false,English=false);"
-            "CREATE TEXT SEARCH CONFIGURATION bm25_test.structured_tokens(COPY=public.charabia);"
+            "CREATE TEXT SEARCH CONFIGURATION bm25_test.structured_tokens(COPY=public.charabia_structured);"
             "DO $structured_tokens$ DECLARE l jsonb; BEGIN "
             "FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP "
             "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.structured_tokens ALTER MAPPING FOR %I WITH bm25_test.structured_words',l->>'language');"
@@ -429,7 +503,7 @@ class Suite:
                         "SELECT jsonb_build_object('custom',custom_plans,'generic',generic_plans)FROM pg_prepared_statements WHERE name='structured_rank';",
                         f"structured-{cache}-{mode}-{name}")
                     ids = sorted(row["id"] for row in scored)
-                    observation = dict(name=name, query=query, cache=cache, mode=mode, default_plan=default,
+                    observation = dict(name=name, query=query, config=config, cache=cache, mode=self.mode, plan_mode=mode, default_plan=default,
                         plan=plan, scored=scored, expected_bag_ids=bag_expected, expected_native_ids=native_expected,
                         oracle=oracle, prepared_counts=counts,
                         ranking="Observed order/scores; no arbitrary tie ordering, score neutrality, or structural-equality claim")
@@ -552,19 +626,19 @@ class Suite:
             "Language='deu',Discard=true,Stem=true,Normalize=true,Filter=false,English=false);"
             "CREATE TEXT SEARCH DICTIONARY bm25_test.forced_italian_dict(TEMPLATE=charabia.linguistic_template,"
             "Language='ita',Discard=true,Stem=true,Normalize=true,Filter=false,English=false);"
-            "CREATE TEXT SEARCH CONFIGURATION bm25_test.native_german(PARSER=charabia.parser);"
-            "CREATE TEXT SEARCH CONFIGURATION bm25_test.forced_italian(PARSER=charabia.parser);"
+            f"CREATE TEXT SEARCH CONFIGURATION bm25_test.native_german(PARSER={self.parser});"
+            f"CREATE TEXT SEARCH CONFIGURATION bm25_test.forced_italian(PARSER={self.parser});"
             "DO $fixture$ DECLARE l jsonb; BEGIN FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP "
             "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.native_german ADD MAPPING FOR %I WITH bm25_test.native_german_dict',l->>'language');"
             "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.forced_italian ADD MAPPING FOR %I WITH bm25_test.forced_italian_dict',l->>'language');"
             "END LOOP;END $fixture$;", "route16-quality-controls")
 
-        def observe(label, body, query, config="public.charabia"):
+        def observe(label, body, query, config=self.config):
             q, text, cfg = literal(query), literal(body), literal(config)
             record = self.run(
                 f"SELECT jsonb_build_object('input',{text},'query',{q},'config',{cfg},"
-                f"'query_analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze({q})a),"
-                f"'document_analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze({text})a),"
+                f"'query_analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze({q},{cfg})a),"
+                f"'document_analysis',(SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze({text},{cfg})a),"
                 f"'document_vector',to_tsvector({cfg},{text})::text,'plain_query',plainto_tsquery({cfg},{q})::text,"
                 f"'actual',to_tsvector({cfg},{text}) @@ plainto_tsquery({cfg},{q}),"
                 f"'same_full_context',to_tsvector({cfg},{text}) @@ phraseto_tsquery({cfg},{text}),"
@@ -580,13 +654,15 @@ class Suite:
         self.run("CREATE TABLE bm25_test.die_docs(id integer PRIMARY KEY,body text NOT NULL);"
             f"INSERT INTO bm25_test.die_docs VALUES(1,{literal(die['input'])}),"
             "(2,'The old trees may die when the dry summer continues without any rain.');"
-            "CREATE INDEX die_bm25 ON bm25_test.die_docs USING bm25(body)WITH(text_config='public.charabia');"
+            f"CREATE INDEX die_bm25 ON bm25_test.die_docs USING bm25(body)WITH(text_config='{self.config}');"
             "ANALYZE bm25_test.die_docs;", "route16-die-index")
-        die_ids = self.check_query("public.charabia", "die_docs", "die_bm25", die["query"], None, "route16-die-bm25")
+        die_ids = self.check_query(self.config, "die_docs", "die_bm25", die["query"], None, "route16-die-bm25")
         observation["bm25_candidate_ids"] = die_ids
         self.require((1 in die_ids) == observation["actual"], "die native query and actual BM25 candidate differ")
         self.queue_quality("german-die-precision", input=die["input"], query=die["query"],
-            config="public.charabia", expected=die["expected"], actual=observation["actual"])
+            config=self.config, expected=die["expected"], actual=observation["actual"],
+            observed_signature={"query_ast": observation["plain_query"],
+                                "document_vector": observation["document_vector"], "candidate_ids": die_ids})
         control = observe("route16-die-english-disabled", die["input"], die["query"], "bm25_test.native_german")
         self.require(control["actual"] is False, "explicit native German stop control did not reject die")
         italian = fixture["italian"]
@@ -600,19 +676,19 @@ class Suite:
         self.result["route16_quality"]["automatic_selection_limit"] = (
             "Short Italian/German query observations are not universal language or inflection guarantees; "
             "the forced Italian algorithm and complete-context positions are independent required controls. "
-            "The die precision difference remains a quality failure. Only its exact reviewed signature is a non-PASS release warning.")
+            "The die precision difference remains a quality failure. Each mode requires its own exact evidence review before a non-PASS release exception can apply.")
         self.checkpoint()
 
     def chunk_control(self):
         observations = []
         for config,table,index in (("pg_catalog.simple","chunk_docs","chunk_bm25"),
-                                   ("public.charabia","bypass_docs","bypass_bm25")):
+                                   (self.config,"bypass_docs","bypass_bm25")):
             for large in (False,True):
                 query = "'chunkleft '||repeat(' ',262144)||' chunkright'" if large else "'chunkright'"
                 ranked = f"SELECT id FROM bm25_test.{table} ORDER BY body <@> to_bm25query({query},'bm25_test.{index}')LIMIT 100"
                 plan,ids = self.run("SET enable_seqscan=off;EXPLAIN(ANALYZE,FORMAT JSON,COSTS OFF,TIMING OFF)"+ranked+
                     ";SELECT coalesce(jsonb_agg(id),'[]'::jsonb)FROM("+ranked+")r;",f"upstream-bypass-{table}-{large}")
-                observations.append(dict(config=config,large_query=large,plan=plan,ids=ids,
+                observations.append(dict(mode=self.mode,config=config,large_query=large,plan=plan,ids=ids,
                     meaning="Out-of-contract bypass; chunked success is not a whole-document language/position guarantee"))
                 self.result["upstream_chunk_control"] = observations
                 target = index_nodes(plan,index)
@@ -675,8 +751,8 @@ class Suite:
 
     def configuration_lifecycle(self):
         body = literal(FIXTURE["documents"][0][1])
-        self.run(native_config_sql("bm25_test.control", stem=True, discard=False) +
-            native_config_sql("bm25_test.control_new", stem=True, discard=False) +
+        self.run(native_config_sql("bm25_test.control", stem=True, discard=False, mode=self.mode) +
+            native_config_sql("bm25_test.control_new", stem=True, discard=False, mode=self.mode) +
             "CREATE TABLE bm25_test.control_a_docs(id integer PRIMARY KEY,body text NOT NULL);"
             "CREATE TABLE bm25_test.control_b_docs(LIKE bm25_test.control_a_docs INCLUDING ALL);"
             f"INSERT INTO bm25_test.control_a_docs VALUES(1,{body}),(9,'run');"
@@ -715,7 +791,7 @@ class Suite:
                         plan = self.session_value(session,"EXPLAIN(ANALYZE,FORMAT JSON,VERBOSE,COSTS OFF,TIMING OFF,SUMMARY OFF)"+execute,
                             label+"-"+family+"-"+suffix+"-plan")
                         ids = self.session_value(session,execute,label+"-"+family+"-"+suffix+"-ids")
-                        entry = dict(family=family,mode=mode,plan=plan,ids=ids,native=oracle,expected=expected)
+                        entry = dict(family=family,mode=self.mode,config=config,plan_mode=mode,plan=plan,ids=ids,native=oracle,expected=expected)
                         record["queries"].append(entry)
                         target = index_nodes(plan,f"control_{family}_bm25")
                         self.require(target and all(n.get("Actual Loops",0)>0 for n in target),label+": executed prepared target scan missing")
@@ -762,7 +838,7 @@ END$fixture$;"""
             negative_sql = "REINDEX INDEX bm25_test.control_a_bm25"
             output = session.query(negative_sql)
             self.sequence += 1
-            stem = f"bm25-{self.sequence:03d}-rename-stale-reloption"
+            stem = f"bm25-{self.mode}-{self.sequence:03d}-rename-stale-reloption"
             (self.evidence / (stem + ".sql")).write_text(negative_sql + ";\n")
             (self.evidence / (stem + ".stdout")).write_text(output + "\n")
             self.result["configuration_rename"] = dict(sql=negative_sql,output=output,
@@ -799,13 +875,13 @@ END$fixture$;"""
         self.require(Path(before["data_directory"]).resolve()==(self.temp/"data").resolve() and before["socket"]==str(self.temp/"socket"),"refusing restart of unknown cluster")
         command = [str(self.bindir/"pg_ctl"),"-D",str(self.temp/"data"),"-l",str(self.temp/"server.log"),"-m","fast","-w","-t","60","restart"]
         proc = subprocess.run(command,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=90)
-        (self.evidence/"bm25-restart.log").write_text(proc.stdout)
+        (self.evidence/f"bm25-{self.mode}-restart.log").write_text(proc.stdout)
         self.result["restart"] = dict(argv=command,exit_code=proc.returncode,before=before)
         self.require(proc.returncode==0,"owned-cluster restart failed")
         with Session() as session:
             after = self.session_value(session,"SELECT jsonb_build_object('start',pg_postmaster_start_time(),'info',charabia.analysis_info())","restart-after")
             mappings = Path(f"/proc/{session.pid}/maps").read_text()
-            (self.evidence/"bm25-restarted-backend-maps.txt").write_text(mappings)
+            (self.evidence/f"bm25-{self.mode}-restarted-backend-maps.txt").write_text(mappings)
             after["backend_pid"] = session.pid
             after["loaded_library_mappings"] = "\n".join(line for line in mappings.splitlines()if "pg_charabia" in line)
         self.result["restart"]["after"] = after
@@ -818,8 +894,12 @@ END$fixture$;"""
     def execute(self):
         failure = None
         try:
+            setup = (ROOT / "tests/sql/bm25.sql").read_text().format(config=literal(self.config), parser=self.parser)
+            self.run(setup, "schema-setup")
             self.populate()
-            self.structured_protocol()
+            self.analysis_context()
+            if self.mode == "structured":
+                self.structured_protocol()
             self.matrix("bulk",full=True)
             self.four_term_protocol()
             self.known_quality()
@@ -847,10 +927,10 @@ END$fixture$;"""
             self.matrix("reindex")
             self.result["mechanism_status"]="passed"
             self.checkpoint()
-            self.flush_quality()
+            self.historical_comparisons()
             self.result["quality"] = validate_quality({"format": FORMAT, "cases": self.result["domain_quality"]})
             self.result["quality_status"] = verified_status(self.result["quality"])
-            self.result["status"] = "passed"
+            self.result["status"] = "failed" if self.result["quality"]["regressions"] else "passed"
         except BaseException as error:
             failure = error
             self.result["quality_status" if self.result.get("mechanism_status")=="passed" else "mechanism_status"]="failed"
@@ -868,11 +948,71 @@ END$fixture$;"""
                 self.result["cleanup_error"] = repr(error)
                 self.result["status"] = "failed"
                 failure = failure or error
+            try:
+                self.historical_comparisons()
+                self.result["quality"] = validate_quality({"format": FORMAT, "cases": self.result["domain_quality"]})
+                self.result["quality_status"] = verified_status(self.result["quality"])
+            except BaseException as error:
+                self.result["quality_error"] = repr(error)
+                self.result["status"] = "failed"
+                failure = failure or error
             self.checkpoint()
-        if failure:
-            raise failure
-        print("BM25 mechanisms passed; known default language quality failures remain separately reported",flush=True)
+        if failure is None:
+            print(f"BM25 {self.mode} mechanisms passed; domain quality is separately reported", flush=True)
+        return failure
+
+
+def execute_modes():
+    evidence = Path(os.environ["PGCB_RUN_DIR"])
+    report = dict(format=FORMAT, analysis_revision=ANALYSIS_REVISION, status="running", mode_reports={})
+    suites = []
+    failures = []
+
+    def checkpoint():
+        temporary = evidence / "bm25-results.json.tmp"
+        temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        temporary.replace(evidence / "bm25-results.json")
+
+    try:
+        # Each pass owns its schema and the same complete corpus. Neither mode's
+        # quality differences prevent collection of the other mode's evidence.
+        for mode in MODES:
+            suite = ModeSuite(mode)
+            suites.append(suite)
+            report["mode_reports"][mode] = suite.result
+            checkpoint()
+            failure = suite.execute()
+            if failure is not None:
+                failures.append(failure)
+            checkpoint()
+            if suite.result.get("schema_removed") is not True:
+                # A failed cleanup leaves the owned schema for diagnosis. Do not
+                # let another pass delete or reuse state without a clean handoff.
+                break
+        report["domain_quality"] = [case for suite in suites for case in suite.result["domain_quality"]]
+        report["quality"] = validate_quality({"format": FORMAT, "cases": report["domain_quality"]})
+        report["quality_status"] = verified_status(report["quality"])
+        report["mechanism_status"] = "passed" if all(
+            suite.result.get("mechanism_status") == "passed" and suite.result.get("schema_removed") is True
+            for suite in suites) else "failed"
+        checkpoint()
+        # Persist every observed case before strict regression or coverage checks.
+        record_quality_cases([case for suite in suites for case in suite.pending_quality])
+        require_bm25_case_coverage(report["quality"])
+        if failures:
+            raise failures[0]
+        if report["mechanism_status"] != "passed":
+            raise AssertionError("A BM25 mode did not complete mechanisms and owned schema cleanup")
+        report["status"] = "passed"
+    except BaseException as error:
+        report["status"] = "failed"
+        report["error"] = repr(error)
+        if failures:
+            report["mode_errors"] = [repr(failure) for failure in failures]
+        raise
+    finally:
+        checkpoint()
 
 
 if __name__ == "__main__":
-    Suite().execute()
+    execute_modes()

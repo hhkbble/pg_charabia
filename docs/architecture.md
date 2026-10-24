@@ -24,13 +24,16 @@ The [README](../README.md) introduces the extension. The [Usage reference](refer
 | [lib.rs](../src/lib.rs) | Module registration and the diagnostic/query functions. |
 | [pg_charabia.sql](../sql/pg_charabia.sql) | Public SQL signatures, default objects, permissions, and callback registration. |
 
-The default installation has one Parser, two Templates, 16 linguistic dictionaries and five structured dictionaries, and `public.charabia`. Ordinary user configurations can share these dictionaries or use other standard dictionaries. There is no configuration table, proprietary object manager, global derived Dictionary cache, or cross-dictionary private payload.
+The default installation has two Parsers, two Templates, 16 linguistic dictionaries, five structured dictionaries, and three public Configurations. `public.charabia_linguistic` uses `charabia.linguistic_parser`; `public.charabia_structured` uses `charabia.structured_parser`. `public.charabia` is an installation-time COPY of the linguistic configuration. Its Parser and mappings start equal, but later mapping changes are independent. All three share the same language Dictionary objects. Ordinary user configurations can COPY either mode and can use other standard dictionaries. There is no configuration table, proprietary object manager, global derived Dictionary cache, or cross-dictionary private payload.
 
 ```text
 Original UTF-8 text
-  -> Parser: segment once and complete language on the complete original text
-       + ASCII candidate scan, validated non-overlapping raw coverage
-       + ordinary classification/English restoration and structured token type assignment
+  -> chosen Parser START fixes AnalysisMode::Linguistic or ::Structured
+       -> segment once and complete language on the complete original text
+       -> linguistic: retain the ordinary spans
+          structured: scan ASCII candidates and overlay validated raw coverage
+       -> split literal delimiters outside accepted structured tokens
+       -> ordinary classification/English restoration, type assignment, raw bounds
   -> PostgreSQL Configuration mapping for each token type
   -> Dictionary chain: NULL / Stop / terminal terms / filter replacement
   -> native tsvector or tsquery
@@ -75,9 +78,47 @@ subterms. Span checks and long-token handling run on the restored result.
 
 START receives text and length, not configuration identity or Dictionary options. PostgreSQL maps types to the active chain. LEXIZE receives neither Parser type nor detected language. A Dictionary therefore uses its own `Language`, even if the mapping chooses a different language from the Parser's type.
 
+## Mode selection and diagnostics
+
+`analysis::segment` and `segment_counted` require an explicit `AnalysisMode`.
+The only mode branch follows complete-context segmentation and language completion.
+Linguistic mode never calls structured recognition, overlay, or dedicated expansion.
+It retains final ordinary Parser units, including `100ms` as one ordinary word and
+`foo_bar.rs` as sequential ordinary words. Mapping removal alone cannot produce
+this behavior: a structured Parser has already replaced those source units.
+Shared delimiter splitting, English whole-word restoration, classification, and
+long-token handling run after that branch. No caller executes structured analysis
+and discards its result.
+
+Each native Parser has its own START and LEXTYPES callback. The linguistic type
+list ends at display-only (18); the structured list also exposes IDs 19–23.
+Both Parsers share GETTOKEN, END, and HEADLINE. START finishes mode-dependent
+segmentation before registering state, so `ParserState` does not need a mode field.
+Dictionary Templates, options, immutable resources, and native OID caches remain
+shared. There is no mutable current mode or configuration-dependent hidden state.
+
+`charabia.analyze(text, config)` reports the selected Parser's facts, not the
+Configuration's final Dictionary output. Its default config is `public.charabia`.
+`pg_ffi::analysis_mode_for_config` copies the configuration's Parser OID and the
+Parser's START OID out of native cache records before any later PG call. It checks
+that the Parser and START are members of this extension, then copies C language
+and owned `prosrc` data through a short-lived `PgProc` syscache pin. The two exact
+START wrapper symbols identify the mode. Configuration COPY, rename, and schema
+movement therefore retain mode; Parser and START SQL renames also retain it.
+A Parser from another extension or a user-defined Parser returns `0A000`, while
+`query_any` continues to accept arbitrary valid native Configurations. The resolver
+has no SPI lookup, dynamic load, private identity table, or OID cache. It does not
+compare `fn_addr`, which legitimate PostgreSQL function hooks can wrap. This check
+does not defend against a superuser replacing extension member definitions.
+
+`analysis_info()` describes static capabilities and the installed default object
+names. It does not fingerprint user mappings or Dictionary options. Native
+PostgreSQL overloads without config still use the host's
+`default_text_search_config`; installation never changes that GUC.
+
 ## ASCII recognition and atomic structured tokens
 
-The Parser completes language metadata before applying `structured_tokens::recognition::scan`.
+The structured Parser completes language metadata before applying `structured_tokens::recognition::scan`.
 It keeps the complete Charabia context. It never removes structured tokens before detection or re-segments leftover windows.
 The coverage merge clips ordinary spans at accepted candidate boundaries and preserves their metadata.
 Original byte/scalar coverage stays contiguous and byte-identical. Structured tokens prevent English restoration from merging across them.
@@ -168,7 +209,7 @@ The retained [direct Dictionary cases](../tests/fixtures/analysis/general/direct
 
 `pg_ffi::lexemes` translates the owned Rust result into PG-allocated, zero-terminated `TSLexeme` storage. Terminal alternatives have distinct `nvariant` values 0 through at most 3, flags zero, and the same position. They are alternatives, not two sequential words.
 
-Ignore returns a non-SQL-NULL Datum containing a null pointer. PostgreSQL tries the next Dictionary. Stop returns a non-null empty array, ends the chain, and leaves one position hole. If the chain never recognizes the token, it produces no position. Default blank/display types have no Dictionary mapping.
+Ignore returns a non-SQL-NULL Datum containing a null pointer. PostgreSQL tries the next Dictionary. Stop returns a non-null empty array, ends the chain, and leaves one position hole. If the chain never recognizes the token, it produces no position. Default blank/display types have no Dictionary mapping. In linguistic mode each final ordinary Parser token with terminal terms or Stop advances one position; its alternatives remain at that position. Structured mode keeps a full token and all of its components at one atomic position. External dictionaries can still use native multiword or `TSL_ADDPOS` semantics.
 
 A filter returns one nonempty term with `TSL_FILTER`. PostgreSQL passes it as the current input to later dictionaries. It does not run two independent pipelines for surface and stem. Rejecting Filter with Stem or English preserves that distinction. Chain-tail filters and filters followed only by NULL do not become final terms.
 
@@ -202,7 +243,7 @@ Rust owns analysis vectors, strings, and stemmers. FST views borrow static libra
 
 `pg_ffi::owned_state` preserves a Box owner while allocating and initializing the reset callback in the original CurrentMemoryContext. After callback registration, it immediately uses `Box::into_raw` and installs that canonical pointer. No fallible operation or PG call can occur during that handoff. The guarded callback drops exactly that Box. Drop must not call PostgreSQL or panic.
 
-Parser START registers exactly `Option<ParserState>`. The state owns spans/cursor and borrows the PG input pointer, which lives through END. GETTOKEN copies an output descriptor before any later PG operation and returns a type ID as an int32 Datum through the SQL `internal` signature. EOF uses a zero Datum. END takes the state once, releasing its large vector. Reset later drops the empty Option container, or the still-present state after an error.
+Both Parser START callbacks register exactly `Option<ParserState>` through the same private helper. The state owns spans/cursor and borrows the PG input pointer, which lives through END. GETTOKEN copies an output descriptor before any later PG operation and returns a type ID as an int32 Datum through the SQL `internal` signature. EOF uses a zero Datum. END takes the state once, releasing its large vector. Reset later drops the empty Option container, or the still-present state after an error.
 
 Linguistic Dictionary INIT registers exactly `LinguisticDictionaryState` in the PG dictionary or DDL-validation context. LEXIZE borrows it only during pure Rust analysis, then ends the borrow before interrupt checks and PG output allocation. Code must not retain subsidiary-cache borrows across PG calls that can invalidate them.
 
@@ -221,7 +262,7 @@ PostgreSQL owns the per-backend cache keyed by Dictionary OID. INIT reads that o
 
 Catalog changes mark the PG text-search cache invalid. A later lookup resets the dictionary context and reruns INIT. A failed INIT never becomes valid for LEXIZE. Registration-before failures release Rust ownership immediately. A registered state from failed cached INIT can remain until the next dictCtx reset. Transaction abort does not necessarily destroy that cache context.
 
-Rollback and cross-session invalidation use native catalog/cache behavior. Ordinary restored objects need no remembered pre-restore OIDs. Cache invalidation cannot update precomputed vectors or postings. Constant-folded prepared queries are also distinct from normal parameterized-plan invalidation.
+Rollback and cross-session invalidation use native catalog/cache behavior. Dictionaries do not cache mode, so one Dictionary OID can be referenced by both Parsers without separate states. Shared Dictionary changes affect every referencing Configuration; COPY only copies mapping rows. Ordinary restored objects need no remembered pre-restore OIDs. Cache invalidation cannot update precomputed vectors or postings. Constant-folded prepared queries are also distinct from normal parameterized-plan invalidation.
 
 See PostgreSQL's [ts_cache.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/cache/ts_cache.c) for the subsidiary-memory lifetime. [lifecycle.py](../tests/lifecycle.py) and [stress.py](../tests/stress.py) cover invalidation, failed rebuilds, actual workers, concurrent snapshots, and resource stability.
 
@@ -241,7 +282,7 @@ The extension adds no custom WAL resource manager, mutable data files, or runtim
 
 After restart, pg_textsearch rebuilds derived state from its metapage, durable chain, and segments. See [index/state.c](https://github.com/timescale/pg_textsearch/blob/fa142d049d08eac45a263f5abc250c8877ae076e/src/index/state.c). Core/Generic redo does not call Charabia to reconstruct old terms. Queries and new writes after recovery need the correct installed analyzer.
 
-Physical recovery establishes database consistency at a target, not agreement between old postings and a new analysis policy. Nor does it restore external installation files. Logical dump recreates extension members from installed SQL and ordinary user objects from their definitions. These boundaries explain the [user backup requirements](operations.md#backup-and-recovery).
+Physical recovery establishes database consistency at a target, not agreement between old postings and a new analysis policy. Nor does it restore external installation files. Logical dump recreates extension members from installed SQL and ordinary user objects from their definitions. Version 0.4.0 is a fresh installation baseline with no 0.3.x upgrade path or old single-Parser alias. An old physical restore still needs its exact old package; WAL does not convert old postings or supply a newer installation library. These boundaries explain the [user backup requirements](operations.md#backup-and-recovery).
 
 The retained [recovery test](../tests/recovery.py) exercises online backup, archived WAL, named-target restore, crash restart, cold initialization, GIN/BM25 paths, Chinese terms, and headline. Its scope is those controlled paths. It is not proof of every crash timing, high availability, logical decoding, or application-level integration.
 
@@ -250,7 +291,7 @@ The retained [recovery test](../tests/recovery.py) exercises online backup, arch
 - Fixed model mappings and default segmentation avoid per-token detection and configuration-dependent Parser state. Short-query language errors remain possible.
 - Independent Dictionary preparation is necessary for direct calls and earlier filters. Chains can repeat that preparation, but headline does not repeat it.
 - English alternatives preserve some words discarded by the original language. They also retain cross-language homographs and change BM25 statistics. They do not guarantee word-form or phrase recall.
-- Structured tokens have atomic positions, not internal phrase graphs. Their component conjunction can match scattered words, and BM25 discards variant groups.
+- Explicit structured mode has atomic positions, not internal phrase graphs. Their component conjunction can match scattered words, and BM25 discards variant groups.
 - Standard Parser/Dictionary interfaces preserve index reuse and arbitrary native composition. They cannot carry private Parser metadata to Dictionary callbacks.
 - Standard headline preserves raw source and PG matching. It is a presentation step, not a phrase or Boolean match decision.
 

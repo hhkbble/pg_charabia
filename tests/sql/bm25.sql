@@ -1,4 +1,5 @@
 \set ON_ERROR_STOP on
+-- ModeSuite substitutes only {config} and {parser}, then executes this setup.
 -- Owned by this suite across sessions/restart; Python removes it on every exit.
 CREATE SCHEMA bm25_test;
 CREATE FUNCTION bm25_test.assert_true(ok boolean, message text) RETURNS void
@@ -21,8 +22,8 @@ CREATE TABLE bm25_test.expression_docs(id integer PRIMARY KEY,title text NOT NUL
 CREATE TABLE bm25_test.array_docs(id integer PRIMARY KEY,parts text[] NOT NULL,
   CHECK(octet_length(array_to_string(parts,' '))<=262144));
 CREATE INDEX expression_bm25 ON bm25_test.expression_docs USING bm25((title||' '||body))
-  WITH(text_config='public.charabia');
-CREATE INDEX array_bm25 ON bm25_test.array_docs USING bm25(parts) WITH(text_config='public.charabia');
+  WITH(text_config={config});
+CREATE INDEX array_bm25 ON bm25_test.array_docs USING bm25(parts) WITH(text_config={config});
 INSERT INTO bm25_test.expression_docs VALUES(1,'PostgreSQL',repeat(' ',262133));
 INSERT INTO bm25_test.array_docs VALUES(1,ARRAY['PostgreSQL',repeat(' ',262133)]);
 SELECT bm25_test.assert_true((SELECT octet_length(title||' '||body)=262144 FROM bm25_test.expression_docs),
@@ -61,12 +62,12 @@ SELECT bm25_test.assert_true((SELECT tsvector_to_array(to_tsvector('pg_catalog.s
 CREATE TABLE bm25_test.frequency_docs(id integer PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144));
 INSERT INTO bm25_test.frequency_docs VALUES(1,repeat('echo ',300)),
   (2,repeat('paddingword ',16384)||'tailword');
-CREATE INDEX frequency_bm25 ON bm25_test.frequency_docs USING bm25(body) WITH(text_config='public.charabia');
+CREATE INDEX frequency_bm25 ON bm25_test.frequency_docs USING bm25(body) WITH(text_config={config});
 SELECT bm25_test.assert_true((SELECT cardinality(positions)=255 FROM bm25_test.frequency_docs,
-  LATERAL unnest(to_tsvector('public.charabia',body)) WHERE id=1 AND lexeme='echo'),
+  LATERAL unnest(to_tsvector({config},body)) WHERE id=1 AND lexeme='echo'),
   'PG18 to_tsvector retains 255 positions per lexeme');
 SELECT bm25_test.assert_true((SELECT positions=ARRAY[16383]::smallint[] FROM bm25_test.frequency_docs,
-  LATERAL unnest(to_tsvector('public.charabia',body)) WHERE id=2 AND lexeme='tailword'),
+  LATERAL unnest(to_tsvector({config},body)) WHERE id=2 AND lexeme='tailword'),
   'PG18 clamps positions above 16383');
 CREATE TABLE bm25_test.ranking_docs(id integer PRIMARY KEY,body text NOT NULL);
 INSERT INTO bm25_test.ranking_docs VALUES(1,'rankcanary filler'),(2,'rankcanary rankcanary'),(3,'unrelated filler');
@@ -76,11 +77,11 @@ INSERT INTO bm25_test.ranking_docs VALUES(1,'rankcanary filler'),(2,'rankcanary 
 CREATE TABLE bm25_test.bypass_docs(id integer PRIMARY KEY,body text NOT NULL);
 INSERT INTO bm25_test.bypass_docs SELECT * FROM bm25_test.chunk_docs;
 DO $$ BEGIN
-  BEGIN PERFORM to_tsvector('public.charabia',body) FROM bm25_test.bypass_docs;
+  BEGIN PERFORM to_tsvector({config},body) FROM bm25_test.bypass_docs;
     RAISE EXCEPTION 'native full input was not rejected';
   EXCEPTION WHEN program_limit_exceeded THEN NULL; END;
 END $$;
-CREATE INDEX bypass_bm25 ON bm25_test.bypass_docs USING bm25(body) WITH(text_config='public.charabia');
+CREATE INDEX bypass_bm25 ON bm25_test.bypass_docs USING bm25(body) WITH(text_config={config});
 
 -- Force one Dictionary language without passing Parser-private metadata. This
 -- isolates the four-variant protocol from statistical language identification.
@@ -90,8 +91,8 @@ CREATE TEXT SEARCH DICTIONARY bm25_test.four_terms_dict(
 CREATE TEXT SEARCH DICTIONARY bm25_test.native_terms_dict(
   TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=true,
   Normalize=false,Filter=false,English=false);
-CREATE TEXT SEARCH CONFIGURATION bm25_test.four_terms(PARSER=charabia.parser);
-CREATE TEXT SEARCH CONFIGURATION bm25_test.native_terms(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION bm25_test.four_terms(PARSER={parser});
+CREATE TEXT SEARCH CONFIGURATION bm25_test.native_terms(PARSER={parser});
 DO $fixture$ DECLARE l jsonb; BEGIN
   FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
     EXECUTE format('ALTER TEXT SEARCH CONFIGURATION bm25_test.four_terms ADD MAPPING FOR %I WITH bm25_test.four_terms_dict',l->>'language');

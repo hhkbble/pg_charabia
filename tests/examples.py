@@ -62,12 +62,22 @@ try:
         record["status"] = "passed"
         checkpoint()
     first_info = [item for item in json_lines(results["examples"][0]["output"]) if "extension" in item]
-    check(len(first_info)==1 and first_info[0]["extension"]=="0.3.1" and first_info[0]["language_count"]==16,
+    check(len(first_info)==1 and first_info[0]["extension"]=="0.4.0" and first_info[0]["language_count"]==16,
           "README loads this native interface release",first_info)
     check(first_info[0].get("structured_tokens",{}).get("dictionary_count")==5 and
           [row["kind"] for row in first_info[0]["structured_tokens"]["types"]]==["url","host","email","file","numword"],
           "README loads the actual five structured token types",first_info[0].get("structured_tokens"))
-    unit_headline=run("SELECT ts_headline('app.search','alpha 100ms beta',plainto_tsquery('app.search','ms'),'HighlightAll=true')",database)
+    mode_info=first_info[0].get("modes",[])
+    check([(row["mode"],row["parser"],len(row["types"])) for row in mode_info]==
+          [("linguistic","charabia.linguistic_parser",18),("structured","charabia.structured_parser",23)] and
+          first_info[0].get("default_configuration")=="public.charabia",
+          "README exposes both finite Parsers and the linguistic default",mode_info)
+    mode_result=run("SELECT json_build_object('default_has_ms',to_tsvector('public.charabia','100ms')@@'ms'::tsquery,"
+        "'named_equal',to_tsvector('public.charabia','100ms')=to_tsvector('public.charabia_linguistic','100ms'),"
+        "'structured_has_ms',to_tsvector('public.charabia_structured','100ms')@@'ms'::tsquery)",database)
+    check(json.loads(mode_result)=={"default_has_ms":False,"named_equal":True,"structured_has_ms":True},
+          "README default is ordinary and structured analysis requires explicit selection",mode_result)
+    unit_headline=run("SELECT ts_headline('app.structured','alpha 100ms beta',plainto_tsquery('app.structured','ms'),'HighlightAll=true')",database)
     check(unit_headline=="alpha <b>100ms</b> beta","reference custom structured dictionary highlights the whole source token",unit_headline)
     capabilities = first_info[0]["languages"]
     check([row["language"] for row in capabilities] ==

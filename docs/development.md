@@ -138,7 +138,7 @@ Validate Markdown structure, local links/anchors, shell fences with `bash -n`, a
 
 Keep algorithm examples, recorded probe observations, explicit extension contracts, domain expectations, and index-consistency checks distinct. A fixture's recorded observation is not an independent upstream guarantee. Never generate new expected values from the extension and accept them without review. Finite-state checks and test counts do not establish natural-language accuracy.
 
-Format-2 reports separate mechanism, quality, and cleanup.
+Format-3 reports separate mechanism, quality, and cleanup. Each quality record identifies its analysis mode, actual configuration, and analysis revision. Case IDs are unique within a mode. The complete required case set must exist for both modes, and the BM25 child reports must match the aggregate registry exactly.
 `structured_token_quality_costs` retains disclosed atomic structured token false positives outside quality PASS totals.
 It does not expand the required-domain failure exemptions. Packages retain these observations.
 [quality-known.json](../tests/fixtures/quality-known.json) preserves three original
@@ -149,7 +149,7 @@ case remains unresolved. A diagnostic control or new failure cannot expand the
 exemption set.
 
 The [reviewed release warning policy](#reviewed-release-warnings) defines the temporary packaging exceptions separately from those frozen cases.
-Version 0.3.1 retains the exact exceptions introduced in v0.3.0.
+The original 0.3.x fixtures remain unchanged as provenance. They do not grant an exception to either mode. A mode review must identify the exact original signature and explain the current analysis path before a matching failure can receive a non-PASS classification.
 
 Quality summaries include separate `passed`, `known-failure`, `warning`, and `regression` counts. Their `warnings` list and `warning_review` identity are retained in reports and the delivery manifest. Full acceptance requires every named reviewed case, not a matching total. The extracted-package verifier checks the original warning evidence and preserves the full acceptance summary.
 
@@ -173,16 +173,15 @@ Performance observations separate detection, ASCII scanning/validation, componen
 
 ### Reviewed release warnings
 
-Release v0.3.0 introduced temporary acceptance of 47 reviewed BM25 differences as `warning`.
-Release v0.3.1 retains exactly the same 47 cases and signatures.
+The retained 0.3.x report contains 47 reviewed BM25 differences. Format 3 does not transfer them by configuration name, case prefix, or record count. The [current per-mode review](../tests/fixtures/quality-mode-review.json) identifies each eligible original case and its exact signature. Boolean failures also retain the reviewed AST, vector, or candidate and winner IDs. A different failure shape blocks release.
 They cover extra candidates across prepared plans and index lifecycle stages,
 German `die` false matches, and the confirmed TopK ranking failure.
 These records remain quality failures and do not count as quality PASS.
 See the [Usage reference](reference.md#known-bm25-issues) for their effect on users.
 
 Only the cases explicitly named in [report_contract.py](../scripts/report_contract.py)
-qualify. Every case ID, input, query, configuration, expected result, and actual
-result must match the reviewed record exactly. Names, prefixes, and record
+qualify. Every mode, case ID, input, query, actual configuration, expected result, and actual
+result must match the current mode review and its original signature exactly. Names, prefixes, and record
 counts cannot grant a warning. Any signature change needs review and blocks
 release under this policy.
 
@@ -257,7 +256,7 @@ container build files for rebuilding and relinking. It also supplies the exact h
 under `dependency-sources/`, including the original German source/FST. It does
 not bundle huge raw source inputs or claim an offline cache of every dependency. The extracted-package verifier checks checksums and loads the extracted library without compiling a replacement. It executes smoke, structured, chain, headline, configuration, recovery, and the archive's README and reference examples. `--archive` cannot combine with suite, hooks, or debug selections.
 
-After release content changes, freeze the clean final source commit again and rerun the required same-commit acceptance before packaging. An amended candidate has a new identity and needs new acceptance and packaging evidence. Do not overwrite old archives or evidence. To rebuild from an extracted archive, enter its root and use the same prerequisites
+After release content changes, freeze the clean final source commit again and rerun the required same-commit acceptance before packaging. Each new source commit needs new acceptance and packaging evidence. Use new commits without amend, rebase, or force push. Do not overwrite old archives or evidence. To rebuild from an extracted archive, enter its root and use the same prerequisites
 and pinned toolchain. The archive has source files but no `.git` directory. A
 recipient can create a new local Git checkout before using the evidence runners.
 A direct isolated build can instead package without Git metadata:
@@ -275,13 +274,15 @@ Keep the delivery report in `artifacts/` or `dist/`, recording source/package id
 
 ### GitHub publication
 
-The packager creates local files. GitHub upload and publication happen separately. The [v0.3.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
+The packager creates local files. GitHub upload and publication happen separately. The [v0.4.0 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
 
 1. Finish full Linux acceptance, local macOS development validation, and separate hooks checks on the same clean final commit.
 2. Generate the archive and SHA256 file with the existing packager, then pass extracted-package validation.
-3. Push the final tested commit and a matching version tag. Preserve unrelated remote commits, tags, and assets.
+3. Push the final tested commit normally and wait for its Actions. Then push only the new annotated `v0.4.0` tag and wait for its Actions. Preserve unrelated remote commits, tags, and assets. Stop if the target version, tag, or Release already exists.
 4. Create a draft Release for the existing tag. Upload the complete packager archive and its SHA256 file without changing their structure.
 5. Download the draft assets and compare their hashes, source commit, manifest, and verification records with the tested package.
-6. Publish the Release with its actual acceptance results, quality warnings, and frozen failures. Check the public tag, download links, and assets again.
+6. Publish the Release and download its public assets again. Match the checksums, source commit, manifest, and packaged library to the accepted archive. Write Release notes from the actual previous-tag difference, including the changed default and required maintenance.
+7. After every 0.4.0 gate and public check passes, archive both old Releases completely in a new owned artifacts or dist directory. Retain metadata, body, asset IDs and bytes, checksum files, and tag objects with their targets. Check all hashes before deleting either old Release or its remote assets.
+8. Delete only the exact archived 0.3.0 and 0.3.1 Release and asset IDs. Keep their tags, Git history, and local packages. Check the old objects are unavailable and the retained tags and 0.4.0 assets are unchanged. If permissions or immutable Releases prevent deletion, keep them and report the incomplete retirement. Never use `--cleanup-tag`.
 
 Keep the binary inside the complete archive. GitHub's automatic source attachments do not replace that archive. A release must not claim support or production readiness beyond the recorded validation.

@@ -91,10 +91,10 @@ def main():
     try:
         with Session() as session:
             catalog = sql(session, "SELECT jsonb_build_object('types',"
-                "(SELECT jsonb_object_agg(tokid,alias) FROM ts_token_type('charabia.parser')),"
+                "(SELECT jsonb_object_agg(tokid,alias) FROM ts_token_type('charabia.structured_parser')),"
                 "'dictionaries',(SELECT jsonb_agg(d.dictname ORDER BY d.dictname) FROM pg_ts_dict d "
                 "JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname='charabia'),"
-                "'mappings',(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),"
+                "'mappings',(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia_structured'::regconfig),"
                 "'template',to_regclass('pg_catalog.pg_ts_template') IS NOT NULL AND EXISTS("
                 "SELECT 1 FROM pg_ts_template t JOIN pg_namespace n ON n.oid=t.tmplnamespace "
                 "WHERE n.nspname='charabia' AND t.tmplname='structured_template'))", "catalog", True)
@@ -109,7 +109,7 @@ def main():
             sql(session, "CREATE TEXT SEARCH DICTIONARY " + schema + ".words("
                 "TEMPLATE=charabia.linguistic_template,Language='eng',Discard=true,Stem=false,Normalize=true,"
                 "Filter=false,English=false);CREATE TEXT SEARCH CONFIGURATION " + config +
-                "(COPY=public.charabia)", "private-config")
+                "(COPY=public.charabia_structured)", "private-config")
             for language in LANGUAGES:
                 sql(session, "ALTER TEXT SEARCH CONFIGURATION " + config + " ALTER MAPPING FOR " +
                     language + " WITH " + schema + ".words", "ordinary-" + language)
@@ -132,9 +132,9 @@ def main():
             for ordinal, (kind, raw) in enumerate(raw_cases):
                 text = "前" + raw + "后"
                 rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY a.byte_start) "
-                    "FROM charabia.analyze(" + literal(text) + ")a", f"raw-{ordinal}", True)
+                    "FROM charabia.analyze(" + literal(text) + ",'public.charabia_structured')a", f"raw-{ordinal}", True)
                 parsed = sql(session, "SELECT jsonb_agg(jsonb_build_array(tokid,token) ORDER BY ord) "
-                    "FROM ts_parse('charabia.parser'," + literal(text) +
+                    "FROM ts_parse('charabia.structured_parser'," + literal(text) +
                     ") WITH ORDINALITY p(tokid,token,ord)", f"parse-{ordinal}", True)
                 check("".join(row[1] for row in parsed) == text and "".join(row["raw"] for row in rows) == text,
                       "Parser and diagnostics reconstruct the complete Unicode source", {"raw": text, "rows": rows})
@@ -156,7 +156,7 @@ def main():
                 "C++ C# plainCamelCase plain_word tail",
             )):
                 rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) "
-                    "FROM charabia.analyze(" + literal(text) + ")a", f"fallback-{ordinal}", True)
+                    "FROM charabia.analyze(" + literal(text) + ",'public.charabia_structured')a", f"fallback-{ordinal}", True)
                 check("".join(row["raw"] for row in rows) == text,
                       "markup, failed envelopes, and combining boundaries never swallow raw text", {"raw": text, "rows": rows})
                 if ordinal == 0:
@@ -174,7 +174,7 @@ def main():
                 "a@example.com:abc", "a@example.com..", "a@example.com+tag",
             )):
                 rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) "
-                    "FROM charabia.analyze(" + literal(raw) + ")a", f"malformed-email-{ordinal}", True)
+                    "FROM charabia.analyze(" + literal(raw) + ",'public.charabia_structured')a", f"malformed-email-{ordinal}", True)
                 check("".join(row["raw"] for row in rows) == raw and
                       not any(row["token_type"] == "email" for row in rows),
                       "a malformed mailbox retains all source text without a shortened email token", rows)
@@ -185,7 +185,7 @@ def main():
                 "(a@example.com)", "a@example.com.", "a@example.com: text",
             )):
                 rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) "
-                    "FROM charabia.analyze(" + literal(raw) + ")a", f"email-boundary-{ordinal}", True)
+                    "FROM charabia.analyze(" + literal(raw) + ",'public.charabia_structured')a", f"email-boundary-{ordinal}", True)
                 check("".join(row["raw"] for row in rows) == raw and
                       [row["raw"] for row in rows if row["token_type"] == "email"] == ["a@example.com"],
                       "normal punctuation and whitespace retain the complete email token", rows)
@@ -235,7 +235,7 @@ def main():
                           "raw": raw, "expected": expected, "actual": actual})
             scattered_actual = matches(session, config, "100 ms", plain, "scattered-domain-observation")
             REPORT["quality_observations"] = [{
-                "input": "100 ms", "query": "100ms", "domain_expected": False,
+                "mode": "structured", "input": "100 ms", "query": "100ms", "domain_expected": False,
                 "native_actual": scattered_actual, "config":config, "classification": "disclosed scattered-component false positive",
                 "basis": "A tsquery conjunction does not require component co-location; this is not a quality exemption",
             }]
@@ -399,7 +399,7 @@ def main():
                   "a budget failure does not poison the cached structured dictionary")
             long_raw = "https://example.com/" + "x" * 2047
             rows = sql(session, "SELECT jsonb_agg(to_jsonb(a) ORDER BY byte_start) FROM charabia.analyze(" +
-                       literal(long_raw) + ")a", "long-envelope", True)
+                       literal(long_raw) + ",'public.charabia_structured')a", "long-envelope", True)
             check("".join(row["raw"] for row in rows) == long_raw and
                   not any(row["token_type"] == "url" for row in rows),
                   "a long envelope returns to the complete ordinary/display path without a short URL", rows)

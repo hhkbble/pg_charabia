@@ -1,5 +1,5 @@
 //! Opt-in stage measurements. Timing never substitutes for correctness assertions.
-use crate::analysis::{self, Options};
+use crate::analysis::{self, AnalysisMode, Options};
 use crate::routes::LanguageId;
 use charabia::{TokenKind, TokenizerBuilder};
 use qdrant_rust_stemmers::Stemmer;
@@ -37,7 +37,7 @@ fn benchmark_direct_pipeline() {
     black_box(tokenizer.segment(texts[0].1).count());
     let first_raw_segment_ns = start.elapsed().as_nanos();
     let start = Instant::now();
-    black_box(analysis::segment_counted(texts[0].1).unwrap());
+    black_box(analysis::segment_counted(texts[0].1, AnalysisMode::Linguistic).unwrap());
     let first_segment_with_language_ns = start.elapsed().as_nanos();
 
     // These are request-local benchmark states constructed by the same builder
@@ -114,7 +114,8 @@ fn benchmark_direct_pipeline() {
         .collect::<Vec<_>>();
     let mut inputs = Vec::new();
     for (name, input) in texts {
-        let (spans, detector_calls) = analysis::segment_counted(input).unwrap();
+        let (spans, detector_calls) =
+            analysis::segment_counted(input, AnalysisMode::Linguistic).unwrap();
         assert!(
             !spans
                 .iter()
@@ -159,8 +160,11 @@ fn benchmark_direct_pipeline() {
                             count += black_box(tokenizer.segment(black_box(input))).count()
                         }
                         "segment_with_language" => {
-                            let (current, actual_calls) =
-                                analysis::segment_counted(black_box(input)).unwrap();
+                            let (current, actual_calls) = analysis::segment_counted(
+                                black_box(input),
+                                AnalysisMode::Linguistic,
+                            )
+                            .unwrap();
                             calls += actual_calls;
                             count += black_box(current).len();
                         }
@@ -218,8 +222,11 @@ fn benchmark_direct_pipeline() {
                         _ => {
                             let current;
                             let source = if mode == "whole_pipeline" {
-                                let (fresh, actual_calls) =
-                                    analysis::segment_counted(black_box(input)).unwrap();
+                                let (fresh, actual_calls) = analysis::segment_counted(
+                                    black_box(input),
+                                    AnalysisMode::Linguistic,
+                                )
+                                .unwrap();
                                 calls += actual_calls;
                                 current = fresh;
                                 &current
@@ -274,7 +281,7 @@ fn benchmark_direct_pipeline() {
     println!(
         "PGCB_BENCHMARK={}",
         serde_json::json!({
-        "process_id":std::process::id(),"first_raw_segment_ns":first_raw_segment_ns,
+        "process_id":std::process::id(),"analysis_mode":"linguistic","first_raw_segment_ns":first_raw_segment_ns,
         "first_segment_with_language_ns":first_segment_with_language_ns,
         "first_sample_order":"raw segment first, then completion; not two independent cold starts",
         "per_language_builtin_fst_init":fst_initializations,"four_configurations_init_ns":four_configurations_init_ns,

@@ -19,7 +19,10 @@ SELECT pg_temp.expect_error($s$CREATE TEXT SEARCH DICTIONARY errors.capability(T
 SELECT pg_temp.expect_error($s$CREATE TEXT SEARCH DICTIONARY errors.conflict(TEMPLATE=charabia.linguistic_template,Language='eng',Filter=true)$s$,'22023');
 SELECT pg_temp.expect_error($s$CREATE TEXT SEARCH DICTIONARY errors.retired_stop(TEMPLATE=charabia.linguistic_template,Language='eng',AddStopWords='["x"]')$s$,'22023');
 SELECT pg_temp.expect_error($s$SELECT to_tsvector('public.charabia',repeat(' ',262145))$s$,'54000');
-SELECT pg_temp.expect_error($s$SELECT ts_parse('charabia.parser',repeat('a',262145))$s$,'54000');
+SELECT pg_temp.expect_error($s$SELECT ts_parse('charabia.linguistic_parser',repeat('a',262145))$s$,'54000');
+SELECT pg_temp.expect_error($s$SELECT ts_parse('charabia.structured_parser',repeat('a',262145))$s$,'54000');
+SELECT pg_temp.expect_error($s$SELECT * FROM charabia.analyze(repeat('a',262145),'public.charabia_structured')$s$,'54000');
+SELECT pg_temp.expect_error($s$SELECT to_tsvector('public.charabia_structured',repeat(' ',262145))$s$,'54000');
 SELECT pg_temp.expect_error($s$SELECT ts_lexize('charabia.und',repeat('a',262145))$s$,'54000');
 SELECT pg_temp.expect_error($s$SELECT * FROM charabia.analyze(repeat('a',262145))$s$,'54000');
 SELECT pg_temp.expect_error($s$SELECT charabia.query_any(repeat('a',262145))$s$,'54000');

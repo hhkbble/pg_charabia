@@ -15,11 +15,17 @@ INSERT INTO native_routes SELECT ord::integer,alias FROM unnest(ARRAY[
  'eng','deu','nld','rus','spa','fra','por','ita','ara','tur','cmn','jpn','kor','vie','tha','und','blank','display_only','url','host','email','file','numword'
 ]) WITH ORDINALITY AS r(alias,ord);
 SELECT pg_temp.assert_true(NOT EXISTS(
- (SELECT tokid,alias FROM ts_token_type('charabia.parser') EXCEPT SELECT id,alias FROM native_routes)
- UNION ALL (SELECT id,alias FROM native_routes EXCEPT SELECT tokid,alias FROM ts_token_type('charabia.parser'))),
- '23 fixed token IDs and aliases');
-SELECT pg_temp.assert_true((SELECT count(*)=21 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),
- 'default has exactly 21 mappings');
+ (SELECT tokid,alias FROM ts_token_type('charabia.linguistic_parser') EXCEPT SELECT id,alias FROM native_routes WHERE id<=18)
+ UNION ALL (SELECT id,alias FROM native_routes WHERE id<=18 EXCEPT SELECT tokid,alias FROM ts_token_type('charabia.linguistic_parser'))),
+ '18 fixed linguistic token IDs and aliases');
+SELECT pg_temp.assert_true(NOT EXISTS(
+ (SELECT tokid,alias FROM ts_token_type('charabia.structured_parser') EXCEPT SELECT id,alias FROM native_routes)
+ UNION ALL (SELECT id,alias FROM native_routes EXCEPT SELECT tokid,alias FROM ts_token_type('charabia.structured_parser'))),
+ '23 fixed structured token IDs and aliases');
+SELECT pg_temp.assert_true((SELECT count(*)=16 FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig),
+ 'default has exactly 16 linguistic mappings');
+SELECT pg_temp.assert_true((SELECT count(*)=21 FROM pg_ts_config_map WHERE mapcfg='public.charabia_structured'::regconfig),
+ 'structured has exactly 21 mappings');
 SELECT pg_temp.assert_true((SELECT (i->>'language_count')::integer=16
  AND jsonb_array_length(i->'languages')=16
  AND (SELECT count(*)=15 FROM jsonb_array_elements(i->'languages') l WHERE (l->>'has_stopwords')::boolean)
@@ -38,10 +44,12 @@ SELECT pg_temp.assert_true((SELECT bool_and(d.dicttemplate=(SELECT oid FROM pg_t
 
 CREATE TEMP TABLE native_abi(signature text,result text,symbol text);
 INSERT INTO native_abi VALUES
- ('charabia.parser_start(internal,integer)','internal','parser_start_wrapper'),
+ ('charabia.linguistic_parser_start(internal,integer)','internal','linguistic_parser_start_wrapper'),
+ ('charabia.structured_parser_start(internal,integer)','internal','structured_parser_start_wrapper'),
  ('charabia.parser_gettoken(internal,internal,internal)','internal','parser_gettoken_wrapper'),
  ('charabia.parser_end(internal)','void','parser_end_wrapper'),
- ('charabia.parser_lextypes(internal)','internal','parser_lextypes_wrapper'),
+ ('charabia.linguistic_parser_lextypes(internal)','internal','linguistic_parser_lextypes_wrapper'),
+ ('charabia.structured_parser_lextypes(internal)','internal','structured_parser_lextypes_wrapper'),
  ('charabia.parser_headline(internal,internal,tsquery)','internal','parser_headline_wrapper'),
  ('charabia.linguistic_dictionary_init(internal)','internal','linguistic_dictionary_init_wrapper'),
  ('charabia.linguistic_dictionary_lexize(internal,internal,internal,internal)','internal','linguistic_dictionary_lexize_wrapper'),
@@ -51,16 +59,18 @@ SELECT pg_temp.assert_true((SELECT bool_and(coalesce(p.prorettype=to_regtype(a.r
  AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='c') AND p.proisstrict
  AND p.prosrc=a.symbol AND NOT p.proretset,false))
  FROM native_abi a LEFT JOIN pg_proc p ON p.oid=to_regprocedure(a.signature)), 'actual callback ABI and symbols');
-SELECT pg_temp.assert_true((SELECT prsstart='charabia.parser_start(internal,integer)'::regprocedure
+SELECT pg_temp.assert_true((SELECT count(*)=2 AND bool_and(
+ prsstart=to_regprocedure('charabia.'||prsname||'_start(internal,integer)')
  AND prstoken='charabia.parser_gettoken(internal,internal,internal)'::regprocedure
  AND prsend='charabia.parser_end(internal)'::regprocedure
- AND prslextype='charabia.parser_lextypes(internal)'::regprocedure
- AND prsheadline='charabia.parser_headline(internal,internal,tsquery)'::regprocedure
- FROM pg_ts_parser WHERE prsnamespace='charabia'::regnamespace AND prsname='parser'), 'parser registers real HEADLINE and lifecycle callbacks');
+ AND prslextype=to_regprocedure('charabia.'||prsname||'_lextypes(internal)')
+ AND prsheadline='charabia.parser_headline(internal,internal,tsquery)'::regprocedure)
+ FROM pg_ts_parser WHERE prsnamespace='charabia'::regnamespace
+ AND prsname IN('linguistic_parser','structured_parser')), 'both Parsers register real HEADLINE and lifecycle callbacks');
 SELECT pg_temp.assert_true((SELECT tmplinit='charabia.linguistic_dictionary_init(internal)'::regprocedure
  AND tmpllexize='charabia.linguistic_dictionary_lexize(internal,internal,internal,internal)'::regprocedure
  FROM pg_ts_template WHERE tmplnamespace='charabia'::regnamespace AND tmplname='linguistic_template'), 'terminal template callbacks');
-SELECT pg_temp.assert_true((SELECT cfgparser=(SELECT oid FROM pg_ts_parser WHERE prsnamespace='charabia'::regnamespace AND prsname='parser') FROM pg_ts_config WHERE oid='public.charabia'::regconfig),
+SELECT pg_temp.assert_true((SELECT cfgparser=(SELECT oid FROM pg_ts_parser WHERE prsnamespace='charabia'::regnamespace AND prsname='linguistic_parser') FROM pg_ts_config WHERE oid='public.charabia'::regconfig),
  'public default uses charabia parser');
 SELECT pg_temp.assert_true((SELECT bool_and(proparallel<>'s') FROM pg_proc WHERE pronamespace='charabia'::regnamespace),
  'no unverified PARALLEL SAFE declaration');
@@ -81,14 +91,29 @@ SELECT pg_temp.assert_true(NOT EXISTS(SELECT 1 FROM native_abi a JOIN pg_proc p 
 
 -- A native simple-mapped instance isolates exact PG positions/query syntax
 -- from language classification and this extension's terminal Dictionary.
-CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.stable(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.stable(PARSER=charabia.linguistic_parser);
 DO $map$
 DECLARE types text;
 BEGIN
  SELECT string_agg(quote_ident(alias),',') INTO types FROM native_routes WHERE id<=16;
  EXECUTE 'ALTER TEXT SEARCH CONFIGURATION pgcb_native_sql.stable ADD MAPPING FOR '||types||' WITH pg_catalog.simple';
 END $map$;
-SELECT pg_temp.assert_true((SELECT count(*)=0 FROM ts_parse('charabia.parser','')), 'empty parser EOF');
+-- Final ordinary Parser units own positions; structural components are not an ordinary oracle.
+SELECT pg_temp.assert_true(to_tsvector('pgcb_native_sql.stable','alpha 100ms beta')=
+ $v$'100ms':2 'alpha':1 'beta':3$v$::tsvector, 'linguistic numword stays one ordinary position');
+SELECT pg_temp.assert_true(to_tsvector('pgcb_native_sql.stable','alpha foo_bar.rs beta')=
+ $v$'alpha':1 'bar':3 'beta':5 'foo':2 'rs':4$v$::tsvector, 'linguistic file punctuation leaves sequential ordinary positions');
+SELECT pg_temp.assert_true(to_tsvector('pgcb_native_sql.stable','foo_bar.rs') @@
+ to_tsquery('pgcb_native_sql.stable','foo <-> bar'), 'ordinary file words support their native phrase');
+SELECT pg_temp.assert_true(NOT(to_tsvector('public.charabia','100ms') @@ 'ms'::tsquery)
+ AND to_tsvector('public.charabia_structured','100ms') @@ 'ms'::tsquery,
+ 'only explicit structured mode adds a missing component');
+SELECT pg_temp.assert_true(plainto_tsquery('public.charabia','100ms')='100ms'::tsquery
+ AND plainto_tsquery('public.charabia_structured','100ms')=$q$'100ms' | '100' & 'ms'$q$::tsquery,
+ 'plain query preserves ordinary unit versus structured variant bundle');
+SELECT pg_temp.assert_true(to_tsvector('public.charabia','100ms') @@ to_tsquery('public.charabia','100:*'),
+ 'ordinary literal prefix does not imply a separately indexed component');
+SELECT pg_temp.assert_true((SELECT count(*)=0 FROM ts_parse('charabia.linguistic_parser','')), 'empty parser EOF');
 SELECT pg_temp.assert_true(to_tsvector('public.charabia','')=''::tsvector, 'empty vector');
 SELECT pg_temp.assert_true(to_tsvector('pgcb_native_sql.stable','alpha. beta')=$v$'alpha':1 'beta':2$v$::tsvector,
  'hard separator has no extra position');
@@ -116,7 +141,7 @@ SELECT pg_temp.assert_true(to_tsvector('pgcb_native_sql.stable','alpha beta') @@
 -- This tests Stop positions independently of statistical language selection.
 CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.eng_stop(TEMPLATE=charabia.linguistic_template,
  Language='eng',Discard=true,Stem=false,Normalize=true,Filter=false);
-CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.stop(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.stop(PARSER=charabia.linguistic_parser);
 DO $map$
 DECLARE types text;
 BEGIN
@@ -153,7 +178,7 @@ $fn$;
 -- automatic language quality is not the normalized-byte boundary oracle.
 CREATE TEXT SEARCH DICTIONARY pgcb_native_sql.ara(TEMPLATE=charabia.linguistic_template,
  Language='ara',Discard=false,Stem=false,Normalize=true,Filter=false);
-CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.arabic(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION pgcb_native_sql.arabic(PARSER=charabia.linguistic_parser);
 DO $map$
 DECLARE types text;
 BEGIN
@@ -177,16 +202,16 @@ BEGIN
  FOREACH n IN ARRAY ARRAY[2046,2047,2048] LOOP
   raw:=repeat('a',n);
   PERFORM pg_temp.assert_true((SELECT string_agg(token,'' ORDER BY ord)=raw AND bool_and(octet_length(token)<=2046)
-   FROM ts_parse('charabia.parser',raw) WITH ORDINALITY t(id,token,ord)), 'raw reconstruction and bounded span '||n);
+   FROM ts_parse('charabia.linguistic_parser',raw) WITH ORDINALITY t(id,token,ord)), 'raw reconstruction and bounded span '||n);
   PERFORM pg_temp.assert_true((SELECT bool_and(CASE WHEN n>=2047 THEN tokid=18 ELSE tokid<>18 END)
-   FROM ts_parse('charabia.parser',raw)), 'display-only boundary '||n);
+   FROM ts_parse('charabia.linguistic_parser',raw)), 'display-only boundary '||n);
   PERFORM pg_temp.assert_true(octet_length((ts_lexize('charabia.und',raw))[1])=n, 'direct lexize raw byte boundary '||n);
   SELECT length(to_tsvector('pgcb_native_sql.stable',raw)) INTO actual;
   PERFORM pg_temp.assert_true(actual=CASE WHEN n<2047 THEN 1 ELSE 0 END, 'oversized raw word is not indexed '||n);
  END LOOP;
  FOREACH n IN ARRAY ARRAY[2047,2048] LOOP
   raw:=CASE WHEN n=2047 THEN repeat('ﷺ',61)||repeat('ا',17) ELSE repeat('ﷺ',62)||'ا' END;
-  PERFORM pg_temp.assert_true((SELECT count(*)=1 FROM ts_parse('charabia.parser',raw)), 'one raw expansion token '||n);
+  PERFORM pg_temp.assert_true((SELECT count(*)=1 FROM ts_parse('charabia.linguistic_parser',raw)), 'one raw expansion token '||n);
   normalized:=(ts_lexize('pgcb_native_sql.ara',raw))[1];
   PERFORM pg_temp.assert_true(octet_length(raw)<2047 AND octet_length(normalized)=n, 'independent NFKD byte arithmetic '||n);
   SELECT length(to_tsvector('pgcb_native_sql.arabic',raw)) INTO actual;

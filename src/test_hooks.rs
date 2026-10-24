@@ -10,6 +10,8 @@ use std::{
 static FAULT: AtomicU32 = AtomicU32::new(0);
 static PARSER_CREATED: AtomicU64 = AtomicU64::new(0);
 static PARSER_DROPPED: AtomicU64 = AtomicU64::new(0);
+static NESTED_LINGUISTIC: AtomicU64 = AtomicU64::new(0);
+static NESTED_STRUCTURED: AtomicU64 = AtomicU64::new(0);
 static DICTIONARY_CREATED: AtomicU64 = AtomicU64::new(0);
 static DICTIONARY_DROPPED: AtomicU64 = AtomicU64::new(0);
 static STATE_REGISTERED: AtomicU64 = AtomicU64::new(0);
@@ -103,6 +105,31 @@ pub fn hit(point: &str) {
             unsafe { pg_sys::palloc(usize::MAX) };
             unreachable!("PostgreSQL accepted an impossible allocation");
         }
+        5 | 6 => {
+            // GETTOKEN invokes this before borrowing ParserState. Clearing FAULT
+            // above makes the SPI parser nonrecursive while the outer state is live.
+            let created = PARSER_CREATED.load(Ordering::Relaxed);
+            let dropped = PARSER_DROPPED.load(Ordering::Relaxed);
+            assert!(
+                created > dropped,
+                "nested probe requires a live outer parser"
+            );
+            let structured = fault & 15 == 6;
+            let query = if structured {
+                "SELECT to_tsvector('public.charabia_structured','100ms') @@ 'ms'::tsquery"
+            } else {
+                "SELECT to_tsvector('public.charabia_linguistic','100ms') @@ 'ms'::tsquery"
+            };
+            let actual = pgrx::Spi::get_one::<bool>(query).expect("nested parser SPI");
+            assert_eq!(actual, Some(structured), "nested mode component contract");
+            assert_eq!(PARSER_CREATED.load(Ordering::Relaxed), created + 1);
+            assert_eq!(PARSER_DROPPED.load(Ordering::Relaxed), dropped + 1);
+            if structured {
+                NESTED_STRUCTURED.fetch_add(1, Ordering::Relaxed);
+            } else {
+                NESTED_LINGUISTIC.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         _ => unreachable!(),
     }
 }
@@ -114,6 +141,8 @@ fn test_set_fault(point: &str, mode: &str) {
         "panic" => 2,
         "wait" => 3,
         "allocation_error" => 4,
+        "nested_linguistic" if point == "gettoken" => 5,
+        "nested_structured" if point == "gettoken" => 6,
         _ => pg_ffi::fail(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "unknown test fault mode",
@@ -127,6 +156,8 @@ fn test_stats() -> JsonB {
     JsonB(serde_json::json!({
         "parser_created":PARSER_CREATED.load(Ordering::Relaxed),
         "parser_dropped":PARSER_DROPPED.load(Ordering::Relaxed),
+        "nested_linguistic":NESTED_LINGUISTIC.load(Ordering::Relaxed),
+        "nested_structured":NESTED_STRUCTURED.load(Ordering::Relaxed),
         "dictionary_created":DICTIONARY_CREATED.load(Ordering::Relaxed),
         "dictionary_dropped":DICTIONARY_DROPPED.load(Ordering::Relaxed),
         "state_registered":STATE_REGISTERED.load(Ordering::Relaxed),

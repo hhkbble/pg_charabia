@@ -61,5 +61,19 @@ SELECT pg_temp.assert_headline(
     '{"CAFÉ":"<b>CAFÉ</b> &amp; <b>cafe</b>","items":["<b>cafe</b>",2]}'::jsonb,
   'jsonb strings use the same match and rendering policy');
 
+-- The same literal operand matches ordinary raw words or a complete structure.
+SELECT pg_temp.assert_headline(
+  ts_headline('public.charabia_linguistic','alpha 100ms beta','ms'::tsquery,'HighlightAll=true')=
+    'alpha 100ms beta'
+  AND ts_headline('public.charabia_structured','alpha 100ms beta','ms'::tsquery,'HighlightAll=true')=
+    'alpha <b>100ms</b> beta',
+  'linguistic has no unit component while structured highlights its whole source');
+SELECT pg_temp.assert_headline(
+  ts_headline('public.charabia','GET https://Example.com/Running?q=100ms','run'::tsquery,'HighlightAll=true')=
+    'GET https://Example.com/<b>Running</b>?q=100ms'
+  AND ts_headline('public.charabia_structured','GET https://Example.com/Running?q=100ms','run'::tsquery,'HighlightAll=true')=
+    'GET <b>https://Example.com/Running?q=100ms</b>',
+  'default linguistic URL word and explicit structured whole URL retain exact source');
+
 SELECT count(*) AS headline_sql_assertions FROM headline_assertions;
 ROLLBACK;

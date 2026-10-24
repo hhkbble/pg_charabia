@@ -51,7 +51,7 @@ for probe in probes:
         if probe and probe.startswith("recovery-"):
             child = inner.get("recovery", {})
             valid = valid and child.get("cleanup_probe", {}).get("mode") == probe
-            valid = valid and all(child.get("cleanup", {}).get(k) for k in ("marker_matches", "clusters_stopped", "directory_removed"))
+            valid = valid and all(child.get("cleanup", {}).get(k) is True for k in ("marker_matches", "clusters_stopped", "directory_removed", "clients_joined"))
             valid = valid and child.get("status") == "failed"
     if not valid:
         raise SystemExit(f"Cleanup did not pass: {report}")

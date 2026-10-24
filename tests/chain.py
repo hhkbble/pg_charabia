@@ -125,11 +125,11 @@ def main():
             raise AssertionError(label + ": " + output)
         return json.loads(output) if parse else output
 
-    def config(session, name, chain):
+    def config(session, name, chain, mode="linguistic"):
+        parser = "charabia." + mode + "_parser"
         sql(session, "CREATE TEXT SEARCH CONFIGURATION " + schema + "." + name +
-            "(PARSER=charabia.parser);DO $fixture$ DECLARE r record;BEGIN "
-            "FOR r IN SELECT alias FROM ts_token_type('charabia.parser') "
-            "WHERE alias NOT IN('blank','display_only') LOOP "
+            "(PARSER=" + parser + ");DO $fixture$ DECLARE r record;BEGIN "
+            "FOR r IN SELECT alias FROM ts_token_type('" + parser + "') WHERE tokid<=16 LOOP "
             "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION " + schema + "." + name +
             " ADD MAPPING FOR %I WITH " + chain + "',r.alias);END LOOP;END$fixture$", "config-" + name)
 
@@ -239,6 +239,25 @@ def main():
                              literal(raw) + ")::text", "vector-" + name)
                 check(actual == expected, "real dictionary chain " + name,
                       {"input": raw, "expected": expected, "actual": actual})
+            # Both native START paths preserve ordinary external chain semantics.
+            # Reuse literal vector expectations, not the other mode's output.
+            structured_chains = {name for name, _, _ in cases}
+            for name in sorted(structured_chains):
+                config(session, "structured_" + name, chains[name], mode="structured")
+            for name, raw, expected in cases:
+                actual = sql(session, "SELECT to_tsvector(" + literal(schema + ".structured_" + name) + "," +
+                             literal(raw) + ")::text", "structured-vector-" + name)
+                check(actual == expected, "structured real dictionary chain " + name,
+                      {"mode": "structured", "config": schema + ".structured_" + name,
+                       "input": raw, "expected": expected, "actual": actual})
+            check(sql(session, "SELECT charabia.query_any('compound'," +
+                      literal(schema + ".structured_multi_position") + ")::text", "structured-added-position-query") == "'alpha' | 'beta'",
+                  "structured Parser preserves external ADDPOS query rewriting")
+            check(sql(session, "SELECT ts_headline(" + literal(schema + ".structured_filter_syn") +
+                      ",'PostgreSQL & <tag>',charabia.query_any('PostgreSQL'," +
+                      literal(schema + ".structured_filter_syn") + "),'HighlightAll=true')", "structured-chain-headline")
+                  == "<b>PostgreSQL</b> &amp; &lt;tag&gt;",
+                  "structured Parser keeps original source through an external filter/synonym chain")
             four = literal(schema + ".four_variants")
             four_terms = ["abbrevıate", "abbrevıa", "abbreviate", "abbrevi"]
             actual = sql(session, "SELECT to_json(ts_lexize(" + literal(schema + ".tur_parallel") +

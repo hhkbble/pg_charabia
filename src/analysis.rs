@@ -13,6 +13,18 @@ pub use crate::prepare::{
 };
 use crate::routes::{LanguageId, TokenType};
 
+#[cfg(test)]
+thread_local! {
+    static STRUCTURED_SCAN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The Parser chooses a mode before segmentation; dictionary state is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalysisMode {
+    Linguistic,
+    Structured,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
@@ -210,11 +222,14 @@ pub struct TokenAnalysis {
     pub outcome: LexizeOutcome,
 }
 
-pub fn segment(input: &str) -> Result<Vec<Span>, AnalysisError> {
-    segment_counted(input).map(|(spans, _)| spans)
+pub fn segment(input: &str, mode: AnalysisMode) -> Result<Vec<Span>, AnalysisError> {
+    segment_counted(input, mode).map(|(spans, _)| spans)
 }
 
-pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), AnalysisError> {
+pub(crate) fn segment_counted(
+    input: &str,
+    mode: AnalysisMode,
+) -> Result<(Vec<Span>, usize), AnalysisError> {
     check_input(input)?;
     let allowed = crate::language_data::LANGUAGES.map(|row| row.0);
     let mut builder = TokenizerBuilder::default();
@@ -259,11 +274,15 @@ pub(crate) fn segment_counted(input: &str) -> Result<(Vec<Span>, usize), Analysi
         ));
     }
     let calls = crate::language::complete(input, &mut spans)?;
-    let spans = overlay_structured_tokens(
-        input,
-        spans,
-        &crate::structured_tokens::recognition::scan(input),
-    )?;
+    let spans = match mode {
+        AnalysisMode::Linguistic => spans,
+        AnalysisMode::Structured => {
+            #[cfg(test)]
+            STRUCTURED_SCAN_CALLS.with(|calls| calls.set(calls.get() + 1));
+            let candidates = crate::structured_tokens::recognition::scan(input);
+            overlay_structured_tokens(input, spans, &candidates)?
+        }
+    };
     let spans = split_literal_delimiters(input, spans);
     // Classify each upstream span once. The merge and type assignment reuse it.
     let classified = spans
@@ -1093,7 +1112,7 @@ mod tests {
             "Ελληνικά עברית বাংলা हिन्दी",
             "1234 !",
         ] {
-            let (spans, calls) = segment_counted(input).unwrap();
+            let (spans, calls) = segment_counted(input, AnalysisMode::Structured).unwrap();
             assert_eq!(calls, 0);
             assert_eq!(
                 spans
@@ -1118,7 +1137,7 @@ mod tests {
             ("Русский язык", Language::Rus),
             ("ภาษาไทย", Language::Tha),
         ] {
-            let spans = segment(input).unwrap();
+            let spans = segment(input, AnalysisMode::Structured).unwrap();
             assert!(
                 spans
                     .iter()
@@ -1131,14 +1150,14 @@ mod tests {
     #[test]
     fn actual_camel_segmentation_and_fixed_lexicon_restore_only_the_full_word() {
         for raw in ["PostgreSQL", "postgreSQL", "camelCase"] {
-            let spans = segment(raw).unwrap();
+            let spans = segment(raw, AnalysisMode::Structured).unwrap();
             assert_eq!(spans.len(), 1, "{raw:?}");
             assert_eq!((spans[0].start, spans[0].end), (0, raw.len()));
             assert_eq!(spans[0].route, LanguageId::ENG);
             assert_eq!(spans[0].language_source, LanguageSource::EnglishMerge);
         }
         for raw in ["postgresql", "POSTGRESQL"] {
-            let spans = segment(raw).unwrap();
+            let spans = segment(raw, AnalysisMode::Structured).unwrap();
             assert!(
                 spans
                     .iter()
@@ -1147,7 +1166,7 @@ mod tests {
         }
         assert!(!crate::resources::english_contains("databaseapi"));
         let raw = "databaseAPI";
-        let spans = segment(raw).unwrap();
+        let spans = segment(raw, AnalysisMode::Structured).unwrap();
         assert_eq!(
             spans
                 .iter()
@@ -1160,6 +1179,97 @@ mod tests {
                 .iter()
                 .all(|span| span.language_source != LanguageSource::EnglishMerge)
         );
+    }
+
+    #[test]
+    fn linguistic_never_invokes_the_structured_scanner() {
+        let input = "https://Example.com/Running?q=100ms foo_bar.rs 100ms";
+        STRUCTURED_SCAN_CALLS.with(|calls| calls.set(0));
+        segment(input, AnalysisMode::Linguistic).unwrap();
+        assert_eq!(STRUCTURED_SCAN_CALLS.with(|calls| calls.get()), 0);
+        segment(input, AnalysisMode::Structured).unwrap();
+        assert_eq!(STRUCTURED_SCAN_CALLS.with(|calls| calls.get()), 1);
+    }
+
+    #[test]
+    fn linguistic_keeps_ordinary_units_and_shared_raw_boundaries() {
+        let input = "alpha 100ms foo_bar.rs beta";
+        let spans = segment(input, AnalysisMode::Linguistic).unwrap();
+        let words: Vec<_> = spans
+            .iter()
+            .filter(|span| span.token_type.is_language())
+            .map(|span| &input[span.start..span.end])
+            .collect();
+        // Ordinary final Parser units, independently specified from the text.
+        assert_eq!(words, ["alpha", "100ms", "foo", "bar", "rs", "beta"]);
+        assert!(
+            spans
+                .iter()
+                .all(|span| !matches!(span.token_type, TokenType::Structured(_)))
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .map(|s| &input[s.start..s.end])
+                .collect::<String>(),
+            input
+        );
+        for span in spans {
+            assert_eq!(input[..span.start].chars().count(), span.char_start);
+            assert_eq!(input[..span.end].chars().count(), span.char_end);
+        }
+        let structured = segment(input, AnalysisMode::Structured).unwrap();
+        let kinds: Vec<_> = structured
+            .iter()
+            .filter_map(|span| match span.token_type {
+                TokenType::Structured(kind) => Some((kind.alias(), &input[span.start..span.end])),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [("numword", "100ms"), ("file", "foo_bar.rs")]);
+    }
+
+    #[test]
+    fn modes_share_language_english_delimiter_and_resource_rules() {
+        for input in [
+            "PostgreSQL 中文 café 日本語 한국어 Русский язык ภาษาไทย",
+            "camelCase databaseAPI",
+            "alpha <beta> gamma=delta",
+            "a\u{1D2B}Бb\u{1D78}",
+        ] {
+            assert_eq!(
+                segment(input, AnalysisMode::Linguistic).unwrap(),
+                segment(input, AnalysisMode::Structured).unwrap(),
+                "no structured candidate in {input:?}"
+            );
+        }
+        for mode in [AnalysisMode::Linguistic, AnalysisMode::Structured] {
+            assert!(segment("", mode).unwrap().is_empty());
+            assert_eq!(
+                segment("a\0b", mode).unwrap_err().kind,
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                segment(&"a".repeat(MAX_INPUT_BYTES + 1), mode)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Limit
+            );
+            let input = "é".repeat(1024);
+            let spans = segment(&input, mode).unwrap();
+            assert!(
+                spans
+                    .iter()
+                    .all(|span| span.token_type == TokenType::Display)
+            );
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|span| &input[span.start..span.end])
+                    .collect::<String>(),
+                input
+            );
+        }
     }
 
     #[test]
@@ -1186,7 +1296,7 @@ mod tests {
     #[test]
     fn markup_delimiters_do_not_hide_ordinary_words_or_split_structured_tokens() {
         let input = "<a href=\"https://Example.com/A?q=100ms\">search &amp; ordinary</a>";
-        let spans = segment(input).unwrap();
+        let spans = segment(input, AnalysisMode::Structured).unwrap();
         let words: Vec<_> = spans
             .iter()
             .filter(|s| s.token_type.is_language())
@@ -1209,7 +1319,7 @@ mod tests {
     #[test]
     fn parser_prefix_classification_keeps_external_dictionaries_off_blank() {
         let input = "alpha, beta\t\u{1} CAFÉ";
-        let spans = segment(input).unwrap();
+        let spans = segment(input, AnalysisMode::Structured).unwrap();
         let words = spans
             .iter()
             .filter(|span| span.token_type.is_language())
@@ -1225,7 +1335,7 @@ mod tests {
     #[test]
     fn display_fragments_preserve_long_raw_text_without_subterms() {
         for text in ["x".repeat(2046), "x".repeat(2047), "é".repeat(1024)] {
-            let spans = segment(&text).unwrap();
+            let spans = segment(&text, AnalysisMode::Structured).unwrap();
             assert_eq!(
                 spans
                     .iter()
@@ -1245,7 +1355,7 @@ mod tests {
     #[test]
     fn a_long_separator_run_retains_the_original_small_spans() {
         let input = " ".repeat(4096);
-        let spans = segment(&input).unwrap();
+        let spans = segment(&input, AnalysisMode::Structured).unwrap();
         assert_eq!(spans.len(), 4096);
         assert!(
             spans
@@ -1263,10 +1373,15 @@ mod tests {
 
     #[test]
     fn raw_boundaries_and_input_limits_are_checked() {
-        assert!(segment("").unwrap().is_empty());
-        assert_eq!(segment("a\0b").unwrap_err().kind, ErrorKind::InvalidInput);
+        assert!(segment("", AnalysisMode::Structured).unwrap().is_empty());
         assert_eq!(
-            segment(&"a".repeat(MAX_INPUT_BYTES + 1)).unwrap_err().kind,
+            segment("a\0b", AnalysisMode::Structured).unwrap_err().kind,
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            segment(&"a".repeat(MAX_INPUT_BYTES + 1), AnalysisMode::Structured)
+                .unwrap_err()
+                .kind,
             ErrorKind::Limit
         );
         assert!(check_input(&"a".repeat(MAX_INPUT_BYTES)).is_ok());

@@ -4,12 +4,12 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from support import EVIDENCE, PSQL, Session, json_query, literal, native_config_sql, run, save
+from support import ANALYSIS_REVISION, FORMAT, EVIDENCE, PSQL, Session, json_query, literal, native_config_sql, run, save
 
 linux = os.environ["PGCB_PLATFORM"] == "linux-amd64"
 if linux:
     assert run("SELECT count(*) FROM pg_extension WHERE extname='pg_textsearch'")=="1"
-results = {"platform":os.environ["PGCB_PLATFORM"],"cache":[],"indexes":[],"prepared":[],"cached_init_faults":[],"drop_protection":{}}
+results = {"format": FORMAT, "analysis_revision": ANALYSIS_REVISION, "modes": {"linguistic": "public.charabia_linguistic", "structured": "public.charabia_structured"}, "platform":os.environ["PGCB_PLATFORM"],"cache":[],"indexes":[],"prepared":[],"cached_init_faults":[],"drop_protection":{}}
 has_hooks = os.environ.get("PGCB_TEST_HOOKS") == "1"
 DOCUMENT = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. CAFÉ."
 CACHE_DOCUMENT = DOCUMENT + " alpha beta the"
@@ -31,7 +31,7 @@ def alter(name, value, session=None):
 
 def dictionary(config, language="eng"):
     return run("SELECT m.mapdict::regdictionary::text FROM pg_ts_config_map m "
-               "JOIN ts_token_type('charabia.parser') t ON t.tokid=m.maptokentype "
+               "JOIN pg_ts_config c ON c.oid=m.mapcfg JOIN LATERAL ts_token_type(c.cfgparser) t ON t.tokid=m.maptokentype "
                "WHERE m.mapcfg=" + literal(config) + "::regconfig AND t.alias=" + literal(language))
 
 
@@ -325,7 +325,7 @@ def structured_prepared_lifecycle():
     dictionary_name = "lifecycle.structured_words"
     run("CREATE TEXT SEARCH DICTIONARY " + dictionary_name + "("
         "TEMPLATE=charabia.structured_template,Kind='numword',Discard=true,Stem=true,Normalize=true);"
-        "CREATE TEXT SEARCH CONFIGURATION " + config + "(COPY=public.charabia);"
+        "CREATE TEXT SEARCH CONFIGURATION " + config + "(COPY=public.charabia_structured);"
         "ALTER TEXT SEARCH CONFIGURATION " + config + " ALTER MAPPING FOR numword WITH " + dictionary_name + ";"
         "CREATE TABLE lifecycle.structured_docs(id int PRIMARY KEY,body text NOT NULL);"
         "INSERT INTO lifecycle.structured_docs VALUES(1,'Running100'),(2,'Other200');"
@@ -469,6 +469,89 @@ def structured_cached_init_faults():
             run("DROP TEXT SEARCH DICTIONARY " + name)
 
 
+roundtrip_roles = []
+roundtrip_owner = "pgcb_lifecycle_owner_" + str(os.getpid())
+roundtrip_reader = "pgcb_lifecycle_reader_" + str(os.getpid())
+roundtrip_configs = {"linguistic": "lifecycle.roundtrip_linguistic", "structured": "lifecycle.roundtrip_structured",
+                     "independent": "lifecycle.roundtrip_independent"}
+
+
+def setup_mode_roundtrip():
+    for role in (roundtrip_owner, roundtrip_reader):
+        run("CREATE ROLE " + role + " NOLOGIN")
+        roundtrip_roles.append(role)
+    run("GRANT USAGE,CREATE ON SCHEMA lifecycle TO " + roundtrip_owner + ";"
+        "GRANT USAGE ON SCHEMA lifecycle TO " + roundtrip_reader + ";"
+        "GRANT SELECT ON lifecycle.docs TO " + roundtrip_reader + ";"
+        "CREATE TEXT SEARCH DICTIONARY lifecycle.roundtrip_shared_words(TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=false,Normalize=false,English=false);"
+        "CREATE TEXT SEARCH DICTIONARY lifecycle.roundtrip_independent_words(TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=false,Normalize=false,English=false);")
+    for mode, name in roundtrip_configs.items():
+        base = "public.charabia_structured" if mode == "structured" else "public.charabia_linguistic"
+        dictionary_name = "lifecycle.roundtrip_independent_words" if mode == "independent" else "lifecycle.roundtrip_shared_words"
+        run("CREATE TEXT SEARCH CONFIGURATION " + name + "(COPY=" + base + ");"
+            "DO $copy$ DECLARE r record;BEGIN FOR r IN SELECT alias FROM ts_token_type('charabia.linguistic_parser')WHERE tokid<=16 LOOP "
+            "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION " + name + " ALTER MAPPING FOR %I WITH " + dictionary_name + "',r.alias);END LOOP;END$copy$;"
+            "ALTER TEXT SEARCH CONFIGURATION " + name + " OWNER TO " + roundtrip_owner)
+    for name in ("lifecycle.roundtrip_shared_words", "lifecycle.roundtrip_independent_words"):
+        run("ALTER TEXT SEARCH DICTIONARY " + name + " OWNER TO " + roundtrip_owner)
+
+
+def mode_roundtrip_catalog(database=None):
+    # Text Search objects have owners, not object ACL columns. Schema/table ACLs
+    # are dumped without --no-privileges and checked independently of ownership.
+    sql = "SELECT jsonb_build_object('configs',(SELECT jsonb_object_agg(cfgname,jsonb_build_object("
+    sql += "'oid',oid::bigint,'owner',pg_get_userbyid(cfgowner),'parser',(SELECT pg_catalog.format('%I.%I',n.nspname,p.prsname) FROM pg_catalog.pg_ts_parser p JOIN pg_catalog.pg_namespace n ON n.oid=p.prsnamespace WHERE p.oid=c.cfgparser)))FROM pg_catalog.pg_ts_config c WHERE c.cfgnamespace='lifecycle'::regnamespace AND c.cfgname LIKE 'roundtrip_%'),"
+    sql += "'dictionary_owners',(SELECT jsonb_object_agg(dictname,pg_get_userbyid(dictowner))FROM pg_ts_dict WHERE dictnamespace='lifecycle'::regnamespace AND dictname IN('roundtrip_shared_words','roundtrip_independent_words')),"
+    sql += "'schema_acl',(SELECT nspacl::text FROM pg_namespace WHERE nspname='lifecycle'),"
+    sql += "'owner_create',has_schema_privilege(" + literal(roundtrip_owner) + ",'lifecycle','CREATE'),"
+    sql += "'reader_usage',has_schema_privilege(" + literal(roundtrip_reader) + ",'lifecycle','USAGE'),"
+    sql += "'reader_create',has_schema_privilege(" + literal(roundtrip_reader) + ",'lifecycle','CREATE'),"
+    sql += "'reader_select',has_table_privilege(" + literal(roundtrip_reader) + ",'lifecycle.docs','SELECT'))"
+    return json.loads(run(sql, database))
+
+
+def verify_mode_roundtrip(original, database):
+    restored = mode_roundtrip_catalog(database)
+    record = results["dump_restore_modes"] = {"original":original,"restored":restored,"queries":[]}
+    save("lifecycle-results.json",results)
+    assert restored["schema_acl"] == original["schema_acl"], record
+    assert restored["owner_create"] and restored["reader_usage"] and restored["reader_select"] and not restored["reader_create"], record
+    assert restored["dictionary_owners"] == original["dictionary_owners"], record
+    for mode, name in roundtrip_configs.items():
+        config_name = name.split('.')[1]
+        before, after = original["configs"][config_name], restored["configs"][config_name]
+        assert before["oid"] != after["oid"] and after["owner"] == roundtrip_owner, record
+        assert after["parser"] == ("charabia.structured_parser" if mode == "structured" else "charabia.linguistic_parser"), record
+        literal_terms = run("SET ROLE " + roundtrip_reader + ";SELECT to_tsvector(" + literal(name) + ",'100ms') @@ 'ms'::tsquery",database)
+        headline = run("SET ROLE " + roundtrip_reader + ";SELECT ts_headline(" + literal(name) + ",'100ms','ms'::tsquery,'HighlightAll=true')",database)
+        observation = {"mode":mode,"config":name,"component_match":literal_terms,"headline":headline}
+        record["queries"].append(observation);save("lifecycle-results.json",results)
+        assert literal_terms == ("t" if mode == "structured" else "f"), observation
+        assert headline == ("<b>100ms</b>" if mode == "structured" else "100ms"), observation
+        assert run("SELECT to_tsvector(" + literal(name) + ",'Running') @@ 'run'::tsquery",database) == "f", observation
+    run("SET ROLE " + roundtrip_owner + ";ALTER TEXT SEARCH DICTIONARY lifecycle.roundtrip_shared_words(Stem=true)",database)
+    for mode, name in roundtrip_configs.items():
+        actual = run("SELECT to_tsvector(" + literal(name) + ",'Running') @@ 'run'::tsquery",database)
+        record.setdefault("shared_parameter",{})[mode] = actual
+        assert actual == ("f" if mode == "independent" else "t"), record
+    # Record the actual statistical route as evidence, never as the oracle.
+    record["owner_mapping_diagnostic"] = json.loads(run("SELECT jsonb_agg(to_jsonb(a)ORDER BY byte_start)FROM charabia.analyze('Running','lifecycle.roundtrip_linguistic')a",database))
+    # All language mappings originally shared the forced-English Dictionary.
+    # Replace the same set so the owner DDL test is independent of routing.
+    run("SET ROLE " + roundtrip_owner + ";DO $isolate$ DECLARE r record;BEGIN "
+        "FOR r IN SELECT alias FROM ts_token_type('charabia.linguistic_parser')WHERE tokid<=16 LOOP "
+        "EXECUTE format('ALTER TEXT SEARCH CONFIGURATION lifecycle.roundtrip_linguistic ALTER MAPPING FOR %I WITH lifecycle.roundtrip_independent_words',r.alias);"
+        "END LOOP;END$isolate$",database)
+    record["mapping_isolation"] = {}
+    for mode, name in roundtrip_configs.items():
+        actual = run("SELECT to_tsvector(" + literal(name) + ",'Running') @@ 'run'::tsquery",database)
+        record["mapping_isolation"][mode] = actual
+        save("lifecycle-results.json",results)
+        assert actual == ("t" if mode == "structured" else "f"), record
+    record["owner_alter_and_mapping_isolation"] = True
+    save("lifecycle-results.json",results)
+
+
 restore_db="pgcb_restore_"+str(os.getpid())
 drop_db="pgcb_drop_"+str(os.getpid())
 try:
@@ -526,6 +609,8 @@ try:
         structured_cached_init_faults()
 
     run(native_config_sql("lifecycle.roundtrip", stem=False, discard=False, normalize=False))
+    setup_mode_roundtrip()
+    original_modes = mode_roundtrip_catalog()
     original_oid = int(run("SELECT 'lifecycle.roundtrip'::regconfig::oid"))
     original_options = run("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lifecycle.roundtrip_eng'::regdictionary")
     run(f"CREATE DATABASE {restore_db} TEMPLATE template0")
@@ -534,10 +619,22 @@ try:
         if linux:
             run("CREATE EXTENSION pg_textsearch",restore_db)
         dump = EVIDENCE / "lifecycle-schema.sql"
+        dump_argv = [str(Path(PSQL).with_name("pg_dump")),"--schema-only","--schema=lifecycle"]
         with dump.open("w") as output:
-            subprocess.run([str(Path(PSQL).with_name("pg_dump")),"--schema-only","--no-owner","--no-privileges","--schema=lifecycle"],stdout=output,check=True)
-        restored = subprocess.run([PSQL,"-X","-v","ON_ERROR_STOP=1","-d",restore_db,"-f",str(dump)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            dumped = subprocess.run(dump_argv,stdout=output,stderr=subprocess.PIPE,text=True)
+        (EVIDENCE/"lifecycle-dump.stderr").write_text(dumped.stderr)
+        results["dump_restore_commands"] = {"dump_argv":dump_argv,"dump_exit":dumped.returncode,
+                                           "owner_and_acl_included":True}
+        save("lifecycle-results.json",results)
+        assert dumped.returncode == 0, dumped.stderr
+        restore_argv = [PSQL,"-X","-v","ON_ERROR_STOP=1","-d",restore_db,"-f",str(dump)]
+        restored = subprocess.run(restore_argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        (EVIDENCE/"lifecycle-restore.stdout").write_text(restored.stdout)
+        (EVIDENCE/"lifecycle-restore.stderr").write_text(restored.stderr)
+        results["dump_restore_commands"].update(restore_argv=restore_argv,restore_exit=restored.returncode)
+        save("lifecycle-results.json",results)
         assert restored.returncode == 0, restored.stderr
+        verify_mode_roundtrip(original_modes,restore_db)
         restored_oid = int(run("SELECT 'lifecycle.roundtrip'::regconfig::oid",restore_db))
         restored_options = run("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lifecycle.roundtrip_eng'::regdictionary",restore_db)
         assert original_oid != restored_oid, (original_oid,restored_oid)
@@ -584,5 +681,8 @@ try:
 finally:
     save("lifecycle-results.json",results)
     run("DROP SCHEMA lifecycle CASCADE")
+    for role in reversed(roundtrip_roles):
+        run("DROP ROLE " + role)
+    results["roundtrip_roles_removed"] = all(run("SELECT count(*)FROM pg_roles WHERE rolname=" + literal(role)) == "0" for role in roundtrip_roles)
 save("lifecycle-results.json",results)
 print(json.dumps({"status":"passed","cache_sessions":len(results["cache"]),"index_checks":len(results["indexes"]),"prepared_states":len(results["prepared"]),"prepared_index_checks":sum(len(state["queries"]) for state in results["prepared"]),"cached_init_fault_cases":len(results["cached_init_faults"]),"dump_restore":True,"drop_protection":results["drop_protection"]},ensure_ascii=False))

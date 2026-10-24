@@ -21,7 +21,7 @@ mod structured_tokens;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
 
-const ANALYSIS_REVISION: &str = "route16-structured-tokens-2";
+const ANALYSIS_REVISION: &str = "route16-dual-mode-1";
 
 #[pg_extern(sql = false)]
 fn analysis_info() -> JsonB {
@@ -43,8 +43,27 @@ fn analysis_info() -> JsonB {
         "analysis_revision":ANALYSIS_REVISION,"resource_fingerprint":format!("{:x}",Sha256::digest(fingerprint.as_bytes())),
         "language_count":routes::LanguageId::ALL.len(),"languages":languages.as_slice(),
         "structured_tokens":structured_tokens::identity(),
+        "default_configuration":"public.charabia",
+        "configurations":[
+            {"name":"public.charabia","mode":"linguistic"},
+            {"name":"public.charabia_linguistic","mode":"linguistic"},
+            {"name":"public.charabia_structured","mode":"structured"}
+        ],
+        "modes":[
+            {"mode":"linguistic","parser":"charabia.linguistic_parser","types":parser_types(routes::LINGUISTIC_TYPE_COUNT)},
+            {"mode":"structured","parser":"charabia.structured_parser","types":parser_types(routes::TYPE_COUNT)}
+        ],
         "resources":serde_json::from_str::<serde_json::Value>(include_str!("../resources/manifest.json")).expect("fixed resource manifest")
     }))
+}
+
+fn parser_types(count: usize) -> Vec<serde_json::Value> {
+    (1..=count)
+        .map(|id| {
+            let token_type = routes::TokenType::from_id(id as i32).expect("fixed token type");
+            serde_json::json!({"id":id,"alias":token_type.alias()})
+        })
+        .collect()
 }
 
 #[pg_extern(sql = false)]
@@ -62,6 +81,7 @@ fn query_any(text: AnyElement, configuration: pg_sys::Oid) -> Internal {
 )]
 fn analyze(
     text: AnyElement,
+    configuration: pg_sys::Oid,
 ) -> TableIterator<
     'static,
     (
@@ -80,7 +100,8 @@ fn analyze(
 > {
     // SAFETY: The explicit text Datum and detoasted bytes live for this callback.
     let input = unsafe { pg_ffi::text_input(text) };
-    let spans = pg_ffi::checked(analysis::segment(input));
+    let mode = pg_ffi::analysis_mode_for_config(configuration);
+    let spans = pg_ffi::checked(analysis::segment(input, mode));
     let mut rows = Vec::with_capacity(spans.len());
     for span in spans {
         pgrx::check_for_interrupts!();

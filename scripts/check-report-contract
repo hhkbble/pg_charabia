@@ -16,36 +16,179 @@ import tempfile
 import tarfile
 import unittest
 
-from report_contract import QUALITY_FIELDS, QUALITY_WARNING_REVIEW, REVIEWED_QUALITY_WARNINGS, reviewed_quality_warnings, ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, structured_token_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_bm25_report, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
+from report_contract import PUBLIC_API_QUERY, public_api_abi, require_public_api_abi, require_installation_files, DELIVERY_ANALYSIS_FIELDS, require_delivery_analysis_identity, MODES, DEFAULT_CONFIGS, mode_identity, configuration_identity, required_bm25_case_ids, require_bm25_case_coverage, mode_quality_reviews, MODE_QUALITY_REVIEW, QUALITY_FIELDS, QUALITY_WARNING_REVIEW, REVIEWED_QUALITY_WARNINGS, reviewed_quality_warnings, ANALYSIS_REVISION, ARCHIVE_SUITES, FORMAT, LANGUAGE_CODES, MAC_DEFAULT, RELEASE_VERSION, REQUIRED_QUALITY_CASES, REVIEWED_QUALITY_RESOLUTIONS, SUITES, default_catalog, structured_token_identity, digest, frozen_quality_cases, isolated_pg_environment, language_capabilities, quality_case, require_default_objects, require_bm25_report, require_recovery_report, require_release_identity, require_release_report, require_static_info, select_suites, validate_quality, verified_status, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class ContractTests(unittest.TestCase):
     def test_bm25_quality_summary_cannot_turn_warnings_into_pass(self):
-        cases = self.report()["quality"]["cases"]
-        for rows, expected in (
-            ([quality_case("independent-pass", input="alpha", query="alpha", config="public.charabia", expected=True, actual=True)], "verified"),
-            ([case for case in cases if case["status"] == "known-failure"], "verified-with-known-quality-failures"),
-            (cases, "verified-with-quality-warnings"),
-        ):
-            quality = validate_quality({"format": FORMAT, "cases": rows})
-            report = dict(status="passed", mechanism_status="passed", domain_quality=rows,
-                          quality=quality, quality_status=expected)
-            self.assertEqual(require_bm25_report(report), quality)
-            for forged in ("passed", "verified-with-known-quality-failures" if expected == "verified" else "verified"):
-                with self.assertRaisesRegex(ValueError, "quality status"):
-                    require_bm25_report(dict(report, quality_status=forged))
-            altered = copy.deepcopy(report)
-            altered["quality"]["counts"]["passed"] += 1
-            with self.assertRaisesRegex(ValueError, "summary"):
-                require_bm25_report(altered)
-        report = self.report()
-        report["bm25_quality"] = validate_quality({"format": FORMAT, "cases": [
-            case for case in cases if case["status"] != "warning"
-        ]})
-        with self.assertRaisesRegex(ValueError, "BM25 quality cases disagree"):
-            require_release_report(report)
+        report=self.bm25_report()
+        quality=require_bm25_report(report)
+        self.assertEqual(quality,report["quality"])
+        for forged in ("passed","verified","verified-with-known-quality-failures"):
+            with self.assertRaisesRegex(ValueError,"quality status"):
+                require_bm25_report(dict(report,quality_status=forged))
+        altered=copy.deepcopy(report)
+        altered["quality"]["counts"]["passed"]+=1
+        with self.assertRaisesRegex(ValueError,"summary"):
+            require_bm25_report(altered)
+        altered=self.report()
+        altered["bm25_quality"]=validate_quality({"format":FORMAT,"cases":[case for case in quality["cases"] if case["status"]!="warning"]})
+        with self.assertRaisesRegex(ValueError,"BM25 quality cases disagree"):
+            require_release_report(altered)
+        passed=quality_case("independent-pass",input="alpha",query="alpha",config="public.charabia",expected=True,actual=True,mode="linguistic")
+        self.assertEqual(verified_status(validate_quality({"format":FORMAT,"cases":[passed]})),"verified")
+        known=[case for case in quality["cases"] if case["status"]=="known-failure"]
+        self.assertEqual(verified_status(validate_quality({"format":FORMAT,"cases":known})),"verified-with-known-quality-failures")
+
+    def test_mode_identity_and_complete_case_sets_are_required(self):
+        report=self.bm25_report()
+        self.assertEqual(len(required_bm25_case_ids()),247)
+        require_bm25_report(report)
+        for mode in MODES:
+            changed=copy.deepcopy(report)
+            del changed["mode_reports"][mode]
+            with self.assertRaisesRegex(ValueError,"mode reports"):
+                require_bm25_report(changed)
+            rows=[case for case in report["domain_quality"] if case["mode"]!=mode]
+            with self.assertRaisesRegex(ValueError,"coverage"):
+                require_bm25_case_coverage(validate_quality({"format":FORMAT,"cases":rows}))
+        rows=report["domain_quality"]
+        with self.assertRaisesRegex(ValueError,"duplicate"):
+            validate_quality({"format":FORMAT,"cases":rows+[copy.deepcopy(rows[0])]})
+        for field in ("mode","analysis_revision"):
+            changed=copy.deepcopy(rows[0]);del changed[field]
+            with self.assertRaisesRegex(ValueError,"Incomplete"):
+                validate_quality({"format":FORMAT,"cases":[changed]})
+        for mode,config in (("linguistic","public.charabia_structured"),("structured","public.charabia_linguistic")):
+            with self.assertRaisesRegex(ValueError,"conflicts"):
+                quality_case("wrong-mode",input="alpha",query="alpha",config=config,expected=True,actual=True,mode=mode)
+        for old_format in (1,2):
+            with self.assertRaisesRegex(ValueError,"format"):
+                validate_quality({"format":old_format,"cases":[]})
+
+    def test_git_worktree_metadata_mount_is_read_only_and_specific(self):
+        import runpy
+        mounts=runpy.run_path(str(ROOT/"scripts/run-linux.py"))["git_metadata_mounts"]
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/"repository";root.mkdir()
+            def git(*args):
+                return subprocess.check_output(["git","-C",str(root),*args],text=True,stderr=subprocess.PIPE)
+            git("init","--quiet")
+            (root/"seed").write_text("owned fixture\n")
+            git("add","seed")
+            git("-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","--quiet","-m","Fixture")
+            worktree=Path(directory)/"worktree"
+            git("worktree","add","--detach",str(worktree),"HEAD")
+            self.assertEqual(mounts(root),[])
+            common=(root/".git").resolve()
+            self.assertEqual(mounts(worktree),["--mount",f"type=bind,src={common},dst={common},readonly"])
+
+    def test_delivery_analysis_identity_requires_both_modes(self):
+        info=self.info()
+        manifest={field:copy.deepcopy(info[field]) for field in DELIVERY_ANALYSIS_FIELDS}
+        require_delivery_analysis_identity(manifest,info)
+        for field in DELIVERY_ANALYSIS_FIELDS:
+            changed=copy.deepcopy(manifest);del changed[field]
+            with self.assertRaisesRegex(ValueError,"Delivery analysis identity"):
+                require_delivery_analysis_identity(changed,info)
+        changed=copy.deepcopy(manifest);changed["modes"].pop()
+        with self.assertRaisesRegex(ValueError,"Delivery analysis identity"):
+            require_delivery_analysis_identity(changed,info)
+
+    def test_mode_report_format_costs_and_client_exit_evidence_are_required(self):
+        report=self.bm25_report()
+        for changed in (dict(report,format=2),dict(report,analysis_revision="old")):
+            with self.assertRaisesRegex(ValueError,"format or analysis identity"):
+                require_bm25_report(changed)
+        changed=copy.deepcopy(report);del changed["mode_reports"]["structured"]["structured_tokens"]
+        with self.assertRaisesRegex(ValueError,"precision cost"):
+            require_bm25_report(changed)
+        for key,value in (("signal_handoff_registered",False),("direct_waited",False),("group_empty",False),("cleanup_complete",False),
+                          ("remaining_owned_pids",[123]),("errors",["unjoined"]),("direct_exit_code",1)):
+            changed=self.recovery();changed["client_exit_proofs"][0][key]=value
+            with self.assertRaisesRegex(ValueError,"client process exit"):
+                require_recovery_report(changed,"f"*64)
+        changed=self.recovery();changed["cleanup"]["clients_joined"]=False
+        with self.assertRaisesRegex(ValueError,"clients were not joined"):
+            require_recovery_report(changed,"f"*64)
+
+    def test_all_quality_provenance_hashes_are_immutable(self):
+        fixtures=("tests/fixtures/quality-known.json",QUALITY_WARNING_REVIEW["file"],MODE_QUALITY_REVIEW["file"])
+        messages=("Reviewed frozen quality evidence changed","Reviewed quality warning evidence changed","Mode quality review evidence changed")
+        for modified,message in zip(fixtures,messages):
+            with tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)
+                for name in ("scripts/report_contract.py",*fixtures):
+                    target=root/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/name,target)
+                path=root/modified;path.write_bytes(path.read_bytes()+b"\n")
+                script="import sys;sys.path.insert(0,'scripts');from report_contract import frozen_quality_cases,quality_case;v=frozen_quality_cases()['english-short-phrase'];quality_case('english-short-phrase',**v,known_signature=v,mode='linguistic',observed_signature={})"
+                result=subprocess.run([sys.executable,"-c",script],cwd=root,text=True,capture_output=True)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn(message,result.stderr)
+
+    def test_public_api_requires_strict_search_path_and_actual_default(self):
+        actual=public_api_abi()
+        require_public_api_abi(actual)
+        for index in range(3):
+            for key in ("strict","configuration","default_count","defaults"):
+                changed=copy.deepcopy(actual);changed[index][key]=None if key!="defaults" else "'english'::regconfig"
+                with self.assertRaisesRegex(ValueError,"Public diagnostic ABI"):
+                    require_public_api_abi(changed)
+        with self.assertRaises(ValueError):require_public_api_abi(actual+[copy.deepcopy(actual[1])])
+
+    def test_staging_and_packaging_reject_old_installation_sql(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage=Path(directory)
+            current=stage/f"pg_charabia--{RELEASE_VERSION}.sql"
+            current.write_text("-- owned current fixture\n")
+            require_installation_files(stage)
+            for old in ("pg_charabia--0.3.0.sql","pg_charabia--0.3.0--0.3.1.sql","pg_charabia--0.3.1--0.4.0.sql"):
+                path=stage/old;path.write_text("-- rejected old fixture\n")
+                with self.assertRaisesRegex(ValueError,"fresh current installation"):
+                    require_installation_files(stage)
+                path.unlink()
+            current.unlink()
+            with self.assertRaises(ValueError):require_installation_files(stage)
+
+    def test_recovery_requires_both_mode_histories_and_exited_processes(self):
+        report=self.recovery()
+        require_recovery_report(report,"f"*64)
+        for stage in ("target","crash","restored"):
+            for mode in MODES:
+                changed=copy.deepcopy(report);del changed["mode_evidence"][stage][mode]
+                with self.assertRaisesRegex(ValueError,"mode evidence"):
+                    require_recovery_report(changed,"f"*64)
+                changed=copy.deepcopy(report)
+                changed["mode_evidence"][stage][mode]["target_state"]=not changed["mode_evidence"][stage][mode]["target_state"]
+                with self.assertRaisesRegex(ValueError,"target state"):
+                    require_recovery_report(changed,"f"*64)
+        for key,value in (("status_exit",0),("pid_file_absent",False),("remaining_owned_pids",[123]),("processes",{})):
+            changed=copy.deepcopy(report);changed["cluster_exit_proofs"][0][key]=value
+            with self.assertRaisesRegex(ValueError,"process exit"):
+                require_recovery_report(changed,"f"*64)
+        changed=copy.deepcopy(report);changed["child_subreaper"]["current"]=0
+        with self.assertRaisesRegex(ValueError,"subreaper"):
+            require_recovery_report(changed,"f"*64)
+
+    def test_boolean_warning_signatures_reject_a_different_failure(self):
+        for mode in MODES:
+            rows={case["id"]:case for case in self.quality_cases() if case["mode"]==mode}
+            for case_id in ("english-short-phrase","german-die-precision","bm25-topk-domain"):
+                original=rows[case_id]
+                self.assertIn(original["status"],("known-failure","warning"))
+                fields={key:original[key] for key in QUALITY_FIELDS}
+                fields.update(mode=mode,known_signature=original.get("known_signature"))
+                self.assertEqual(quality_case(case_id,**fields)["status"],"regression")
+                signature=copy.deepcopy(original["observed_signature"])
+                signature["query_ast"]="'different'"
+                self.assertEqual(quality_case(case_id,**fields,observed_signature=signature)["status"],"regression")
+            top=rows["bm25-topk-domain"]
+            fields={key:top[key] for key in QUALITY_FIELDS};fields["mode"]=mode
+            for key,value in (("winner_ids",[13]),("candidate_ids",[1,2,9,13])):
+                signature=copy.deepcopy(top["observed_signature"]);signature[key]=value
+                self.assertEqual(quality_case("bm25-topk-domain",**fields,observed_signature=signature)["status"],"regression")
 
     def test_request_rss_gate_rejects_private_growth_without_ignoring_shared_growth(self):
         module = ast.parse((ROOT / "tests/stress.py").read_text())
@@ -65,23 +208,118 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(observed["raw_total_rss_gate_passed"])
         self.assertEqual(observed["rss_median_growth_bytes"], 2*mib)
 
+    def recovery_command_namespace(self,out,report):
+        import ctypes,signal,time
+        module=ast.parse((ROOT/"tests/recovery.py").read_text())
+        names={"save","check","enable_child_subreaper","client_group","finish_client","restore_child_signal_mask","command"}
+        functions=[node for node in module.body if isinstance(node,ast.FunctionDef) and node.name in names]
+        namespace=dict(OUT=out,REPORT=report,ENV=os.environ.copy(),CLIENTS={},Path=Path,time=time,
+                       subprocess=subprocess,json=json,os=os,signal=signal,ctypes=ctypes)
+        exec(compile(ast.Module(body=functions,type_ignores=[]),"tests/recovery.py","exec"),namespace)
+        return namespace
+
     def test_recovery_keeps_first_failure_when_a_command_label_repeats(self):
-        module = ast.parse((ROOT / "tests/recovery.py").read_text())
-        functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in ("save", "command")]
-        import time
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            report = {"commands": []}
-            namespace = dict(OUT=out, REPORT=report, ENV=os.environ.copy(), time=time, subprocess=subprocess, json=json)
-            exec(compile(ast.Module(body=functions, type_ignores=[]), "tests/recovery.py", "exec"), namespace)
-            command = namespace["command"]
-            command([sys.executable, "-c", "import sys; print('FIRST_FAILURE',file=sys.stderr);sys.exit(1)"], "repeat", check=False)
-            command([sys.executable, "-c", "print('SECOND_SUCCESS')"], "repeat")
-            first, second = report["commands"]
-            self.assertEqual([first["exit"], second["exit"]], [1, 0])
-            self.assertNotEqual(first["stderr"], second["stderr"])
-            self.assertEqual((out / first["stderr"]).read_text(), "FIRST_FAILURE\n")
-            self.assertEqual((out / second["stdout"]).read_text(), "SECOND_SUCCESS\n")
+            out=Path(directory);report={"commands":[],"checks":[]}
+            namespace=self.recovery_command_namespace(out,report)
+            if sys.platform!="linux":
+                # These two logging commands cannot fork. A portable kernel
+                # group probe keeps this logging test independent of /proc.
+                # Linux fork ownership and reaping are exercised below.
+                def single_client_group(pgid):
+                    try:os.killpg(pgid,0)
+                    except ProcessLookupError:return {}
+                    return {pgid:dict(parent=os.getpid(),start_ticks=str(pgid),state="R")}
+                namespace["client_group"]=single_client_group
+            command=namespace["command"]
+            command([sys.executable,"-c","import sys; print('FIRST_FAILURE',file=sys.stderr);sys.exit(1)"],"repeat",check=False)
+            command([sys.executable,"-c","print('SECOND_SUCCESS')"],"repeat")
+            first,second=report["commands"]
+            self.assertEqual([first["exit"],second["exit"]],[1,0])
+            self.assertNotEqual(first["stderr"],second["stderr"])
+            self.assertEqual((out/first["stderr"]).read_text(),"FIRST_FAILURE\n")
+            self.assertEqual((out/second["stdout"]).read_text(),"SECOND_SUCCESS\n")
+            self.assertEqual(namespace["CLIENTS"],{})
+
+    def test_recovery_client_groups_handle_timeout_and_interruption(self):
+        import signal,uuid
+        base=Path(os.environ.get("PGCB_RUN_DIR",ROOT/"artifacts"))
+        out=base/("runner-client-contract-"+uuid.uuid4().hex)
+        out.mkdir(parents=True)
+        report={"commands":[],"checks":[],"scope":"Owned client groups; Linux subreaper or unsupported-platform guard"}
+        namespace=self.recovery_command_namespace(out,report)
+        if sys.platform!="linux":
+            with self.assertRaisesRegex(AssertionError,"requires Linux"):
+                namespace["enable_child_subreaper"]()
+            self.assertFalse(report["child_subreaper"]["enabled"])
+            self.assertEqual(namespace["CLIENTS"],{})
+            return
+        namespace["enable_child_subreaper"]()
+        code="import os,signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);child=os.fork();print(('CHILD' if child==0 else 'PARENT')+':'+str(os.getpid()),flush=True);time.sleep(60)"
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                namespace["command"]([sys.executable,"-c",code],"client-timeout",timeout=.5)
+            def interrupt(signum,frame):raise InterruptedError("controlled client interruption")
+            previous=signal.signal(signal.SIGALRM,interrupt)
+            try:
+                signal.setitimer(signal.ITIMER_REAL,.5)
+                with self.assertRaises(InterruptedError):
+                    namespace["command"]([sys.executable,"-c",code],"client-interruption",timeout=120)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL,0)
+                signal.signal(signal.SIGALRM,previous)
+            # Deliver handled signals at the exact spawn-to-registration handoff.
+            # The child is real and forks; only the Popen call boundary is wrapped.
+            import types,time
+            actual_popen=subprocess.Popen
+            for pending_signal in (signal.SIGINT,signal.SIGTERM):
+                spawned=[]
+                def pending_spawn(*args,**kwargs):
+                    process=actual_popen(*args,**kwargs);spawned.append(process)
+                    deadline=time.monotonic()+5
+                    output=out/report["commands"][-1]["stdout"]
+                    while time.monotonic()<deadline and "CHILD:" not in output.read_text():
+                        time.sleep(.02)
+                    os.kill(os.getpid(),pending_signal)
+                    return process
+                def handled(signum,frame):raise InterruptedError("controlled registration signal "+str(signum))
+                previous=signal.signal(pending_signal,handled)
+                namespace["subprocess"]=types.SimpleNamespace(Popen=pending_spawn,TimeoutExpired=subprocess.TimeoutExpired)
+                masked_code="import signal;print('MASK:'+str(sorted(map(int,signal.pthread_sigmask(signal.SIG_BLOCK,set())))),flush=True);"+code
+                try:
+                    with self.assertRaisesRegex(InterruptedError,"controlled registration signal"):
+                        namespace["command"]([sys.executable,"-c",masked_code],"registration-"+str(int(pending_signal)))
+                    self.assertEqual(len(spawned),1)
+                    text=(out/report["commands"][-1]["stdout"]).read_text()
+                    self.assertIn("MASK:[]",text)
+                    self.assertIn("CHILD:",text)
+                finally:
+                    signal.signal(pending_signal,previous)
+                    namespace["subprocess"]=subprocess
+                    # A failing handoff must still retain and join the actual
+                    # process created by this test wrapper before returning.
+                    for process in spawned:
+                        if process.pid not in namespace["CLIENTS"] and process.returncode is None:
+                            proof=dict(pgid=process.pid,members={},signals=[],reaped_owned_children=[],errors=[])
+                            namespace["finish_client"](process,proof,True)
+            self.assertEqual([entry["exit"] for entry in report["commands"]],["timeout","interrupted","interrupted","interrupted"])
+            for proof in report["client_exit_proofs"]:
+                self.assertTrue(proof["signal_handoff_registered"])
+                self.assertTrue(proof["direct_waited"])
+                self.assertTrue(proof["group_empty"])
+                self.assertTrue(proof["cleanup_complete"])
+                self.assertEqual(proof["remaining_owned_pids"],[])
+                self.assertEqual(proof["errors"],[])
+                self.assertIn(int(signal.SIGTERM),proof["signals"])
+                self.assertIn(int(signal.SIGKILL),proof["signals"])
+                self.assertTrue(proof["reaped_owned_children"])
+            self.assertEqual(namespace["CLIENTS"],{})
+        finally:
+            # Preserve every first error before using the same owned cleanup on
+            # a failed assertion. Never leave this controlled fork tree running.
+            namespace["save"]()
+            for process,proof in list(namespace["CLIENTS"].values()):
+                namespace["finish_client"](process,proof,True)
 
     def test_outer_cleanup_preserves_unproven_inner_data(self):
         # This exercises the actual outer wrapper with a fake Docker CLI, not
@@ -104,7 +342,7 @@ if args[0]=='create':
 value=json.loads(state.read_text())
 if args[0]=='start':
  out=Path(value['evidence'])/value['run'];out.mkdir()
- report={'format':2,'run_id':value['run'],'platform':'linux-amd64','status':'verified',
+ report={'format':3,'run_id':value['run'],'platform':'linux-amd64','status':'verified',
          'cleanup':{'marker_matches':True,'cluster_stopped':True,'directory_removed':True}}
  if case=='missing':sys.exit(1)
  if case=='malformed':(out/'run.json').write_text('{');sys.exit(1)
@@ -114,10 +352,11 @@ if args[0]=='start':
  if case=='truthy-flag':report['cleanup']['directory_removed']='true'
  if case=='recovery-unproven':report['cleanup']['recovery_children_cleaned']=False
  if case=='recovery-missing':report['cleanup']['recovery_children_cleaned']=True
- if case in ('recovery-failed','recovery-safe-failure'):
+ if case in ('recovery-failed','recovery-safe-failure','recovery-unjoined-client'):
   report['cleanup']['recovery_children_cleaned']=True
-  child={'format':2,'run':value['run'],'status':'failed','cleanup':
-         {'marker_matches':True,'clusters_stopped':case=='recovery-safe-failure','directory_removed':True}}
+  child={'format':3,'run':value['run'],'status':'failed','cleanup':
+         {'marker_matches':True,'clusters_stopped':case!='recovery-failed','directory_removed':True,
+          'clients_joined':case!='recovery-unjoined-client'}}
   (out/'recovery').mkdir();(out/'recovery/results.json').write_text(json.dumps(child))
   report['recovery']=child
  if case in ('safe-failure','recovery-safe-failure'):report['status']='failed'
@@ -146,7 +385,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
 """
         cases = ("success", "safe-failure", "recovery-safe-failure", "missing", "malformed",
                  "wrong-run", "cleanup-failed", "unstopped", "truthy-flag",
-                 "recovery-unproven", "recovery-missing", "recovery-failed",
+                 "recovery-unproven", "recovery-missing", "recovery-failed", "recovery-unjoined-client",
                  "container-probe-daemon", "container-probe-permission", "container-probe-other-object",
                  "container-probe-malformed", "volume-probe-daemon", "volume-probe-permission",
                  "volume-probe-absent", "create-probe-daemon", "create-probe-permission", "create-probe-absent")
@@ -279,35 +518,35 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
 
     def test_exact_quality_failures_are_separate(self):
         frozen = frozen_quality_cases()
-        cases = [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen.items()]
+        cases = [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values, observed_signature=mode_quality_reviews().get(("linguistic",case_id),{}).get("observed_signature"), mode="linguistic") for case_id, values in frozen.items()]
         summary = validate_quality({"format": FORMAT, "cases": cases})
         self.assertEqual(summary["counts"], {"passed": 2, "known-failure": 1, "warning": 0, "regression": 0})
         self.assertEqual(verified_status(summary), "verified-with-known-quality-failures")
         values = frozen["english-den"]
         for field, changed in (("actual", False), ("input", "different document"), ("query", "different query"), ("config", "other.config"), ("expected", False), ("actual", 0)):
-            case = quality_case("english-den", **dict(values, **{field: changed}), known_signature=values)
+            case = quality_case("english-den", **dict(values, **{field: changed}), known_signature=values, mode="linguistic")
             self.assertEqual(case["status"], "regression", field)
             self.assertEqual(verified_status(validate_quality({"format": FORMAT, "cases": [case]})), "failed")
         case["status"] = "known-failure"
         with self.assertRaises(ValueError):
             validate_quality({"format": FORMAT, "cases": [case]})
         with self.assertRaisesRegex(ValueError, "not an eligible"):
-            quality_case("new-unreviewed-failure", **values, known_signature=values)
+            quality_case("new-unreviewed-failure", **values, known_signature=values, mode="linguistic")
         with self.assertRaisesRegex(ValueError, "reviewed frozen signature"):
-            quality_case("english-den", **values)
+            quality_case("english-den", **values, mode="linguistic")
         for changed in ({**values, "query": "new query"}, {**values, "actual": True}, {**values, "actual": 0}):
             with self.assertRaisesRegex(ValueError, "reviewed frozen signature"):
-                quality_case("english-den", **changed, known_signature=changed)
-        case = quality_case("english-den", **values, known_signature=values)
+                quality_case("english-den", **changed, known_signature=changed, mode="linguistic")
+        case = quality_case("english-den", **values, known_signature=values, mode="linguistic")
         del case["known_signature"]
         with self.assertRaises(ValueError):
             validate_quality({"format": FORMAT, "cases": [case]})
-        self.assertEqual(quality_case("english-den",**values,known_signature=values)["status"],"regression")
+        self.assertEqual(quality_case("english-den",**values,known_signature=values, mode="linguistic")["status"],"regression")
         phrase=frozen["english-short-phrase"]
-        self.assertEqual(quality_case("english-short-phrase",**phrase,known_signature=phrase)["status"],"known-failure")
-        self.assertEqual(quality_case("english-short-phrase",**dict(phrase,actual=True),known_signature=phrase)["status"],"regression")
-        self.assertEqual(quality_case("new-passing-case", **dict(values, actual=True))["status"], "passed")
-        self.assertEqual(quality_case("new-failing-case", **values)["status"], "regression")
+        self.assertEqual(quality_case("english-short-phrase",**phrase,known_signature=phrase,observed_signature=mode_quality_reviews()[("linguistic","english-short-phrase")]["observed_signature"], mode="linguistic")["status"],"known-failure")
+        self.assertEqual(quality_case("english-short-phrase",**dict(phrase,actual=True),known_signature=phrase, mode="linguistic")["status"],"regression")
+        self.assertEqual(quality_case("new-passing-case", **dict(values, actual=True), mode="linguistic")["status"], "passed")
+        self.assertEqual(quality_case("new-failing-case", **values, mode="linguistic")["status"], "regression")
         with self.assertRaises(ValueError):
             from report_contract import require_known_quality_cases
             require_known_quality_cases(validate_quality({"format": FORMAT, "cases": []}))
@@ -316,7 +555,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         original = json.loads((ROOT / "tests/fixtures/quality-warnings-original.json").read_text())
         row = next(case for case in original["cases"] if case["id"] == "bm25-domain-surface_running")
         fields = {key: row[key] for key in ("input", "query", "config", "expected", "actual")}
-        case = quality_case(row["id"], **fields)
+        case = quality_case(row["id"], **fields, observed_signature=mode_quality_reviews().get(("linguistic",row["id"]),{}).get("observed_signature"), mode="linguistic")
         self.assertEqual(case["status"], "warning")
 
     def test_warning_scope_is_exact_and_never_quality_pass(self):
@@ -328,27 +567,27 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         cases = []
         for row in reviewed:
             fields = {key: row[key] for key in QUALITY_FIELDS}
-            case = quality_case(row["id"], **fields)
+            case = quality_case(row["id"], **fields, observed_signature=mode_quality_reviews().get(("linguistic",row["id"]),{}).get("observed_signature"), mode="linguistic")
             self.assertEqual(case["status"], "warning", row["id"])
             cases.append(case)
             for field in QUALITY_FIELDS:
                 changed = copy.deepcopy(fields)
                 # Changing any one serialized field must revoke the warning.
                 changed[field] = {"unreviewed": changed[field]}
-                altered = quality_case(row["id"], **changed)
+                altered = quality_case(row["id"], **changed, mode="linguistic")
                 self.assertEqual(altered["status"], "regression", (row["id"], field))
             for renamed in (row["id"] + "-new", "unreviewed-" + row["id"]):
-                self.assertEqual(quality_case(renamed, **fields)["status"], "regression")
+                self.assertEqual(quality_case(renamed, **fields, mode="linguistic")["status"], "regression")
             if isinstance(fields["actual"], list):
                 if fields["expected"]:
                     missing = dict(fields, actual=[value for value in fields["actual"] if value not in fields["expected"]])
-                    self.assertEqual(quality_case(row["id"], **missing)["status"], "regression")
+                    self.assertEqual(quality_case(row["id"], **missing, mode="linguistic")["status"], "regression")
             else:
                 # JSON booleans and numbers are not interchangeable signatures.
-                self.assertEqual(quality_case(row["id"], **dict(fields, actual=int(fields["actual"])))["status"], "regression")
+                self.assertEqual(quality_case(row["id"], **dict(fields, actual=int(fields["actual"])), mode="linguistic")["status"], "regression")
         summary = validate_quality({"format": FORMAT, "cases": cases})
         self.assertEqual(summary["counts"], {"passed": 0, "known-failure": 0, "warning": 47, "regression": 0})
-        self.assertEqual(set(summary["warnings"]), REVIEWED_QUALITY_WARNINGS)
+        self.assertEqual({row["id"] for row in summary["warnings"]}, REVIEWED_QUALITY_WARNINGS)
         self.assertEqual(verified_status(summary), "verified-with-quality-warnings")
         for forged_status in ("passed", "known-failure"):
             forged = copy.deepcopy(cases[0])
@@ -372,7 +611,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         changed = copy.deepcopy(report)
         changed["quality"]["cases"] = [case for case in changed["quality"]["cases"] if case["id"] != "bm25-topk-domain"]
         changed["quality"] = validate_quality({"format": FORMAT, "cases": changed["quality"]["cases"]})
-        with self.assertRaisesRegex(ValueError, "Missing reviewed"):
+        with self.assertRaisesRegex(ValueError, "two-mode BM25 quality coverage"):
             require_release_report(changed)
         for key, value in (("suite_results", {}), ("cleanup", {}), ("recovery", {})):
             with self.assertRaises(ValueError):
@@ -391,22 +630,76 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
                 shutil.copy2(ROOT / name, target)
             evidence = root / QUALITY_WARNING_REVIEW["file"]
             evidence.write_bytes(evidence.read_bytes() + b"\n")
-            command = "import sys; sys.path.insert(0, 'scripts'); from report_contract import quality_case; quality_case('unreviewed', input='', query='', config='public.charabia', expected=True, actual=True)"
+            command = "import sys; sys.path.insert(0, 'scripts'); from report_contract import quality_case; quality_case('unreviewed', input='', query='', config='public.charabia', expected=True, actual=True, mode='linguistic')"
             result = subprocess.run([sys.executable, "-c", command], cwd=root, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Reviewed quality warning evidence changed", result.stderr)
 
+    def recovery(self):
+        report=dict(format=FORMAT,analysis_revision=ANALYSIS_REVISION,status="passed",loaded_library_sha256="f"*64,
+            cleanup={key:True for key in ("marker_matches","clusters_stopped","directory_removed","clients_joined")},
+            commands=[dict(label="owned-client",argv=["psql"],exit=0)],checks=[dict(label="independent target",ok=True)],
+            client_exit_proofs=[dict(label="owned-client",argv=["psql"],signal_handoff_registered=True,direct_waited=True,group_empty=True,cleanup_complete=True,remaining_owned_pids=[],errors=[],direct_exit_code=0)],
+            child_subreaper=dict(enabled=True,current=1,calls=[dict(option=option,result=0,errno=0) for option in (37,36,37)]),
+            cluster_exit_proofs=[dict(cluster=cluster,status_exit=3,pid_file_absent=True,remaining_owned_pids=[],processes={"123":{"start_ticks":"10"}},reaped_owned_children=[dict(pid=123,status=0,exit_code=0)]) for cluster in ("source","restore")],mode_evidence={})
+        kinds=["gin_linguistic_literal","gin_stored_linguistic_literal","bm25_linguistic_literal",
+               "gin_linguistic_missing_component","bm25_linguistic_missing_component","gin_linguistic_phrase",
+               "gin_linguistic_stem","gin_stored_linguistic_stem","bm25_linguistic_stem"]
+        for stage,target in (("target",True),("crash",False),("restored",True)):
+            report["mode_evidence"][stage]={
+                "linguistic":dict(config="lab.linguistic_cfg",parser="charabia.linguistic_parser",target_state=target,
+                    catalog=dict(stored_consistent=True),query_kinds=kinds,
+                    positions=dict(foo=[2],bar=[3],rs=[4],beta=[5]),headline="alpha foo_<b>bar</b>.rs beta"),
+                "structured":dict(config="lab.structured_cfg",parser="charabia.structured_parser",target_state=target,
+                    catalog=dict(stored_consistent=True),query_kinds=["gin_structured_url","gin_stored_structured_url","bm25_structured_url"],
+                    whole_source_headline_checked=True,atomic_positions_checked=target)}
+        return report
+
+    def quality_cases(self):
+        frozen=frozen_quality_cases()
+        warnings=reviewed_quality_warnings()
+        reviews=mode_quality_reviews()
+        cases=[]
+        for mode in MODES:
+            for case_id in sorted(required_bm25_case_ids()):
+                fields=dict(input="independent fixture",query="fixture",config=DEFAULT_CONFIGS[mode],expected=True,actual=True)
+                signature=None
+                if case_id in frozen:
+                    fields=dict(frozen[case_id],config=DEFAULT_CONFIGS[mode])
+                    if case_id in REVIEWED_QUALITY_RESOLUTIONS:fields["actual"]=True
+                    signature=frozen[case_id]
+                elif case_id in warnings:
+                    fields=dict(warnings[case_id])
+                    fields["config"]=reviews.get((mode,case_id),{}).get("config",DEFAULT_CONFIGS[mode] if fields["config"]=="public.charabia" else fields["config"])
+                review=reviews.get((mode,case_id),{})
+                if "observed_signature" in review:fields["observed_signature"]=copy.deepcopy(review["observed_signature"])
+                cases.append(quality_case(case_id,**fields,mode=mode,known_signature=signature))
+        return cases
+
+    def bm25_report(self):
+        quality=self.report()["quality"]
+        children={}
+        for mode in MODES:
+            rows=[case for case in quality["cases"] if case["mode"]==mode]
+            child_quality=validate_quality({"format":FORMAT,"cases":rows})
+            children[mode]=dict(format=FORMAT,mode=mode,config=DEFAULT_CONFIGS[mode],analysis_revision=ANALYSIS_REVISION,
+                status="passed",mechanism_status="passed",schema_removed=True,domain_quality=rows,
+                quality=child_quality,quality_status=verified_status(child_quality))
+        children["structured"]["structured_tokens"]={"precision_cost":dict(input="100 appendix ms",query="100ms",domain_expectation_for_structural_equality=False,actual_native_plain=True)}
+        return dict(format=FORMAT,status="passed",mechanism_status="passed",quality_status=verified_status(quality),
+                    analysis_revision=ANALYSIS_REVISION,mode_reports=children,domain_quality=quality["cases"],quality=quality)
+
     def report(self):
         labels = ("unit", "fmt", "clippy", "schema", "package", "fts-callback-abi", "public-api-abi", "default-objects", "analysis-info", "documentation-examples", "runner-contract", "word-generator-contract", "resource-verification", "normal-cargo-tree")
-        report = {"format": FORMAT, "status": "verified-with-quality-warnings", "platform": "linux-amd64", "build_profile": "release", "test_hooks": False,
+        report = {"format": FORMAT, "status": "verified-with-quality-warnings", "platform": "linux-amd64", "build_profile": "release", "test_hooks": False,"git_status":"",
                 "suites": list(SUITES), "suite_results": {suite: {"status": "passed"} for suite in SUITES},
                 "cleanup": {key: True for key in ("marker_matches", "cluster_stopped", "directory_removed")},
-                "quality": {"format": FORMAT, "cases": [quality_case(case_id, **dict(values,actual=True if case_id in REVIEWED_QUALITY_RESOLUTIONS else values["actual"]), known_signature=values) for case_id, values in frozen_quality_cases().items()] + [quality_case(case_id, **values) for case_id, values in reviewed_quality_warnings().items()]}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
-                "analysis_info": self.info(), "public_api_abi_verified": True, "default_objects_verified": True,
+                "quality": {"format":FORMAT,"cases":self.quality_cases()}, "analysis_info_verified": True, "fts_callback_abi_verified": True,
+                "analysis_info": self.info(), "public_api_abi":public_api_abi(), "public_api_abi_verified": True, "default_objects_verified": True,
                 "default_objects": self.default_objects(),
-                "structured_token_quality_costs":[{"input":"100 ms","query":"100ms","domain_expected":False,"native_actual":True}],
+                "structured_token_quality_costs":[{"mode":"structured","config":"fixture.structured","input":"100 ms","query":"100ms","domain_expected":False,"native_actual":True}],
                 "loaded_library_sha256": "f" * 64,
-                "recovery": {"format": FORMAT, "status": "passed", "loaded_library_sha256": "f" * 64, "cleanup": {key: True for key in ("marker_matches", "clusters_stopped", "directory_removed")}},
+                "recovery": self.recovery(),
                 "pg_textsearch": {"loaded_backend_verified": True},
                 "commands": [{"label": label, "exit_code": 0} for label in labels] + [{"label": f"suite-{suite}-python", "exit_code": 0} for suite in SUITES if suite != "unit"]}
         report["quality"] = validate_quality(report["quality"])
@@ -416,7 +709,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
     def info(self):
         return {"extension": RELEASE_VERSION, "pgrx": "0.19.3", "charabia": "0.10.0", "target": "x86_64-unknown-linux-gnu", "cargo_lock_sha256": "a" * 64,
                 "resource_manifest_sha256": "b" * 64, "analysis_revision": ANALYSIS_REVISION, "resource_fingerprint": "c" * 64,
-                "language_count": 16, "languages": language_capabilities(), "structured_tokens": structured_token_identity(), "resources": {}}
+                "language_count": 16, "languages": language_capabilities(), "structured_tokens": structured_token_identity(), "resources": {}, "modes":mode_identity(), "configurations":configuration_identity(), "default_configuration":"public.charabia"}
 
     def default_objects(self):
         return default_catalog()
@@ -474,22 +767,22 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             del missing[field]
             with self.assertRaises(ValueError, msg=field):
                 require_default_objects(missing, self.info())
-        for field in ("types", "dictionaries", "dictionary_options", "mappings"):
+        for field in ("parsers", "templates", "configurations", "dictionaries", "dictionary_options"):
             changed = copy.deepcopy(defaults)
             changed[field].pop()
             with self.assertRaises(ValueError, msg=field):
                 require_default_objects(changed, self.info())
         changed = copy.deepcopy(defaults)
-        changed["parser"]["schema"] = "public"
-        with self.assertRaisesRegex(ValueError, "Configuration"):
+        changed["configurations"][0]["parser"]["schema"] = "public"
+        with self.assertRaisesRegex(ValueError, "configurations"):
             require_default_objects(changed, self.info())
         changed = copy.deepcopy(defaults)
-        changed["mappings"][0]["dictionary_schema"] = "public"
-        with self.assertRaisesRegex(ValueError, "mappings"):
+        changed["configurations"][0]["mappings"][0]["dictionary_schema"] = "public"
+        with self.assertRaisesRegex(ValueError, "configurations"):
             require_default_objects(changed, self.info())
         changed = copy.deepcopy(defaults)
-        changed["types"][:2] = changed["types"][:2][::-1]
-        with self.assertRaisesRegex(ValueError, "Parser types"):
+        changed["parsers"][0]["types"][:2] = changed["parsers"][0]["types"][:2][::-1]
+        with self.assertRaisesRegex(ValueError, "parsers"):
             require_default_objects(changed, self.info())
         for changed_option in ("language = 'ara'", defaults["dictionary_options"][0]["options"].replace("english = 'false'", "english = 'true'"),
                                defaults["dictionary_options"][0]["options"] + ", english = 'false'",
@@ -519,7 +812,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
     def test_release_refuses_incomplete_identity_or_checks(self):
         report = self.report()
         require_release_report(report)
-        for key, value in (("format", 1), ("status", "passed"), ("build_profile", "debug"), ("test_hooks", True), ("suites", list(SUITES[:-1])), ("suite_results", {}), ("commands", []), ("analysis_info_verified", False), ("public_api_abi_verified", False), ("default_objects_verified", False), ("default_objects", {}), ("recovery", {}), ("cleanup", {})):
+        for key, value in (("format", 1), ("status", "passed"), ("git_status"," M src/analysis.rs\n"), ("git_status",None), ("build_profile", "debug"), ("test_hooks", True), ("suites", list(SUITES[:-1])), ("suite_results", {}), ("commands", []), ("analysis_info_verified", False), ("public_api_abi_verified", False), ("default_objects_verified", False), ("default_objects", {}), ("recovery", {}), ("cleanup", {})):
             invalid = dict(report, **{key: value})
             with self.assertRaises(ValueError, msg=key):
                 require_release_report(invalid)
@@ -587,7 +880,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             root = Path(directory)
             names = ("scripts/package-release", "scripts/report_contract.py", "LICENSE", "README.md",
                      "Cargo.toml", "Cargo.lock", "build.rs", "AGENTS.md", ".gitattributes", ".cargo/config.toml", "rust-toolchain.toml", "pg_charabia.control", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz",
-                     "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json", "tests/fixtures/quality-warnings-original.json")
+                     "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json", "tests/fixtures/quality-warnings-original.json", MODE_QUALITY_REVIEW["file"])
             for name in names:
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -622,6 +915,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             library = package / "extension/pg_charabia.so"
             library.write_bytes(b"Synthetic assembly fixture. Never load this file.\n")
             library_hash = digest(library)
+            (package/"extension"/f"pg_charabia--{RELEASE_VERSION}.sql").write_text("-- Synthetic source-copy fixture. Never load this.\n")
             # These are source-copy assembly fixtures, never runtime/release evidence.
             resource_path=root/"resources/manifest.json"
             fixture_resources=json.loads(resource_path.read_text())

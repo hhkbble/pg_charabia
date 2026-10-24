@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 
-from report_contract import ARCHIVE_SUITES, DEFAULT_OBJECTS_QUERY, FORMAT, QUALITY_WARNING_REVIEW, RELEASE_VERSION, STATIC_INFO_FIELDS, VERIFIED, digest, isolated_pg_environment, read_quality, require_default_objects, require_recovery_report, require_release_report, require_static_info, same_json, verified_status, verify_checksums
+from report_contract import PUBLIC_API_QUERY, require_public_api_abi, require_installation_files, MODE_QUALITY_REVIEW, require_delivery_analysis_identity, ARCHIVE_SUITES, DEFAULT_OBJECTS_QUERY, FORMAT, QUALITY_WARNING_REVIEW, RELEASE_VERSION, STATIC_INFO_FIELDS, VERIFIED, digest, isolated_pg_environment, read_quality, require_default_objects, require_recovery_report, require_release_report, require_static_info, same_json, verified_status, verify_checksums
 
 
 def unpack_archive(archive, destination):
@@ -112,6 +112,9 @@ def main():
             raise RuntimeError("Delivery manifest is not a verified Linux AMD64 release")
         if manifest.get("source_commit") != original.get("git_commit") or manifest.get("library_sha256") != original.get("loaded_library_sha256"):
             raise RuntimeError("Delivery manifest and original loaded library identity disagree")
+        require_delivery_analysis_identity(manifest,original["analysis_info"])
+        if digest(delivery/MODE_QUALITY_REVIEW["file"])!=MODE_QUALITY_REVIEW["sha256"]:
+            raise RuntimeError("Delivery archive changes or omits the mode quality review")
         result["delivery_manifest"] = manifest
         if not same_json(manifest.get("quality"), original["quality"]):
             raise RuntimeError("Delivery manifest changes the verified quality results or warnings")
@@ -128,6 +131,7 @@ def main():
         env["PATH"] = str(pg_bin) + os.pathsep + env.get("PATH", "")
         stage = temporary / "stage/extension"
         shutil.copytree(delivery / "extension", stage)
+        require_installation_files(stage)
         library = stage / "pg_charabia.so"
         if digest(library) != manifest["library_sha256"]:
             raise RuntimeError("Extracted library differs from the delivery manifest")
@@ -188,6 +192,9 @@ def main():
                 if backend.poll() is None:
                     backend.kill()
                     backend.wait()
+        public_abi=json.loads(command(psql+["-Atq","-c",PUBLIC_API_QUERY],"public-api-abi",True))
+        require_public_api_abi(public_abi)
+        result["public_api_abi"]=public_abi
         examples = delivery / "tests/examples.py"
         if not examples.is_file():
             raise RuntimeError("Delivery archive lacks its executable documentation examples")
@@ -235,7 +242,7 @@ def main():
             try:
                 child = json.loads((evidence / "recovery/results.json").read_text())
                 result["recovery"] = child
-                cleanup["recovery_children_cleaned"] = all(child.get("cleanup", {}).get(key) is True for key in ("marker_matches", "clusters_stopped", "directory_removed"))
+                cleanup["recovery_children_cleaned"] = all(child.get("cleanup", {}).get(key) is True for key in ("marker_matches", "clusters_stopped", "directory_removed", "clients_joined"))
             except (OSError, ValueError, TypeError) as exc:
                 cleanup["recovery_children_cleaned"] = False
                 cleanup["recovery_error"] = str(exc)

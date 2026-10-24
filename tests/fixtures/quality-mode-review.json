@@ -1,0 +1,738 @@
+{
+  "format": 3,
+  "analysis_revision": "route16-dual-mode-1",
+  "scope": "Exact per-mode lineage for existing non-PASS failures. No additional IDs, domain expectations, or failure shapes are eligible.",
+  "provenance": {
+    "original_warning_sha256": "ae335da2f89aae7eb10e59ab86aaf3f8233488cddafa06371b6ae9a2d8243b22",
+    "original_known_sha256": "0973fee0fedcc90cb7021521b3afb2c862f8ffb219f5bd9ceba41bee406f2566",
+    "baseline_commit": "1e3d7104e1d3f6992319cf09041b7b5b32155d7e",
+    "baseline_report_sha256": "da2595a93d42a1c67acc20df8184ffce28cae3846f8fb158d09f50eae643647e",
+    "reviewed_run": "20261024T185213Z-79370-amd64-inner",
+    "reviewed_library_sha256": "a73215308400a4fab316f22b532968fd14a5ee8cf55459ed8180a25e575f8fc4"
+  },
+  "reviewed_changes": {
+    "structured": "All 98 corpus vectors and 232 score records match the baseline.",
+    "linguistic": "Only corpus documents 2 and 15 change vectors. Stored TF totals change from 374 to 371. All 232 ranked ID lists remain the same, while 176 score records change.",
+    "topk_ast_boundary": "The old report directly records candidates and winner, but not the exact mixed-query AST. Old AST equivalence is a source inference. The current complete query context is directly observed in both modes."
+  },
+  "cases": [
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-off-force_custom_plan-french_accents",
+      "config": "public.charabia",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-off-force_custom_plan-swedish_boundary",
+      "config": "public.charabia",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-off-force_generic_plan-french_accents",
+      "config": "public.charabia",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-off-force_generic_plan-swedish_boundary",
+      "config": "public.charabia",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-on-force_generic_plan-french_accents",
+      "config": "public.charabia",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-bulk-on-force_generic_plan-swedish_boundary",
+      "config": "public.charabia",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-delete-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-delete-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-delete-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-delete-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-french_accents",
+      "config": "public.charabia",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-insert-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-insert-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-insert-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-insert-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-post-spill-insert-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-post-spill-insert-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-post-spill-insert-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-post-spill-insert-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-reindex-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-reindex-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-reindex-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-reindex-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-restart-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-restart-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-restart-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-restart-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-spill-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-spill-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-spill-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-spill-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-swedish_boundary",
+      "config": "public.charabia",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-update-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-update-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-update-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-update-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-vacuum-off-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-vacuum-off-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-vacuum-on-force_custom_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-domain-vacuum-on-force_generic_plan-surface_running",
+      "config": "public.charabia",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The query terms, phase, cache setting, prepared plan, and complete candidate IDs match the reviewed failure. Changes in documents 2 and 15 do not intersect changed terms for this query. Scores change and remain observations."
+    },
+    {
+      "mode": "linguistic",
+      "id": "bm25-topk-domain",
+      "config": "public.charabia",
+      "source_sha256": "0c6ba31650dd6ffb638771aeb648ac45a207a159d7b441744b8d0bfa1d906f75",
+      "basis": "The complete 98-row corpus retains candidates 1, 2, and 9 and the same wrong winner, 9. Current mixed-query ASTs agree. Old AST equivalence follows unchanged recognition and ordinary analysis code, rather than a historical AST observation. Scores remain observations.",
+      "observed_signature": {
+        "query_ast": "'全文' | 'running' | 'run'",
+        "candidate_ids": [
+          1,
+          2,
+          9
+        ],
+        "winner_ids": [
+          9
+        ]
+      }
+    },
+    {
+      "mode": "linguistic",
+      "id": "english-short-phrase",
+      "config": "public.charabia",
+      "source_sha256": "e0b37fe4453e450c8dc95062047d55086bc79c4902e2f9dbfdc72180cf1d11b0",
+      "basis": "The unchanged complete document and short query retain the same ordinary analysis and native phrase failure. The query AST and document vector match the historical observation. This remains a known failure.",
+      "observed_signature": {
+        "query_ast": "( 'cats' | 'cat' ) <-> ( 'were' | 'wer' ) <-> ( 'running' | 'run' )",
+        "document_vector": "'book':13 'books':13 'cat':21 'cats':21 'children':2 'garden':7 'happi':17 'happy':17 'memori':18 'memories':18 'read':12 'reading':12 'run':4,23 'running':4,23 'share':15 'sharing':15 'teacher':10 'teachers':10 'togeth':19 'together':19"
+      }
+    },
+    {
+      "mode": "linguistic",
+      "id": "english-short-phrase-no-stop-bag",
+      "config": "bm25_test.no_stop",
+      "source_sha256": "e05d0a41a0be858125ce5b947efa9bbfbcdc777aa33b42920271ac1f76cc4927",
+      "basis": "The explicit no-stop Dictionary preserves its parameters and the same short-query terms. Complete indexed candidate IDs match the original reviewed failure. The candidate mismatch remains outside quality PASS."
+    },
+    {
+      "mode": "linguistic",
+      "id": "german-die-precision",
+      "config": "public.charabia",
+      "source_sha256": "a68bf9e5bb25227d2fb1698ea183f08a16bad7d92f3e3f4bb780f45974d5602e",
+      "basis": "The same German document retains die through the existing English branch. Native query AST, document vector, and both indexed candidates match the historical observation. The English-disabled control still rejects the false match.",
+      "observed_signature": {
+        "query_ast": "'die'",
+        "document_vector": "'bank':3 'dat':2 'daten':2 'der':9 'die':1 'dokument':6 'e':7,16 'ein':14 'eine':14 'en':23 'ermog':12 'ge':19 'index':11 'inform':22 'information':22 'licht':13 'nach':18 'schnell':15 'speich':4,20 'speicher':4,20 'such':10,17 'suche':17 't':5 'ten':21 'und':8",
+        "candidate_ids": [
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-off-force_custom_plan-french_accents",
+      "config": "public.charabia_structured",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-off-force_custom_plan-swedish_boundary",
+      "config": "public.charabia_structured",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-off-force_generic_plan-french_accents",
+      "config": "public.charabia_structured",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-off-force_generic_plan-swedish_boundary",
+      "config": "public.charabia_structured",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-on-force_generic_plan-french_accents",
+      "config": "public.charabia_structured",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-bulk-on-force_generic_plan-swedish_boundary",
+      "config": "public.charabia_structured",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-delete-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-delete-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-delete-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-delete-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-french_accents",
+      "config": "public.charabia_structured",
+      "source_sha256": "f4260f770a85c3d6daf8e20423cd2ecc8c0b5fcdbab07e228cc8d02fa53ee389",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-insert-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-insert-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-insert-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-insert-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "eaa0801ebadbdab67c5414bc58c4d9d707b836a6413c5aa91aedd296107a5f20",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-post-spill-insert-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-post-spill-insert-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-post-spill-insert-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-post-spill-insert-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-reindex-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-reindex-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-reindex-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-reindex-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-restart-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-restart-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-restart-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-restart-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "890dcfba698d8286770496a6ac926290bc68c40588e73738eaa5e772f586f7ee",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-spill-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-spill-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-spill-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-spill-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-swedish_boundary",
+      "config": "public.charabia_structured",
+      "source_sha256": "4f4b8b92739b240359d433d1c8f38174a6e0c2509427061d80440f5b1f6e3dec",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-update-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-update-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-update-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-update-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "6f853414e84e205c07121db81e7ca85cc3f8cb8993c3c5fdbb507125ce49b17e",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-vacuum-off-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-vacuum-off-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-vacuum-on-force_custom_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-domain-vacuum-on-force_generic_plan-surface_running",
+      "config": "public.charabia_structured",
+      "source_sha256": "d8521467226e278020534209a4da5f6a004cd092ccff34126d1c9e74f4e4f0c7",
+      "basis": "The complete corpus vectors, query terms, phase, cache setting, prepared plan, complete candidates, and score records match the historical structured path. This is the same reviewed candidate difference."
+    },
+    {
+      "mode": "structured",
+      "id": "bm25-topk-domain",
+      "config": "public.charabia_structured",
+      "source_sha256": "0c6ba31650dd6ffb638771aeb648ac45a207a159d7b441744b8d0bfa1d906f75",
+      "basis": "The complete 98-row corpus retains candidates 1, 2, and 9 and the same wrong winner, 9. Current mixed-query ASTs agree. Old AST equivalence follows unchanged recognition and ordinary analysis code, rather than a historical AST observation. Scores remain observations.",
+      "observed_signature": {
+        "query_ast": "'全文' | 'running' | 'run'",
+        "candidate_ids": [
+          1,
+          2,
+          9
+        ],
+        "winner_ids": [
+          9
+        ]
+      }
+    },
+    {
+      "mode": "structured",
+      "id": "english-short-phrase",
+      "config": "public.charabia_structured",
+      "source_sha256": "e0b37fe4453e450c8dc95062047d55086bc79c4902e2f9dbfdc72180cf1d11b0",
+      "basis": "The unchanged complete document and short query retain the same ordinary analysis and native phrase failure. The query AST and document vector match the historical observation. This remains a known failure.",
+      "observed_signature": {
+        "query_ast": "( 'cats' | 'cat' ) <-> ( 'were' | 'wer' ) <-> ( 'running' | 'run' )",
+        "document_vector": "'book':13 'books':13 'cat':21 'cats':21 'children':2 'garden':7 'happi':17 'happy':17 'memori':18 'memories':18 'read':12 'reading':12 'run':4,23 'running':4,23 'share':15 'sharing':15 'teacher':10 'teachers':10 'togeth':19 'together':19"
+      }
+    },
+    {
+      "mode": "structured",
+      "id": "english-short-phrase-no-stop-bag",
+      "config": "bm25_test.no_stop",
+      "source_sha256": "e05d0a41a0be858125ce5b947efa9bbfbcdc777aa33b42920271ac1f76cc4927",
+      "basis": "The explicit no-stop Dictionary preserves its parameters and the same short-query terms. Complete indexed candidate IDs match the original reviewed failure. The candidate mismatch remains outside quality PASS."
+    },
+    {
+      "mode": "structured",
+      "id": "german-die-precision",
+      "config": "public.charabia_structured",
+      "source_sha256": "a68bf9e5bb25227d2fb1698ea183f08a16bad7d92f3e3f4bb780f45974d5602e",
+      "basis": "The same German document retains die through the existing English branch. Native query AST, document vector, and both indexed candidates match the historical observation. The English-disabled control still rejects the false match.",
+      "observed_signature": {
+        "query_ast": "'die'",
+        "document_vector": "'bank':3 'dat':2 'daten':2 'der':9 'die':1 'dokument':6 'e':7,16 'ein':14 'eine':14 'en':23 'ermog':12 'ge':19 'index':11 'inform':22 'information':22 'licht':13 'nach':18 'schnell':15 'speich':4,20 'speicher':4,20 'such':10,17 'suche':17 't':5 'ten':21 'und':8",
+        "candidate_ids": [
+          1,
+          2
+        ]
+      }
+    }
+  ]
+}

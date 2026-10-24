@@ -17,6 +17,22 @@ ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "pg-charabia-verify:pg18-pgrx0193"
 
 
+def git_metadata_mounts(root):
+    """Make an isolated worktree's existing Git identity readable in Docker."""
+    root = Path(root).resolve()
+    if not (root / ".git").is_file():
+        return []
+    def git_path(option):
+        return Path(subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", option],
+            text=True).strip()).resolve()
+    common = git_path("--git-common-dir")
+    administrative = git_path("--git-dir")
+    if not administrative.is_relative_to(common):
+        raise ValueError("Worktree metadata must belong to its Git common directory")
+    return ["--mount", f"type=bind,src={common},dst={common},readonly"]
+
+
 def inspect_resource(kind, name, observations):
     """Return the object, or None only when Docker explicitly reports absence."""
     argv = ["docker", "inspect", name] if kind == "container" else ["docker", "volume", "inspect", name]
@@ -115,6 +131,9 @@ def main():
             if source.is_file() and not target.exists():
                 shutil.copyfile(source, target)
         argv = ["docker", "create", "--platform", "linux/amd64", "--name", name, "--label", "pg_charabia.verifier=true", "--label", f"pg_charabia.run_id={run_id}", "--mount", f"type=bind,src={ROOT},dst=/workspace,readonly", "--mount", f"type=bind,src={cache_root},dst=/cache", "--mount", f"type=bind,src={evidence},dst=/evidence", "--tmpfs", "/var/lib/postgresql:rw", "--env", f"PGCB_RUN_ID={run_id}-inner", IMAGE]
+        metadata_mounts = git_metadata_mounts(ROOT)
+        argv[argv.index(IMAGE):argv.index(IMAGE)] = metadata_mounts
+        result["git_metadata_mounts"] = metadata_mounts
         if args.archive:
             index = argv.index(IMAGE)
             argv[index:index] = ["--entrypoint", "python3", "--mount", f"type=bind,src={args.archive},dst=/delivery.tar.gz,readonly"]
@@ -143,7 +162,7 @@ def main():
                 raise RuntimeError("Expected exactly one inner verifier report")
             inner = json.loads(reports[0].read_text())
             if inner.get("format") != FORMAT or inner.get("status") not in VERIFIED:
-                raise RuntimeError("Container exit zero without a verified format-2 inner report")
+                raise RuntimeError("Container exit zero without a verified format-3 inner report")
             if not all(inner.get("cleanup", {}).get(k) for k in ("marker_matches", "cluster_stopped", "directory_removed")):
                 raise RuntimeError("Inner cleanup did not pass")
             result["status"] = inner["status"]

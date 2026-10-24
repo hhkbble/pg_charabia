@@ -33,6 +33,41 @@ def headline(session, raw, query="'cafe'::tsquery", options="HighlightAll=true",
     return value
 
 
+
+def dual_mode_source_cases(session):
+    """Literal source spans distinguish ordinary words from atomic structures."""
+    cases = (
+        ("alpha 100ms beta", "'ms'::tsquery", {
+            "linguistic": "alpha 100ms beta",
+            "structured": "alpha <b>100ms</b> beta",
+        }),
+        ("GET https://Example.com/Running?q=100ms", "'run'::tsquery", {
+            "linguistic": "GET https://Example.com/<b>Running</b>?q=100ms",
+            "structured": "GET <b>https://Example.com/Running?q=100ms</b>",
+        }),
+    )
+    for mode in ("linguistic", "structured"):
+        config = "public.charabia_" + mode
+        for raw, query, expected in cases:
+            actual = headline(session, raw, query, config=config)
+            check(actual == expected[mode], "mode selects original headline token boundaries", {
+                "mode": mode, "config": config, "raw": raw, "query": query,
+                "expected": expected[mode], "actual": actual})
+            for typ in ("json", "jsonb"):
+                source = {"original": [raw, "", None, 7]}
+                wanted = {"original": [expected[mode], "", None, 7]}
+                sql = ("SELECT ts_headline(" + literal(config) + "," +
+                       literal(json.dumps(source, ensure_ascii=False)) + "::" + typ +
+                       "," + query + ",'HighlightAll=true')")
+                value = json.loads(session.value(sql))
+                report.setdefault("calls", []).append({"sql": sql, "result": value})
+                check(value == wanted, "JSON callbacks preserve mode-specific original spans", {
+                    "mode": mode, "config": config, "type": typ, "expected": wanted, "actual": value})
+    for raw, query, _ in cases:
+        check(headline(session, raw, query) == headline(session, raw, query, config="public.charabia_linguistic"),
+              "default headline entry has the installed linguistic mappings", {"raw": raw, "query": query})
+
+
 def fragment_positions(session):
     """Exercise selection, which HighlightAll deliberately bypasses."""
     schema = "pgcb_headline_" + str(os.getpid())
@@ -44,9 +79,9 @@ def fragment_positions(session):
         session.value("CREATE TEXT SEARCH DICTIONARY " + schema + ".words ("
                       "TEMPLATE=charabia.linguistic_template,Language='eng',Discard=true,"
                       "Stem=true,Normalize=true,Filter=false,English=false)")
-        session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
+        session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.linguistic_parser)")
         routes = json.loads(session.value(
-            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
+            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.linguistic_parser') "
             "WHERE alias NOT IN ('blank','display_only')"))
         for route in routes:
             session.value("ALTER TEXT SEARCH CONFIGURATION " + config +
@@ -126,14 +161,14 @@ def external_dictionary_cases(session):
                       "TEMPLATE=charabia.linguistic_template,Language='fra',Discard=false,"
                       "Stem=false,Normalize=false,Filter=false,English=false)")
         aliases = json.loads(session.value(
-            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
+            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.linguistic_parser') "
             "WHERE alias NOT IN ('blank','display_only')"))
         for name, chain in (("synonym", schema + ".synonyms,pg_catalog.simple"),
                             ("filter_synonym", schema + ".filter," + schema + ".synonyms,pg_catalog.simple"),
                             ("simple", "pg_catalog.simple"),
                             ("unaccent", "public.unaccent," + schema + ".fra_plain")):
             config = schema + "." + name
-            session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
+            session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.linguistic_parser)")
             for alias in aliases:
                 session.value("ALTER TEXT SEARCH CONFIGURATION " + config +
                               " ADD MAPPING FOR " + alias + " WITH " + chain)
@@ -183,11 +218,11 @@ def merge_and_parallel_cases(session):
                       "TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,"
                       "Stem=true,Normalize=false,Filter=false,English=true);")
         aliases = json.loads(session.value(
-            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.parser') "
+            "SELECT json_agg(alias ORDER BY tokid) FROM ts_token_type('charabia.linguistic_parser') "
             "WHERE alias NOT IN ('blank','display_only')"))
         for name in ("words", "parallel"):
             config = schema + "." + name
-            session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.parser)")
+            session.value("CREATE TEXT SEARCH CONFIGURATION " + config + "(PARSER=charabia.linguistic_parser)")
             for alias in aliases:
                 session.value("ALTER TEXT SEARCH CONFIGURATION " + config +
                               " ADD MAPPING FOR " + alias + " WITH " + config)
@@ -263,6 +298,7 @@ def merge_and_parallel_cases(session):
 
 try:
     with Session() as session:
+        dual_mode_source_cases(session)
         # No oracle is obtained from analyze()/lexize(): raw equality is a separate
         # invariant and fixed expected highlights originate in upstream/probe facts.
         for raw in ("中文 café cafe\u0301 CAFÉ & < > \" '", "\t\n café\r\n\t",

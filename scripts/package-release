@@ -9,7 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 
-from report_contract import FORMAT, VERIFIED, digest, require_release_identity, require_release_report, verify_checksums
+from report_contract import require_installation_files, DELIVERY_ANALYSIS_FIELDS, MODE_QUALITY_REVIEW, FORMAT, VERIFIED, digest, require_release_identity, require_release_report, verify_checksums
 
 ROOT = Path(__file__).resolve().parent.parent
 def require(condition, message):
@@ -35,7 +35,7 @@ def copy_committed_sources(delivery, commit):
         target.write_bytes(subprocess.check_output(["git", "cat-file", "blob", object_id], cwd=ROOT))
         target.chmod(0o755 if mode == "100755" else 0o644)
         copied.add(relative)
-    for relative in (".cargo/config.toml", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "docker/environment.lock.json", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz", "tests/fixtures/quality-warnings-original.json"):
+    for relative in (".cargo/config.toml", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "docker/environment.lock.json", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz", "tests/fixtures/quality-warnings-original.json", MODE_QUALITY_REVIEW["file"]):
         require(relative in copied, f"Required rebuild/relink source file is not committed: {relative}")
     require(set(paths) - {".cargo", "scripts", "tests", "docs", "src", "sql", "resources", "docker"} <= copied, "Required delivery source files are not committed")
 
@@ -62,6 +62,7 @@ def main():
     current_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     current_status = subprocess.check_output(["git", "status", "--porcelain=v1"], cwd=ROOT, text=True)
     package = inner_dir / "package"
+    require_installation_files(package/"extension")
     try:
         verify_checksums(package)
         resources=json.loads((ROOT/"resources/manifest.json").read_text())
@@ -101,6 +102,7 @@ def main():
             "target": report["target_triple"], "build_profile": "release", "test_hooks": False,
             "source_commit": current_commit, "source_dirty": False,
             "verification_format": FORMAT, "verification_status": report["status"],
+            **{field:report["analysis_info"][field] for field in DELIVERY_ANALYSIS_FIELDS},
             "quality": report["quality"], "structured_token_quality_costs":report["structured_token_quality_costs"],
             "verified_run": report["run_id"], "verified_outer_run": outer["run_id"],
             "library_sha256": library_hash, "cargo_lock_sha256": report["cargo_lock_sha256"],

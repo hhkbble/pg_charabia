@@ -15,7 +15,7 @@ import tempfile
 import time
 import tomllib
 
-from report_contract import DEFAULT_OBJECTS_QUERY, FORMAT, RELEASE_VERSION, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_bm25_report, require_default_objects, require_known_quality_cases, require_recovery_report, require_static_info, same_json, select_suites, verified_status
+from report_contract import PUBLIC_API_QUERY, require_public_api_abi, require_installation_files, DEFAULT_OBJECTS_QUERY, FORMAT, RELEASE_VERSION, SUITES, VERIFIED, isolated_pg_environment, read_quality, require_bm25_report, require_default_objects, require_known_quality_cases, require_recovery_report, require_static_info, same_json, select_suites, verified_status
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -53,6 +53,7 @@ def main():
     (test_dir / "socket").mkdir()
     env = isolated_pg_environment(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PGCB_RUN_DIR"] = str(evidence)
     pg_config = Path(env.get("PG_CONFIG", "/opt/homebrew/opt/postgresql@18/bin/pg_config" if args.platform == "macos-arm64" else "/usr/lib/postgresql/18/bin/pg_config"))
     result = {"format": FORMAT, "run_id": run_id, "platform": args.platform, "suites": selected, "test_hooks": args.test_hooks, "build_profile": "debug" if args.debug or args.platform == "macos-arm64" else "release", "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "temporary_directory": str(test_dir), "commands": [], "suite_results": {}, "status": "running"}
     result["inherited_libpq_environment_keys_removed"] = sorted(set(os.environ) - set(env))
@@ -162,6 +163,7 @@ def main():
             if Path(fingerprint).is_file():
                 shutil.copy2(fingerprint, evidence / Path(fingerprint).name)
         stage = test_dir / "stage/extension"
+        require_installation_files(stage)
         libraries = list(stage.glob("pg_charabia*.so")) + list(stage.glob("pg_charabia*.dylib"))
         if len(libraries) != 1:
             raise RuntimeError(f"Expected one staged extension library in {stage}, found {libraries}")
@@ -316,14 +318,16 @@ def main():
             'strict',p.proisstrict) ORDER BY p.proname)
             FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
             WHERE n.nspname='charabia' AND p.proname IN
-            ('parser_start','parser_gettoken','parser_end','parser_lextypes','parser_headline',
+            ('linguistic_parser_start','structured_parser_start','parser_gettoken','parser_end','linguistic_parser_lextypes','structured_parser_lextypes','parser_headline',
              'linguistic_dictionary_init','linguistic_dictionary_lexize','structured_dictionary_init','structured_dictionary_lexize');"""
         actual_abi = json.loads(command(psql + ["-Atq", "-c", abi_query], "fts-callback-abi", True))
         callback_types = {
-            "parser_start": ("internal, integer", "internal"),
+            "linguistic_parser_start": ("internal, integer", "internal"),
+            "structured_parser_start": ("internal, integer", "internal"),
             "parser_gettoken": ("internal, internal, internal", "internal"),
             "parser_end": ("internal", "void"),
-            "parser_lextypes": ("internal", "internal"),
+            "linguistic_parser_lextypes": ("internal", "internal"),
+            "structured_parser_lextypes": ("internal", "internal"),
             "parser_headline": ("internal, internal, tsquery", "internal"),
             "linguistic_dictionary_init": ("internal", "internal"),
             "structured_dictionary_init": ("internal", "internal"),
@@ -334,19 +338,10 @@ def main():
         if actual_abi != expected_abi:
             raise RuntimeError(f"The installed FTS callback ABI differs from the design: {actual_abi}")
         result["fts_callback_abi_verified"] = True
-        public_query = """SELECT json_agg(json_build_object('name',p.proname,
-            'arguments',oidvectortypes(p.proargtypes),'returns',format_type(p.prorettype,NULL),
-            'security_definer',p.prosecdef,'volatility',p.provolatile,'parallel',p.proparallel,
-            'columns',(SELECT json_agg(json_build_object('name',p.proargnames[i],'type',format_type(p.proallargtypes[i],NULL)) ORDER BY i) FROM generate_subscripts(p.proallargtypes,1) i WHERE p.proargmodes[i]='t')) ORDER BY p.proname)
-            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE n.nspname='charabia' AND p.proname IN ('analysis_info','analyze','query_any','create_config','alter_config','drop_config');"""
-        public_abi = json.loads(command(psql + ["-Atq", "-c", public_query], "public-api-abi", True))
-        analyze_columns = [{"name": name, "type": "bigint" if name in ("byte_start", "byte_end", "char_start", "char_end") else "text"} for name in ("raw", "kind", "script", "charabia_language", "language", "language_source", "byte_start", "byte_end", "char_start", "char_end", "token_type")]
-        expected_public = [{"name": name, "arguments": arguments, "returns": returns, "security_definer": False, "volatility": "s", "parallel": "r", "columns": columns} for name, arguments, returns, columns in (
-            ("analysis_info", "", "jsonb", None), ("analyze", "text", "record", analyze_columns), ("query_any", "text, regconfig", "tsquery", None))]
-        if public_abi != expected_public:
-            raise RuntimeError(f"Installed public diagnostic ABI differs from the release contract: {public_abi}")
-        result["public_api_abi_verified"] = True
+        public_abi=json.loads(command(psql+["-Atq","-c",PUBLIC_API_QUERY],"public-api-abi",True))
+        require_public_api_abi(public_abi)
+        result["public_api_abi"]=public_abi
+        result["public_api_abi_verified"]=True
         command(psql + ["-c", "SELECT version(); SELECT extname, extversion FROM pg_extension ORDER BY 1; SHOW dynamic_library_path; SHOW extension_control_path;"], "database-identity")
         # A persistent backend loads this exact staged library; its mappings prove identity.
         with (evidence / "loaded-backend.stderr").open("w") as error_log:
@@ -385,7 +380,7 @@ def main():
             python = ROOT / "tests" / f"{suite}.py"
             if suite == "recovery":
                 recovery_attempted = True
-            if sql.is_file():
+            if sql.is_file() and suite != "bm25":
                 command(psql + ["-f", sql], f"suite-{suite}-sql")
             if python.is_file():
                 command([sys.executable, python], f"suite-{suite}-python")
@@ -442,7 +437,7 @@ def main():
             try:
                 child = json.loads((evidence / "recovery/results.json").read_text())
                 result["recovery"] = child
-                cleanup["recovery_children_cleaned"] = all(child.get("cleanup", {}).get(key) is True for key in ("marker_matches", "clusters_stopped", "directory_removed"))
+                cleanup["recovery_children_cleaned"] = all(child.get("cleanup", {}).get(key) is True for key in ("marker_matches", "clusters_stopped", "directory_removed", "clients_joined"))
             except (OSError, ValueError, TypeError) as exc:
                 cleanup["recovery_children_cleaned"] = False
                 cleanup["recovery_error"] = str(exc)

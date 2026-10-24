@@ -5,7 +5,7 @@ This guide covers installation, analysis changes, index maintenance, and backup 
 - [Supported environments](#supported-environments)
 - [Build from source](#build-from-source)
 - [Download and install](#download-and-install)
-- [Upgrade from 0.3.0 to 0.3.1](#upgrade-from-030-to-031)
+- [Fresh 0.4.0 installation](#fresh-040-installation)
 - [Optional pg_textsearch setup](#optional-pg_textsearch-setup)
 - [Schema ownership and permissions](#schema-ownership-and-permissions)
 - [Analysis changes and index maintenance](#analysis-changes-and-index-maintenance)
@@ -25,7 +25,7 @@ The project version and dependencies come from [Cargo.toml](../Cargo.toml) and [
 
 ## Build from source
 
-Source builds and locally generated release archives remain available alongside the [v0.3.1 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1).
+Source builds and locally generated release archives remain available alongside the [v0.4.0 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0).
 
 Use the prerequisites and commands in [Build and test](development.md#build-and-test). The isolated runners build and stage the extension in a private PostgreSQL cluster. They do not install files into the target PostgreSQL distribution. A targeted build is not full release acceptance.
 
@@ -33,7 +33,7 @@ To generate a verified Linux AMD64 archive, follow [Release acceptance and packa
 
 ## Download and install
 
-Open the [v0.3.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
+Open the [v0.4.0 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
 
 On the Linux AMD64 target host, put both downloaded files in the same directory. Set `RELEASE_ARCHIVE` to the downloaded archive filename, without a directory prefix. Verify the archive before extracting it:
 
@@ -66,35 +66,45 @@ install -m 644 extension/*.control extension/*.sql "$("$PG_CONFIG" --sharedir)/e
 
 A macOS library cannot load into Linux PostgreSQL. Keep the complete package, checksums, resource manifest, and dependency notices after installation.
 
-## Upgrade from 0.3.0 to 0.3.1
+## Fresh 0.4.0 installation
 
-Version 0.3.1 keeps the SQL objects and dictionary defaults from 0.3.0.
-The upgrade script updates the catalog version without replacing user objects.
-Existing backends keep their loaded library until they exit.
-
-The email recognizer no longer accepts a valid prefix or suffix inside a malformed mailbox envelope.
-Existing vectors and indexes can retain terms from that earlier recognition.
-If indexed documents contain such input, apply the [maintenance table](#analysis-changes-and-index-maintenance) to every affected configuration and index.
-This includes copied configurations that use the Parser's email type.
-Recompute stored vectors from source text before rebuilding their indexes.
-
-1. Retain the current package, backup, source text, custom object definitions, and external dictionary rules.
-2. Pause affected reads and writes.
-3. Close existing database sessions that can load pg_charabia.
-4. Follow [Download and install](#download-and-install) to verify and install the complete 0.3.1 package on each PostgreSQL host.
-5. In each database with pg_charabia, open a fresh superuser session and run the statements below.
-6. Complete the required vector and index maintenance before reopening traffic.
+Version 0.4.0 is a new installation baseline. It does not provide 0.3.x
+compatibility object names or an extension upgrade path. Do not run `ALTER
+EXTENSION ... UPDATE` or relabel an old installation as 0.4.0. Install it in a
+fresh database from the complete verified 0.4.0 package:
 
 ```text
-ALTER EXTENSION pg_charabia UPDATE TO '0.3.1';
+CREATE EXTENSION pg_charabia;
 SELECT extversion AS catalog_version,
        charabia.analysis_info()->>'extension' AS library_version
 FROM pg_catalog.pg_extension WHERE extname='pg_charabia';
 ```
 
-Both versions must be `0.3.1` in the fresh session.
-Validate expected document IDs, actual GIN/BM25 plans, and original-text headline after maintenance.
-Retain the old package for backups and recovery targets that require its exact library.
+Both versions must be `0.4.0`. Installation creates three configurations:
+
+- `public.charabia_linguistic` uses ordinary language analysis.
+- `public.charabia_structured` adds structured recognition and expansion. Select it explicitly.
+- `public.charabia` is the default linguistic entry. At installation it has the
+  same Parser and mappings as `public.charabia_linguistic`.
+
+The two linguistic configurations are separate PostgreSQL objects. Later mapping
+changes are independent. Their shared Dictionary parameters can affect both,
+as well as any other configuration that references those Dictionaries. A
+Configuration COPY also keeps Dictionary references; create independent
+Dictionaries when an application needs independent parameters.
+
+The extension does not change the host's `default_text_search_config`. Pass the
+intended configuration explicitly to native FTS, headline, and index expressions.
+Extension diagnostic and query defaults use `public.charabia`; see the
+[Usage reference](reference.md) for signatures and native-call behavior.
+
+A complete 0.3.x dump is not automatically compatible with the fresh baseline.
+Retain the exact old package, source text, application object definitions, and
+external rules. If old data is needed, read it in an isolated environment with
+that old package, then create the new definitions and reanalyze original text in
+the fresh database. This is not an in-place extension upgrade. Validate independent
+document IDs, actual GIN/BM25 plans, and original-text headline before opening
+traffic. Keep old packages for recovery targets that require their exact library.
 
 ## Optional pg_textsearch setup
 
@@ -102,7 +112,7 @@ For BM25, separately install the pg_textsearch build pinned in [environment.lock
 
 ## Schema ownership and permissions
 
-A database superuser runs `CREATE EXTENSION pg_charabia`. Installation reserves the fixed `charabia` schema and `public.charabia` configuration. The extension is not relocatable. Conflicting objects cause atomic failure rather than replacement.
+A database superuser runs `CREATE EXTENSION pg_charabia`. Installation reserves the fixed `charabia` schema and all three public configurations listed above. The extension is not relocatable. Conflicting objects cause atomic failure rather than replacement.
 
 If `charabia` already exists, the installer must own it and it must deny untrusted `CREATE` privileges. Otherwise, installation fails with `42501`. Installation grants `PUBLIC` schema `USAGE`, revokes `PUBLIC CREATE`, and leaves existing `public` schema permissions unchanged.
 
@@ -114,7 +124,7 @@ Dictionary parameters, candidate/route sets, segmentation features, whole-word r
 change also requires correct new Configuration mappings and affected expression
 or index definitions. Replacing a library or rebuilding postings alone does not
 repair old numeric mappings. The build/resource fingerprint does not certify user chains or existing indexed data.
-An existing Configuration COPY does not automatically gain new mappings or objects added to its source configuration.
+An existing Configuration COPY does not automatically gain new mappings or objects added to its source configuration. Changing mappings cannot replace a Configuration's Parser. To change modes, create a Configuration with the intended Parser and update application and index references; do not mix postings from the two modes.
 
 1. Inventory affected configurations, shared Dictionary references, stored vectors, and indexes. Include COPY relationships.
 2. Save source text, ordinary object DDL, owners, package/resource identity, and external rules.
@@ -129,7 +139,7 @@ An existing Configuration COPY does not automatically gain new mappings or objec
 | Ordinary `tsvector` column with GIN | Recompute the column from source text, then maintain its index. REINDEX alone reuses the old vector. |
 | Generated `tsvector` column with GIN | Update source values or redefine the expression to trigger recomputation, then maintain the index. |
 | BM25, same configuration OID | REINDEX after parameter or mapping changes. |
-| Replacement configuration OID | Recreate affected expressions/indexes for the new configuration. For BM25, replace the index or set the new text_config and rebuild. |
+| Replacement configuration OID or analysis mode | Recreate affected expressions/indexes for the new configuration and recompute stored vectors from original text. For BM25, replace the index or set the new text_config and rebuild. |
 | Dictionary rename or schema move | Mappings keep the OID. A name-only change does not itself require reanalysis. |
 | Configuration rename or schema move | Native OID references remain. Update BM25's text_config string and REINDEX, or create a replacement index. |
 
@@ -137,9 +147,9 @@ For BM25 name changes, use `ALTER INDEX ... SET (text_config='new_schema.new_nam
 
 ## Backup and recovery
 
-Logical dumps preserve ordinary dictionaries, parameters, mappings, owners, and dependencies, but restored objects receive new OIDs. Prepare roles, schema permissions, installed extensions, and external rules before restore. Validate subsequent ALTER/DROP operations and analysis afterward.
+Logical dumps preserve ordinary dictionaries, parameters, mappings, owners, and dependencies, but restored objects receive new OIDs. Prepare roles, schema permissions, installed extensions, and external rules before restore. Validate subsequent ALTER/DROP operations, both modes, shared and independent Dictionary parameters, and original-text headline afterward.
 
-Default extension members are rebuilt from the installed package. User changes to those members are not saved as independent member definitions. Keep custom settings in ordinary application objects.
+Restore a 0.4.0 logical backup into the matching fresh baseline. Default extension members are rebuilt from the installed package. User changes to those members are not saved as independent member definitions. Keep custom settings in ordinary application objects.
 
 Point-in-time recovery (PITR) needs a complete cluster base backup and continuous archived write-ahead log (WAL) through the target. The target cannot precede the backup's earliest consistent point. Retain the following outside the database backup:
 
@@ -151,4 +161,4 @@ WAL does not restore installation directories or replay later configuration-file
 
 Prefer a named restore point after analysis maintenance finishes. If the target falls between a parameter change and its rebuilds, keep traffic closed and finish maintenance. Physical replay does not rerun historical SQL or text analysis. A consistent restore cannot fix a semantic mismatch already present at the target.
 
-After recovery, validate LSN/timeline, parameters, mappings, cold Dictionary initialization, loaded library hash, stored vectors, candidates, actual index plans, and headline. Changes to binaries, redo components, or index formats require a matching recovery rehearsal. See [PostgreSQL PITR](https://www.postgresql.org/docs/18/continuous-archiving.html) and the [technical recovery boundary](architecture.md#persistent-state-and-recovery).
+After recovery, validate LSN/timeline, parameters, mappings, cold Dictionary initialization, loaded library hash, stored vectors, independent candidates, actual GIN/BM25 plans, and original-text headline in both modes. A physical 0.3.x recovery target still needs its exact old package; 0.4.0 is not a replacement for that package. Changes to binaries, redo components, or index formats require a matching recovery rehearsal. See [PostgreSQL PITR](https://www.postgresql.org/docs/18/continuous-archiving.html) and the [technical recovery boundary](architecture.md#persistent-state-and-recovery).

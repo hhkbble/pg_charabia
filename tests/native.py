@@ -85,13 +85,16 @@ $capture$;
     try:
         sql(f"CREATE DATABASE {install_database} TEMPLATE template0;", "install-create-database", False)
         sql("CREATE EXTENSION pg_charabia;", "install-create-extension", False, install_database)
-        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.parser'))=23 AND "
-                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=21);",
+        check(sql("SELECT to_jsonb((SELECT count(*) FROM ts_token_type('charabia.linguistic_parser'))=18 AND "
+                  "(SELECT count(*) FROM ts_token_type('charabia.structured_parser'))=23 AND "
+                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia'::regconfig)=16 AND "
+                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia_linguistic'::regconfig)=16 AND "
+                  "(SELECT count(*) FROM pg_ts_config_map WHERE mapcfg='public.charabia_structured'::regconfig)=21);",
                   "install-catalog", database=install_database) is True,
-              "clean CREATE EXTENSION installs 23 types and 21 public default mappings")
+              "clean CREATE EXTENSION installs both finite Parsers and three configurations")
         sql("DROP EXTENSION pg_charabia;", "install-drop-extension", False, install_database)
         uninstalled = sql("SELECT jsonb_build_object('extension_gone',NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_charabia'),"
-            "'default_gone',NOT EXISTS(SELECT 1 FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname='public' AND c.cfgname='charabia'),"
+            "'default_gone',NOT EXISTS(SELECT 1 FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname='public' AND c.cfgname IN('charabia','charabia_linguistic','charabia_structured')),"
             "'namespace_retained',EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='charabia'),"
             "'namespace_empty',NOT EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace='charabia'::regnamespace)"
             " AND NOT EXISTS(SELECT 1 FROM pg_ts_config WHERE cfgnamespace='charabia'::regnamespace)"
@@ -130,61 +133,64 @@ $capture$;
                  "The children were running through the garden while their teachers were reading books.",
                  "\t\n😀 é\u0301\u0001 1234"]
         values = ",".join(f"({i},{literal(text)})" for i, text in enumerate(texts))
-        actual = sql(f"""
-WITH inputs(id,body) AS(VALUES {values}) SELECT jsonb_agg(jsonb_build_object(
- 'id',id,'analysis',(SELECT coalesce(jsonb_agg(to_jsonb(a)-'ord' ORDER BY ord),'[]')
-   FROM charabia.analyze(body) WITH ORDINALITY a(raw,kind,script,charabia_language,language,language_source,
-       byte_start,byte_end,char_start,char_end,token_type,ord)),
- 'parse',(SELECT coalesce(jsonb_agg(jsonb_build_array(tokid,token) ORDER BY ord),'[]')
-   FROM ts_parse('charabia.parser',body) WITH ORDINALITY p(tokid,token,ord)),
- 'debug',(SELECT coalesce(jsonb_agg(jsonb_build_object('alias',alias,'token',token,'dictionary',dictionary::text,
-       'dictionaries',dictionaries::text[],'lexemes',lexemes) ORDER BY ord),'[]')
-   FROM ts_debug('public.charabia',body) WITH ORDINALITY d(alias,description,token,dictionaries,dictionary,lexemes,ord)),
- 'vector',(SELECT coalesce(jsonb_object_agg(lexeme,positions),'{{}}') FROM unnest(to_tsvector('public.charabia',body)))
-) ORDER BY id) FROM inputs;
-""", "adapter-invariants")
-        aliases = sql("SELECT jsonb_object_agg(tokid,alias) FROM ts_token_type('charabia.parser');", "route-identities")
-        for text, item in zip(texts, actual):
-            byte_text = text.encode()
-            check("".join(token for _, token in item["parse"]) == text,
-                  f"input {item['id']} Parser reconstructs original Unicode text")
-            check(len(item["analysis"]) == len(item["parse"]) == len(item["debug"]),
-                  f"input {item['id']} all diagnostic paths visit the same original spans")
-            positions, previous_byte, previous_char, expected_vector = 0, 0, 0, {}
-            for token, parsed, debug in zip(item["analysis"], item["parse"], item["debug"]):
-                raw = token["raw"]
-                check(token["byte_start"] == previous_byte and token["char_start"] == previous_char,
-                      f"input {item['id']} continuous byte/scalar starts")
-                check(byte_text[token["byte_start"]:token["byte_end"]].decode() == raw and
-                      token["byte_end"] == previous_byte + len(raw.encode()) and
-                      token["char_end"] == previous_char + len(raw),
-                      f"input {item['id']} offsets reference raw bytes and Unicode scalars")
-                check(parsed[1] == raw == debug["token"] and aliases[str(parsed[0])] == token["token_type"] == debug["alias"],
-                      f"input {item['id']} explicit route and original span reach PG Dictionary")
-                if token["kind"] == "word":
-                    check(debug["dictionaries"] == ["charabia." + token["token_type"]],
-                          f"input {item['id']} language mapping selects its default dictionary")
-                    check(token["language"] == token["token_type"],
-                          f"input {item['id']} selected Parser language matches lexical type")
-                elif token["kind"] in ("url", "host", "email", "file", "numword"):
-                    check(debug["dictionaries"] == ["charabia." + token["kind"]] and token["language"] is None,
-                          f"input {item['id']} structured mapping selects its own terminal with no selected language")
-                else:
-                    check(token["kind"] in ("blank", "display_only"), f"input {item['id']} has a recognized diagnostic kind")
-                    check(debug["dictionaries"] == [] and debug["lexemes"] is None and token["language"] is None,
-                          f"input {item['id']} blank/display remains unmapped and has no selected Dictionary language")
-                # This checks adapter position accounting only. These dictionary
-                # results are not accepted as independent algorithm goldens.
-                if debug["lexemes"] is not None:
-                    positions += 1
-                    for term in debug["lexemes"]:
-                        expected_vector.setdefault(term, []).append(positions)
-                previous_byte, previous_char = token["byte_end"], token["char_end"]
-            check(previous_byte == len(byte_text) and previous_char == len(text),
-                  f"input {item['id']} complete raw range coverage")
-            check(item["vector"] == expected_vector,
-                  f"input {item['id']} PG assigns variant positions and Stop/Ignore distances correctly")
-
+        for mode, config, parser in (
+            ("linguistic", "public.charabia", "charabia.linguistic_parser"),
+            ("structured", "public.charabia_structured", "charabia.structured_parser"),
+        ):
+            actual = sql(f"""
+    WITH inputs(id,body) AS(VALUES {values}) SELECT jsonb_agg(jsonb_build_object(
+     'id',id,'analysis',(SELECT coalesce(jsonb_agg(to_jsonb(a)-'ord' ORDER BY ord),'[]')
+       FROM charabia.analyze(body,'{config}') WITH ORDINALITY a(raw,kind,script,charabia_language,language,language_source,
+           byte_start,byte_end,char_start,char_end,token_type,ord)),
+     'parse',(SELECT coalesce(jsonb_agg(jsonb_build_array(tokid,token) ORDER BY ord),'[]')
+       FROM ts_parse('{parser}',body) WITH ORDINALITY p(tokid,token,ord)),
+     'debug',(SELECT coalesce(jsonb_agg(jsonb_build_object('alias',alias,'token',token,'dictionary',dictionary::text,
+           'dictionaries',dictionaries::text[],'lexemes',lexemes) ORDER BY ord),'[]')
+       FROM ts_debug('{config}',body) WITH ORDINALITY d(alias,description,token,dictionaries,dictionary,lexemes,ord)),
+     'vector',(SELECT coalesce(jsonb_object_agg(lexeme,positions),'{{}}') FROM unnest(to_tsvector('{config}',body)))
+    ) ORDER BY id) FROM inputs;
+    """, f"adapter-invariants-{mode}")
+            aliases = sql(f"SELECT jsonb_object_agg(tokid,alias) FROM ts_token_type('{parser}');", f"route-identities-{mode}")
+            for text, item in zip(texts, actual):
+                byte_text = text.encode()
+                check("".join(token for _, token in item["parse"]) == text,
+                      f"{mode} input {item['id']} Parser reconstructs original Unicode text")
+                check(len(item["analysis"]) == len(item["parse"]) == len(item["debug"]),
+                      f"{mode} input {item['id']} all diagnostic paths visit the same original spans")
+                positions, previous_byte, previous_char, expected_vector = 0, 0, 0, {}
+                for token, parsed, debug in zip(item["analysis"], item["parse"], item["debug"]):
+                    raw = token["raw"]
+                    check(token["byte_start"] == previous_byte and token["char_start"] == previous_char,
+                          f"{mode} input {item['id']} continuous byte/scalar starts")
+                    check(byte_text[token["byte_start"]:token["byte_end"]].decode() == raw and
+                          token["byte_end"] == previous_byte + len(raw.encode()) and
+                          token["char_end"] == previous_char + len(raw),
+                          f"{mode} input {item['id']} offsets reference raw bytes and Unicode scalars")
+                    check(parsed[1] == raw == debug["token"] and aliases[str(parsed[0])] == token["token_type"] == debug["alias"],
+                          f"{mode} input {item['id']} explicit route and original span reach PG Dictionary")
+                    if token["kind"] == "word":
+                        check(debug["dictionaries"] == ["charabia." + token["token_type"]],
+                              f"{mode} input {item['id']} language mapping selects its default dictionary")
+                        check(token["language"] == token["token_type"],
+                              f"{mode} input {item['id']} selected Parser language matches lexical type")
+                    elif token["kind"] in ("url", "host", "email", "file", "numword"):
+                        check(debug["dictionaries"] == ["charabia." + token["kind"]] and token["language"] is None,
+                              f"{mode} input {item['id']} structured mapping selects its own terminal with no selected language")
+                    else:
+                        check(token["kind"] in ("blank", "display_only"), f"{mode} input {item['id']} has a recognized diagnostic kind")
+                        check(debug["dictionaries"] == [] and debug["lexemes"] is None and token["language"] is None,
+                              f"{mode} input {item['id']} blank/display remains unmapped and has no selected Dictionary language")
+                    # This checks adapter position accounting only. These dictionary
+                    # results are not accepted as independent algorithm goldens.
+                    if debug["lexemes"] is not None:
+                        positions += 1
+                        for term in debug["lexemes"]:
+                            expected_vector.setdefault(term, []).append(positions)
+                    previous_byte, previous_char = token["byte_end"], token["char_end"]
+                check(previous_byte == len(byte_text) and previous_char == len(text),
+                      f"{mode} input {item['id']} complete raw range coverage")
+                check(item["vector"] == expected_vector,
+                      f"{mode} input {item['id']} PG assigns variant positions and Stop/Ignore distances correctly")
         stable = f"{schema}.stable"
         sql(f"""
 CREATE SCHEMA {schema};
@@ -266,11 +272,11 @@ ANALYZE {schema}.default_docs;
         sql(f"""
 CREATE TEXT SEARCH DICTIONARY {schema}.changing_eng(TEMPLATE=charabia.linguistic_template,
  Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
-CREATE TEXT SEARCH CONFIGURATION {changing}(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION {changing}(PARSER=charabia.linguistic_parser);
 DO $map$
 DECLARE types text;
 BEGIN
- SELECT string_agg(quote_ident(alias),',') INTO types FROM ts_token_type('charabia.parser') WHERE tokid<=16;
+ SELECT string_agg(quote_ident(alias),',') INTO types FROM ts_token_type('charabia.linguistic_parser') WHERE tokid<=16;
  EXECUTE 'ALTER TEXT SEARCH CONFIGURATION {changing} ADD MAPPING FOR '||types||' WITH {schema}.changing_eng';
 END $map$;
 CREATE TABLE {schema}.migration(id integer PRIMARY KEY,body text,manual tsvector,

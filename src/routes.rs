@@ -1,6 +1,7 @@
 //! Runtime algorithm bindings and PostgreSQL token types.
 pub use crate::language_data::LanguageId;
 use crate::structured_tokens::StructuredTokenKind;
+pub const LINGUISTIC_TYPE_COUNT: usize = 18;
 pub const TYPE_COUNT: usize = 23;
 use qdrant_rust_stemmers::Algorithm;
 impl LanguageId {

@@ -5,8 +5,8 @@ use std::{
 
 use pgrx::{AnyElement, Internal, PgLogLevel, PgSqlErrorCode, ereport, pg_sys};
 
-use crate::analysis::{AnalysisError, ErrorKind, LexizeOutcome, MAX_INPUT_BYTES};
-use crate::routes::{LanguageId, TYPE_COUNT, TokenType};
+use crate::analysis::{AnalysisError, AnalysisMode, ErrorKind, LexizeOutcome, MAX_INPUT_BYTES};
+use crate::routes::{LINGUISTIC_TYPE_COUNT, LanguageId, TYPE_COUNT, TokenType};
 
 pub fn fail(code: PgSqlErrorCode, message: impl AsRef<str>) -> ! {
     ereport!(PgLogLevel::ERROR, code, message.as_ref().to_owned());
@@ -294,12 +294,16 @@ pub(crate) fn structured_lexemes(
     }
 }
 
-pub fn lextypes() -> Internal {
+pub fn lextypes(mode: AnalysisMode) -> Internal {
+    let count = match mode {
+        AnalysisMode::Linguistic => LINGUISTIC_TYPE_COUNT,
+        AnalysisMode::Structured => TYPE_COUNT,
+    };
     // SAFETY: Each descriptor/string and the zero terminator are PG-owned.
     unsafe {
-        let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::LexDescr>() * (TYPE_COUNT + 1))
+        let result = pg_sys::palloc0(std::mem::size_of::<pg_sys::LexDescr>() * (count + 1))
             .cast::<pg_sys::LexDescr>();
-        for index in 0..TYPE_COUNT {
+        for index in 0..count {
             let route = TokenType::from_id((index + 1) as i32).expect("fixed token type");
             let entry = result.add(index);
             (*entry).lexid = route.id();
@@ -312,6 +316,47 @@ pub fn lextypes() -> Internal {
         }
         pointer(result)
     }
+}
+
+/// Resolve the installed Parser without retaining a PostgreSQL cache borrow.
+pub fn analysis_mode_for_config(configuration: pg_sys::Oid) -> AnalysisMode {
+    // SAFETY: All lookups run in a live backend. Copy each cache field before
+    // another PostgreSQL call can invalidate the cache entry.
+    let parser = unsafe { (*pg_sys::lookup_ts_config_cache(configuration)).prsId };
+    let extension = unsafe { pg_sys::get_extension_oid(c"pg_charabia".as_ptr(), false) };
+    if unsafe { pg_sys::getExtensionOfObject(pg_sys::TSParserRelationId, parser) } != extension {
+        unsupported_analysis_parser();
+    }
+    let start = unsafe { (*pg_sys::lookup_ts_parser_cache(parser)).startOid };
+    if unsafe { pg_sys::getExtensionOfObject(pg_sys::ProcedureRelationId, start) } != extension {
+        unsupported_analysis_parser();
+    }
+    // PgProc releases its syscache pin before the result is interpreted or an
+    // error is raised. prosrc owns its bytes across subsequent PG operations.
+    let identity = {
+        let procedure = pgrx::pg_catalog::pg_proc::PgProc::new(start).unwrap_or_else(|| {
+            fail(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                "missing Parser START function",
+            )
+        });
+        (procedure.prolang(), procedure.prosrc())
+    };
+    if identity.0 != pg_sys::ClanguageId.into() {
+        unsupported_analysis_parser();
+    }
+    match identity.1.as_str() {
+        "linguistic_parser_start_wrapper" => AnalysisMode::Linguistic,
+        "structured_parser_start_wrapper" => AnalysisMode::Structured,
+        _ => unsupported_analysis_parser(),
+    }
+}
+
+fn unsupported_analysis_parser() -> ! {
+    fail(
+        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+        "analyze requires a pg_charabia linguistic or structured Parser",
+    )
 }
 
 /// # Safety

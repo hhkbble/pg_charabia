@@ -12,6 +12,16 @@ This reference covers public SQL, dictionaries, queries, highlighting, and analy
 
 ## Languages and defaults
 
+`public.charabia` and `public.charabia_linguistic` use ordinary linguistic analysis.
+Use `public.charabia_structured` explicitly to add recognition and expansion of ASCII structures.
+Both modes use the same language analysis and built-in resources.
+Linguistic mode does not scan, overlay, or expand structured tokens.
+It keeps ordinary token boundaries, including English whole-word restoration and literal markup separators.
+
+Extension functions with an omitted configuration use `public.charabia`.
+Native PostgreSQL functions without a configuration use the host's `default_text_search_config`.
+The extension does not change that setting. Pass a configuration explicitly for stored vectors, indexes, queries, and headline.
+
 Each linguistic dictionary enables built-in stopwords and stemming when supported. Stopwords are words that the dictionary discards. Stemming reduces a word to a stem, not a general dictionary form. Terminal mode keeps each enabled branch's surface and distinct stem at the same position. Up to four terms are OR alternatives.
 
 The extension supports 15 languages and `und` for an undetermined language:
@@ -43,26 +53,46 @@ non-ASCII word can also enter its English branch.
 
 | Interface | Purpose |
 | --- | --- |
-| `public.charabia` | Default Text Search Configuration. |
-| `charabia.parser` | Standalone Text Search Parser for ordinary user configurations. |
+| `public.charabia` | Default linguistic Text Search Configuration. |
+| `public.charabia_linguistic` | Explicit linguistic Text Search Configuration. |
+| `public.charabia_structured` | Explicit linguistic plus structured Text Search Configuration. |
+| `charabia.linguistic_parser` | Ordinary Parser with 18 token types. |
+| `charabia.structured_parser` | Parser with 18 ordinary and five structured token types. |
 | `charabia.linguistic_template` | Linguistic Dictionary Template used with the parameters below. |
 | `charabia.structured_template` | Terminal Dictionary Template for ASCII structures. |
 | `charabia.url`, `charabia.host`, `charabia.email`, `charabia.file`, `charabia.numword` | Default structured dictionaries. |
 | `charabia.eng`, `charabia.fra`, `charabia.cmn`, …, `charabia.und` | Default linguistic dictionaries. Discover the complete set with `charabia.analysis_info()`. |
 | `charabia.analysis_info() RETURNS jsonb` | Static build/resource identity, language capabilities, rules for structured tokens, and defaults. It does not fingerprint user configurations or external dictionary files. |
-| `charabia.analyze(text) RETURNS TABLE` | Parser facts: `raw`, `kind`, `script`, `charabia_language`, `language`, `language_source`, `byte_start`, `byte_end`, `char_start`, `char_end`, `token_type`. |
+| `charabia.analyze(text, config regconfig DEFAULT 'public.charabia') RETURNS TABLE` | Parser facts: `raw`, `kind`, `script`, `charabia_language`, `language`, `language_source`, `byte_start`, `byte_end`, `char_start`, `char_end`, `token_type`. |
 | `charabia.query_any(text, config regconfig DEFAULT 'public.charabia') RETURNS tsquery` | Plain query analysis with AND changed to OR in the new query tree. |
 | `pg_catalog.ts_headline` | Standard text, JSON, and JSONB headline using the selected configuration. |
 
-`analyze` offsets are zero-based, half-open ranges. Byte offsets refer to UTF-8. Character offsets count Unicode scalar values, not grapheme clusters. Missing original Charabia language remains NULL. Blank/display and structured tokens have no selected language in the diagnostic output. A structured token reports its own kind and token type.
+`analyze` offsets are zero-based, half-open ranges. Byte offsets refer to UTF-8. Character offsets count Unicode scalar values, not grapheme clusters. Missing original Charabia language remains NULL. Blank/display and structured tokens have no selected language in the diagnostic output. A structured token reports its own kind and token type in structured mode.
 
-`analyze` does not report final terms from a Dictionary chain. Use `to_tsvector` and query functions to inspect effective analysis. Diagnostic/query functions use `SECURITY INVOKER` and a fixed `search_path=pg_catalog`. Internal callbacks do not grant direct `PUBLIC EXECUTE`.
+`analyze` selects its mode from the configuration's actual extension Parser.
+Configuration copies and renamed configurations, Parsers, or START functions retain their mode.
+A configuration with a third-party Parser fails with `0A000`.
+`analyze` reports Parser facts, so configurations with the same Parser can report the same rows despite different mappings.
+It does not report final terms from a Dictionary chain. Use `to_tsvector` and query functions to inspect effective analysis. Diagnostic/query functions use `SECURITY INVOKER` and a fixed `search_path=pg_catalog`. Internal callbacks do not grant direct `PUBLIC EXECUTE`.
 
-The Parser emits 16 language types, `blank`, `display_only`, and five structured token types, for 23 types in total. `blank` and `display_only` have no default mapping and consume no word position. Stopwords leave position holes. Language alternatives share one position. Each structured token also occupies one position, with the query grouping described below. See [Architecture](architecture.md) for the implementation.
+The linguistic Parser emits 16 language types, `blank`, and `display_only`, for 18 types.
+The structured Parser adds five structured types, for 23 types.
+`blank` and `display_only` have no default mapping and consume no word position.
+Each final ordinary Parser token advances one position when its chain returns terms or Stop.
+Stopwords leave position holes. Alternatives for one token share a position.
+For example, ordinary `foo_bar.rs` has successive `foo`, `bar`, and `rs` positions.
+Ordinary `100ms` stays one raw word without dedicated `100` or `ms` components.
+Each structured token occupies one atomic position, with the query grouping described below.
+Custom chains retain native PostgreSQL position behavior. See [Architecture](architecture.md) for the implementation.
 
 ## Configurations and dictionary chains
 
-Keep default extension members as an unchanged baseline. A configuration `COPY` copies mappings but shares dictionaries. Create a separate dictionary only where independent parameters are needed. ALTER on a shared dictionary affects every reference. The [README custom configuration](../README.md#custom-configuration) replaces only the English mapping.
+Keep default extension members as an unchanged baseline.
+At installation, `public.charabia` copies `public.charabia_linguistic` and has the same Parser and mappings.
+These are distinct configurations. Later mapping changes are independent, with no implicit synchronization.
+PostgreSQL configurations do not forward to another configuration as an alias.
+
+A configuration `COPY` copies mappings but shares dictionaries. Create a separate dictionary only where independent parameters are needed. ALTER on a shared dictionary affects every reference, including references from both modes. The [README custom configuration](../README.md#custom-configuration) replaces only the English mapping.
 
 ### Linguistic dictionary parameters
 
@@ -119,7 +149,7 @@ CREATE TEXT SEARCH DICTIONARY app.fold_eng(
  TEMPLATE=charabia.linguistic_template, Language='eng',
  Discard=false, Stem=false, Normalize=true, Filter=true
 );
-CREATE TEXT SEARCH CONFIGURATION app.filtered(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION app.filtered(PARSER=charabia.linguistic_parser);
 ALTER TEXT SEARCH CONFIGURATION app.filtered
  ADD MAPPING FOR eng WITH app.fold_eng, pg_catalog.simple;
 SELECT to_tsvector('app.filtered',body) FROM documents WHERE id=2;
@@ -129,7 +159,9 @@ SELECT to_tsvector('app.filtered',body) FROM documents WHERE id=2;
 
 ## Structured ASCII tokens
 
-The default configuration maps all five structured token types to their corresponding dictionaries.
+`public.charabia_structured` maps all five structured token types to their corresponding dictionaries.
+The two linguistic configurations have no structured token types or mappings.
+Changing mappings cannot change a configuration's Parser or activate structured recognition.
 A custom configuration can use other standard dictionaries for these types.
 Structured tokens do not carry private data from Parser to Dictionary. Each Dictionary validates its actual current input, including direct `ts_lexize` calls and earlier filter replacements.
 
@@ -182,18 +214,19 @@ A `.rs` domain can therefore be treated as a file. Other DNS-shaped dotted names
 
 ### Custom structured dictionary example
 
-Continue in the database from the [README quick start](../README.md#quick-start) and [custom configuration](../README.md#custom-configuration). BM25 and the filter example are not required. This example replaces the numword mapping with an independent structured dictionary.
+Continue in the database from the [README quick start](../README.md#quick-start) and [custom configuration](../README.md#custom-configuration). BM25 and the filter example are not required. This example copies the structured configuration and replaces its numword mapping with an independent structured dictionary.
 
 ```sql
+CREATE TEXT SEARCH CONFIGURATION app.structured(COPY=public.charabia_structured);
 CREATE TEXT SEARCH DICTIONARY app.units(
  TEMPLATE=charabia.structured_template, Kind='numword',
  Discard=true, Stem=false, Normalize=true
 );
-ALTER TEXT SEARCH CONFIGURATION app.search
+ALTER TEXT SEARCH CONFIGURATION app.structured
  ALTER MAPPING FOR numword WITH app.units;
-SELECT plainto_tsquery('app.search','100ms');
-SELECT ts_headline('app.search','alpha 100ms beta',
-                  plainto_tsquery('app.search','ms'),'HighlightAll=true');
+SELECT plainto_tsquery('app.structured','100ms');
+SELECT ts_headline('app.structured','alpha 100ms beta',
+                  plainto_tsquery('app.structured','ms'),'HighlightAll=true');
 ```
 
 The component query for `ms` highlights the complete original `100ms` token. See [limits](#limits-and-known-quality-issues) for structured token expansion budgets.
@@ -202,13 +235,26 @@ The component query for `ms` highlights the complete original `100ms` token. See
 
 Complete the [optional pg_textsearch setup](operations.md#optional-pg_textsearch-setup) before running the [README BM25 example](../README.md#optional-bm25-ranking). Native FTS does not need pg_textsearch.
 
+BM25 uses the configuration named by the index's required `text_config` option.
+Its query analysis uses the index configuration. Select the intended mode when building the index.
+Changing Dictionary parameters does not update existing postings.
+See [index maintenance](operations.md#analysis-changes-and-index-maintenance) before changing indexed analysis.
+
 BM25 uses bag-of-terms matching. Native `plainto_tsquery` uses AND. Phrase queries impose position rules. `query_any` accepts ordinary valid configurations and does not analyze final terms again. Build it once per statement, then highlight only the top results. The BM25 query still performs its own required analysis.
 
 `query_any` analyzes plain text. It is not a phrase or Boolean query parser. Structured token components also become OR alternatives. Apply a native match condition before the final LIMIT when the application needs native query semantics for BM25 candidates. Headline output does not establish that condition.
 
 ## Headline
 
-`ts_headline` matches real dictionary results to original text. Text, JSON, and JSONB share the implementation. A full or component hit marks the whole original structured token once. Subrange structured token highlighting is not supported. Normalization, stemming, prefix matching, position holes, and external dictionary chains use PostgreSQL's matching path.
+`ts_headline` uses the selected configuration and matches real dictionary results to original text.
+Text, JSON, and JSONB share the implementation.
+Linguistic mode marks matching ordinary raw tokens.
+For example, `run` can mark only `Running` inside `https://Example.com/Running?q=100ms`.
+It does not match `100ms` from a query for `ms`.
+In structured mode, a full or component hit marks the whole original structured token once.
+The same URL query can mark the complete URL.
+Subrange structured token highlighting is not supported.
+Normalization, stemming, prefix matching, position holes, and external dictionary chains use PostgreSQL's matching path.
 
 Headline output is not a retrieval filter. Apply the actual match condition first, especially for phrases and NOT queries. A headline can mark operands even when a phrase does not match.
 
@@ -233,7 +279,7 @@ Unknown or duplicate options, invalid syntax, and conflicting or out-of-range fr
 | Input | UTF8 database, valid UTF-8, no NUL, at most 262144 bytes per text or query input. |
 | BM25 | Validate the complete document and query before upstream slicing. The Parser cannot recover the original full length. Keep a document CHECK like the quick start. |
 | Raw token | At least 2047 bytes becomes display-only pieces of at most 2046 bytes, split on Unicode scalar boundaries. Default mappings do not index these pieces. A long structured token candidate follows this ordinary/display path instead of indexing a shortened full form. |
-| Structured token expansion | At most 32 units after camel splitting/whole-word recovery and before Stop processing or deduplication. Structural literals also count, except a literal identical to a complete form. At most 66 emitted terms and 16 KiB of final term bytes per structured token. Exceeding a budget fails with `54000`, without truncation. |
+| Structured token expansion | Structured mode only. At most 32 units after camel splitting/whole-word recovery and before Stop processing or deduplication. Structural literals also count, except a literal identical to a complete form. At most 66 emitted terms and 16 KiB of final term bytes per structured token. Exceeding a budget fails with `54000`, without truncation. |
 | Final term | PostgreSQL stores a 2047-byte term and ignores a 2048-byte term. Diagnostic output does not prove indexability. |
 | Positions | Positions saturate at 16383. A stored vector keeps at most 255 positions per term. |
 | Headline | Each escaped entry is at most 65535 bytes. Output is at most 8 MiB per callback/string. Limit errors use `54000`. |
@@ -260,8 +306,7 @@ any custom settings against representative documents and queries.
 
 ### Known BM25 issues
 
-In v0.3.1, BM25 retains the extra results reported in v0.3.0 for queries such as
-`running`, `aimées`, and `hördes`. Extra matches occur with custom and generic prepared plans.
+BM25 can return extra results for queries such as `running`, `aimées`, and `hördes` in either mode. Extra matches occur with custom and generic prepared plans.
 The `running` difference also occurs after index updates, maintenance, and
 server restarts.
 
@@ -269,6 +314,6 @@ BM25 also has a known ranking error. A query such as `全文 running` can rank a
 unexpected document first. Check result relevance and ordering before relying
 on the first few matches.
 
-The release archive includes the original observations and verification
-evidence. See [Development](development.md#reviewed-release-warnings) for report
+Mode-specific release evidence separates mechanism checks, language quality failures, and reviewed warnings.
+The release archive includes the original observations and verification evidence. See [Development](development.md#reviewed-release-warnings) for report
 and release acceptance rules.

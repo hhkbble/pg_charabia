@@ -15,12 +15,21 @@ impl Drop for ParserState {
 }
 
 #[pg_extern(sql = false)]
-fn parser_start(input: Internal, length: i32) -> Internal {
+fn linguistic_parser_start(input: Internal, length: i32) -> Internal {
+    start(input, length, analysis::AnalysisMode::Linguistic)
+}
+
+#[pg_extern(sql = false)]
+fn structured_parser_start(input: Internal, length: i32) -> Internal {
+    start(input, length, analysis::AnalysisMode::Structured)
+}
+
+fn start(input: Internal, length: i32, mode: analysis::AnalysisMode) -> Internal {
     let pointer = pg_ffi::raw::<u8>(input).cast_const();
     // SAFETY: START's PG input remains alive through all GETTOKEN calls and END.
     let text = unsafe { pg_ffi::input(pointer, length) };
     pgrx::check_for_interrupts!();
-    let spans = pg_ffi::checked(analysis::segment(text));
+    let spans = pg_ffi::checked(analysis::segment(text, mode));
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::parser_created();
@@ -79,8 +88,13 @@ fn parser_end(mut state: Internal) {
 }
 
 #[pg_extern(sql = false)]
-fn parser_lextypes(_unused: Internal) -> Internal {
-    pg_ffi::lextypes()
+fn linguistic_parser_lextypes(_unused: Internal) -> Internal {
+    pg_ffi::lextypes(analysis::AnalysisMode::Linguistic)
+}
+
+#[pg_extern(sql = false)]
+fn structured_parser_lextypes(_unused: Internal) -> Internal {
+    pg_ffi::lextypes(analysis::AnalysisMode::Structured)
 }
 
 #[pg_extern(sql = false)]

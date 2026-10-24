@@ -2,7 +2,7 @@
 
 pg_charabia adds multilingual linguistic analysis to PostgreSQL 18 with [Charabia](https://github.com/meilisearch/charabia). Use it with native full-text search (FTS), GIN indexes, and `ts_headline`. Optional BM25 ranking uses [pg_textsearch](https://github.com/timescale/pg_textsearch).
 
-Default dictionaries cover 15 languages plus `und` for an undetermined language. They enable built-in stopwords and stemming where supported. Five structured dictionaries for ASCII tokens recognize URLs, hosts, email addresses, file paths, and mixed letter/number forms.
+Default dictionaries cover 15 languages plus `und` for an undetermined language. They enable built-in stopwords and stemming where supported. The default `public.charabia` and the named `public.charabia_linguistic` configuration use ordinary language analysis. Select `public.charabia_structured` to also recognize ASCII URLs, hosts, email addresses, file paths, and mixed letter/number forms.
 
 [Usage reference](docs/reference.md) · [Installation and maintenance](docs/operations.md) · [Architecture](docs/architecture.md) · [Development](docs/development.md)
 
@@ -14,14 +14,14 @@ Linux AMD64 is the release build and validation target. macOS ARM64 has an isola
 
 ## Installation
 
-Download the Linux AMD64 package and its SHA256 file from the [v0.3.1 release](https://github.com/hhkbble/pg_charabia/releases/tag/v0.3.1). The complete archive includes the extension binary, source, resources, notices, and verification evidence.
+Download the Linux AMD64 package and its SHA256 file from the [v0.4.0 release](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.0). The complete archive includes the extension binary, source, resources, notices, and verification evidence.
 
 - [Build from source](docs/development.md#build-and-test) with the pinned prerequisites and isolated runners.
 - [Download, verify, and install the release archive](docs/operations.md#download-and-install) into a matching Linux AMD64 PostgreSQL 18 installation.
 
-For an existing 0.3.0 installation, follow the [upgrade procedure](docs/operations.md#upgrade-from-030-to-031).
+Version 0.4.0 is a fresh installation baseline. It has no SQL upgrade path from 0.3.x. Keep the exact old package for old recovery targets. Recreate application definitions and analysis in a new database when moving existing source text to this baseline.
 
-The SQL below assumes that extension files are installed. A database superuser runs `CREATE EXTENSION pg_charabia`. Installation reserves the fixed `charabia` schema and `public.charabia` configuration. Read [schema ownership and permissions](docs/operations.md#schema-ownership-and-permissions) before installation.
+The SQL below assumes that extension files are installed. A database superuser runs `CREATE EXTENSION pg_charabia`. Installation reserves the fixed `charabia` schema and the three configurations named above. Read [schema ownership and permissions](docs/operations.md#schema-ownership-and-permissions) before installation.
 
 ## Quick start
 
@@ -32,6 +32,8 @@ CREATE EXTENSION pg_charabia;
 SELECT charabia.analysis_info();
 SELECT * FROM charabia.analyze('中文全文检索 PostgreSQL');
 SELECT * FROM charabia.analyze('GET https://Example.com/Running?q=100ms');
+SELECT * FROM charabia.analyze('GET https://Example.com/Running?q=100ms',
+                               'public.charabia_structured');
 SELECT * FROM ts_debug('public.charabia','中文全文检索 PostgreSQL');
 CREATE TABLE documents (
     id bigint PRIMARY KEY,
@@ -48,11 +50,13 @@ SELECT ts_headline('public.charabia',body,
  FROM documents WHERE id=2;
 ```
 
+The first diagnostic uses ordinary tokens. The explicit structured diagnostic keeps the URL as one token. Native functions without an explicit configuration still follow PostgreSQL’s `default_text_search_config`. The extension does not change that setting.
+
 The search returns document `1`. The headline marks both original `running` words in document `2` from a query for `run`. The GIN expression uses the same configuration for documents and queries.
 
 ## Custom configuration
 
-A configuration `COPY` copies mappings but shares dictionaries. Create a separate dictionary for independent parameters. ALTER on a shared dictionary affects every reference. This example replaces only the English mapping.
+`public.charabia` copies the linguistic Parser and mappings at installation. Later mapping changes are independent. A configuration `COPY` copies mappings but shares dictionaries. Create a separate dictionary for independent parameters. ALTER on a shared dictionary affects every reference. This example replaces only the English mapping.
 
 ```sql
 CREATE SCHEMA app;
@@ -100,9 +104,9 @@ BM25 matches a bag of terms. Native AND, phrase, and structured token component 
 
 Validate complete documents and queries against the 262144-byte input limit before BM25 slices them. Keep the document CHECK from the quick start. See [all limits and known quality issues](docs/reference.md#limits-and-known-quality-issues).
 
-Short queries, mixed-language text, and phrase searches can miss expected matches. Structured token components can match scattered words or shared parts. Headline is a presentation step, not a retrieval filter. See [structured token semantics](docs/reference.md#structured-ascii-tokens) and [headline rules](docs/reference.md#headline).
+Short queries, mixed-language text, and phrase searches can miss expected matches. In the explicit structured mode, token components can match scattered words or shared parts. Headline is a presentation step, not a retrieval filter. See [structured token semantics](docs/reference.md#structured-ascii-tokens) and [headline rules](docs/reference.md#headline).
 
-BM25 retains the known false matches and ranking errors reported in v0.3.0, including false matches for German `die`. Review the [known BM25 issues](docs/reference.md#known-bm25-issues) and test representative documents and queries before adoption.
+The mode choice does not resolve the known language false matches or ranking errors, including false matches for German `die`. Review the [known BM25 issues](docs/reference.md#known-bm25-issues) and test representative documents and queries before adoption.
 
 Changes to dictionaries, mappings, chains, or resources can invalidate indexed analysis. Stored vectors need recomputation. REINDEX alone reuses an ordinary stored vector. Follow [analysis changes and index maintenance](docs/operations.md#analysis-changes-and-index-maintenance) for the required action for each representation.
 

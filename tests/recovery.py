@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Recover the actual staged release through online backup and archive WAL."""
+import ctypes
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ import subprocess
 import tempfile
 import time
 
-from support import Session
+from support import ANALYSIS_REVISION, FORMAT, Session
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = Path(os.environ['PGCB_RUN_DIR']) / 'recovery'
@@ -22,8 +23,9 @@ TMP = Path(tempfile.mkdtemp(prefix='recovery-',dir=os.environ['PGCB_TEMP_DIR']))
 ENV = {k:v for k,v in os.environ.items() if not k.startswith('PG') or k == 'PG_CONFIG'}
 BIN = Path(os.environ['PGCB_PG_BIN'])
 ENV['PATH'] = str(BIN)+':'+ENV.get('PATH','')
-REPORT = {'format':2,'mode':'release-physical-PITR','run':RUN,'temporary':str(TMP),'commands':[],'checks':[],'status':'running'}
+REPORT = {'format':FORMAT,'analysis_revision':ANALYSIS_REVISION,'mode':'release-physical-PITR','modes':{'linguistic':'lab.linguistic_cfg','structured':'lab.structured_cfg'},'run':RUN,'temporary':str(TMP),'commands':[],'checks':[],'status':'running'}
 STARTED = set()
+CLIENTS = {}
 STRUCTURED_TOKENS = {
     'url': (1, 'https://example.com/running?q=100ms&item=x', 'run'),
     'host': (2, 'worker.example.net', 'worker'),
@@ -40,6 +42,94 @@ REPORT['structured_expectation_basis'] = {
 def save():
     (OUT/'results.json').write_text(json.dumps(REPORT,ensure_ascii=False,indent=2)+'\n')
 
+def client_group(pgid):
+    """Read only members of the private session created for one test command."""
+    members = {}
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            fields = (entry/'stat').read_text().rpartition(')')[2].split()
+            if int(fields[2]) == pgid and int(fields[3]) == pgid:
+                members[int(entry.name)] = {'parent':int(fields[1]),'start_ticks':fields[19],'state':fields[0]}
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    return members
+
+
+def finish_client(process, proof, terminate):
+    """Join one private command group, including its adopted WAL streamer."""
+    pgid = proof['pgid']
+    known = {int(pid):identity for pid,identity in proof['members'].items()}
+    deadline = time.monotonic() + 5
+    kill_at = time.monotonic() + 2
+    sent = set()
+    while True:
+        current = client_group(pgid)
+        # A still-recorded identity or an adopted direct child anchors ownership.
+        anchored = any(pid in known and row['start_ticks']==known[pid]['start_ticks']
+                       for pid,row in current.items()) or any(row['parent']==os.getpid()for row in current.values())
+        if current and not anchored:
+            proof['errors'].append('Private client group ownership could not be proved')
+            break
+        known.update(current)
+        proof['members'] = known
+        live = [pid for pid,row in current.items() if row['state'] != 'Z']
+        if live and process.returncode is not None and not terminate:
+            proof['unexpected_live_children'] = live
+            terminate = True
+        wanted = signal.SIGKILL if time.monotonic() >= kill_at else signal.SIGTERM
+        if terminate and current and wanted not in sent:
+            try:
+                os.killpg(pgid,wanted)
+                proof['signals'].append(int(wanted))
+                sent.add(wanted)
+            except ProcessLookupError:
+                pass
+        # Popen alone owns the direct child's wait status. Other matching group
+        # members may have been adopted because this recovery process is subreaper.
+        if process.returncode is None:
+            try:
+                process.wait(timeout=.02)
+            except subprocess.TimeoutExpired:
+                pass
+        for pid,identity in current.items():
+            if pid == process.pid:
+                continue
+            try:
+                fields = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()
+                if fields[19] != identity['start_ticks']:
+                    continue
+                exited,status_code = os.waitpid(pid,os.WNOHANG)
+                if exited == pid:
+                    proof['reaped_owned_children'].append({'pid':pid,'start_ticks':identity['start_ticks'],
+                        'status':status_code,'exit_code':os.waitstatus_to_exitcode(status_code)})
+            except (ChildProcessError,FileNotFoundError,ProcessLookupError):
+                pass
+        remaining = client_group(pgid)
+        proof.update(direct_waited=process.returncode is not None,direct_exit_code=process.returncode,
+                     remaining_owned_pids=sorted(remaining),group_empty=not remaining)
+        save()
+        if process.returncode is not None and not remaining:
+            proof['cleanup_complete'] = not proof['errors']
+            if proof['cleanup_complete']:
+                CLIENTS.pop(process.pid,None)
+            save()
+            return proof['cleanup_complete']
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(.02)
+    proof.update(direct_waited=process.returncode is not None,direct_exit_code=process.returncode,
+                 remaining_owned_pids=sorted(client_group(pgid)),group_empty=not client_group(pgid),cleanup_complete=False)
+    save()
+    return False
+
+
+def restore_child_signal_mask(mask):
+    """Pre-exec in this single-threaded recovery child: undo the handoff mask."""
+    signal.pthread_sigmask(signal.SIG_SETMASK,mask)
+
+
 def command(argv,label,check=True,timeout=120,sql_text=None):
     argv=list(map(str,argv)); start=time.monotonic()
     stem=f'{len(REPORT["commands"])+1:03d}-{label}'
@@ -50,22 +140,59 @@ def command(argv,label,check=True,timeout=120,sql_text=None):
         sql_path.write_text(sql_text+'\n')
         entry['sql']=sql_path.name
     REPORT['commands'].append(entry);save()
+    process = None
+    proof = None
     try:
-        result=subprocess.run(argv,env=ENV,text=True,capture_output=True,timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        def text(value):return value.decode(errors='replace')if isinstance(value,bytes)else value or ''
-        stdout.write_text(text(error.stdout))
-        stderr.write_text(text(error.stderr))
-        entry.update(exit='timeout',seconds=time.monotonic()-start,timeout_seconds=timeout);save()
-        raise
+        # Files cannot remain blocked by a forked pg_basebackup WAL streamer's
+        # inherited PIPEs. Every client gets an isolated group; pg_ctl's detached
+        # server belongs to STARTED and is stopped separately.
+        with stdout.open('w') as output, stderr.open('w') as errors:
+            proof = {'label':label,'argv':argv,'pgid':None,'leader_pid':None,
+                     'members':{},'signals':[],'reaped_owned_children':[],
+                     'remaining_owned_pids':[],'direct_waited':False,'group_empty':False,
+                     'cleanup_complete':False,'errors':[],'signal_handoff_registered':False}
+            proofs = REPORT.setdefault('client_exit_proofs',[])
+            child_mask = lambda: restore_child_signal_mask(previous_mask)
+            # Only this single-threaded recovery process spawns clients here.
+            # A pending handled signal must wait until ownership is registered;
+            # the executed child must recover the original mask before exec.
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM})
+            try:
+                process = subprocess.Popen(argv,env=ENV,text=True,stdout=output,stderr=errors,
+                                           start_new_session=True,preexec_fn=child_mask)
+                proof.update(pgid=process.pid,leader_pid=process.pid)
+                CLIENTS[process.pid] = (process,proof)
+                proofs.append(proof)
+                proof['signal_handoff_registered'] = True
+            finally:
+                # This remains inside command's try: pending signals now enter
+                # the same first-error preservation and owned cleanup path.
+                signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+            save()
+            proof['members'] = client_group(process.pid)
+            proof['leader_start_ticks'] = proof['members'].get(process.pid,{}).get('start_ticks')
+            save()
+            process.wait(timeout=timeout)
+            if not finish_client(process,proof,False):
+                raise RuntimeError('Owned command group did not exit: '+label)
+            if proof.get('unexpected_live_children'):
+                raise RuntimeError('Command left live children after its own exit: '+label)
     except BaseException as error:
-        entry.update(exit='interrupted'if isinstance(error,InterruptedError)else'exception',error=repr(error),seconds=time.monotonic()-start);save()
+        entry.update(exit='timeout'if isinstance(error,subprocess.TimeoutExpired)else'interrupted'if isinstance(error,InterruptedError)else'exception',
+                     error=repr(error),seconds=time.monotonic()-start)
+        if isinstance(error,subprocess.TimeoutExpired):entry['timeout_seconds']=timeout
+        save()  # Preserve the first error and output files before termination.
+        if process is not None and proof is not None and process.pid in CLIENTS:
+            try:
+                if not finish_client(process,proof,True):
+                    error.add_note('Owned client group cleanup incomplete; retained temporary data')
+            except BaseException as cleanup_error:
+                proof['errors'].append(repr(cleanup_error));save()
+                error.add_note('Owned client cleanup error: '+repr(cleanup_error))
         raise
-    stdout.write_text(result.stdout)
-    stderr.write_text(result.stderr)
-    entry.update(exit=result.returncode,seconds=time.monotonic()-start);save()
-    if check and result.returncode:raise RuntimeError(f'{label}: {result.returncode}: {result.stderr[-1600:]}')
-    return result.stdout.strip()
+    entry.update(exit=process.returncode,seconds=time.monotonic()-start);save()
+    if check and process.returncode:raise RuntimeError(f'{label}: {process.returncode}: {stderr.read_text()[-1600:]}')
+    return stdout.read_text().strip()
 
 def sql(text,label,database='postgres'):
     return command([BIN/'psql','-XAtq','-v','ON_ERROR_STOP=1','-d',database,'-c',text],label,sql_text=text)
@@ -74,13 +201,97 @@ def check(ok,label,evidence=None):
     REPORT['checks'].append({'label':label,'ok':bool(ok),'evidence':evidence});save()
     if not ok:raise AssertionError((label,evidence))
 
+def enable_child_subreaper():
+    """Keep this test's daemonized postmasters reapable by this Python child."""
+    record = REPORT['child_subreaper'] = {'pid':os.getpid(),'enabled':False,'calls':[]}
+    save()
+    check(os.uname().sysname=='Linux','recovery child requires Linux subreaper support')
+    libc = ctypes.CDLL(None,use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+
+    def call(option,argument):
+        ctypes.set_errno(0)
+        result = libc.prctl(option,argument,0,0,0)
+        record['calls'].append({'option':option,'result':result,'errno':ctypes.get_errno()})
+        save()
+        check(result==0,'owned recovery child prctl succeeded',record['calls'][-1])
+
+    # Linux PR_SET_CHILD_SUBREAPER=36 and PR_GET_CHILD_SUBREAPER=37.
+    previous = ctypes.c_int()
+    call(37,ctypes.addressof(previous))
+    record['previous'] = previous.value
+    call(36,1)
+    current = ctypes.c_int()
+    call(37,ctypes.addressof(current))
+    record.update(current=current.value,enabled=current.value==1)
+    check(record['enabled'],'owned recovery child is a verified subreaper',record)
+
+
 def start(path,port):
     STARTED.add(path)
     command([BIN/'pg_ctl','-D',path,'-l',path.parent/(path.name+'.log'),'-w','-t','60','start'],path.name+'-start')
     ENV.update(PGHOST=str(TMP/'socket'),PGPORT=str(port),PGUSER='postgres',PGDATABASE='postgres')
 
+def owned_processes(path):
+    """Record Linux process identities before stopping this marked child cluster."""
+    postmaster = int((path/'postmaster.pid').read_text().splitlines()[0])
+    processes = {}
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            fields = (entry/'stat').read_text().rpartition(')')[2].split()
+            processes[int(entry.name)] = {'parent': int(fields[1]), 'start_ticks': fields[19]}
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    owned = {postmaster}
+    while True:
+        descendants = {pid for pid, item in processes.items() if item['parent'] in owned}
+        if descendants <= owned:
+            break
+        owned |= descendants
+    return {pid: processes[pid] for pid in owned if pid in processes}
+
+
 def stop(path,mode='fast'):
+    processes = owned_processes(path)
+    log = path.parent/(path.name+'.log')
+    if log.exists():
+        shutil.copy2(log, OUT/(path.name+'-before-stop-'+str(len(REPORT['commands']))+'.log'))
     command([BIN/'pg_ctl','-D',path,'-m',mode,'-w','-t','60','stop'],path.name+'-stop-'+mode)
+    command([BIN/'pg_ctl','-D',path,'status'],path.name+'-stopped-status',check=False)
+    status = REPORT['commands'][-1]['exit']
+    deadline = time.monotonic() + 5
+    reaped = []
+    while True:
+        alive = []
+        for pid, identity in processes.items():
+            try:
+                fields = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()
+                if fields[19] == identity['start_ticks']:
+                    # A container's Python PID 1 can adopt daemonized children.
+                    # Reap only this recorded process identity if it is ours.
+                    try:
+                        exited, status_code = os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        exited = 0
+                    if exited == pid:
+                        reaped.append({'pid':pid,'status':status_code,
+                                       'exit_code':os.waitstatus_to_exitcode(status_code)})
+                    else:
+                        alive.append(pid)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        if not alive or time.monotonic() >= deadline:
+            break
+        time.sleep(.02)
+    proof = {'cluster': str(path), 'mode': mode, 'processes': processes,
+             'status_exit': status, 'pid_file_absent': not (path/'postmaster.pid').exists(),
+             'remaining_owned_pids': alive, 'reaped_owned_children':reaped}
+    REPORT.setdefault('cluster_exit_proofs', []).append(proof)
+    check(status == 3 and proof['pid_file_absent'] and not alive,
+          path.name+' owned postmaster and children exited', proof)
     STARTED.remove(path)
 
 def nodes(value):
@@ -112,7 +323,7 @@ def observe_chinese_headline(label):
 
 def observe_round4(label):
     terms=['abbrevıate','abbrevıa','abbreviate','abbrevi']
-    snapshot=json.loads(sql("SELECT jsonb_build_object('options',(SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.parallel'::regdictionary),'direct',ts_lexize('lab.parallel','ABBREVIATE'),'und',ts_lexize('lab.und_words','12345'),'und_dictionary',(SELECT mapdict::regdictionary::text FROM pg_ts_config_map WHERE mapcfg='lab.variant_cfg'::regconfig AND maptokentype=16),'positions',(SELECT jsonb_object_agg(lexeme,positions) FROM unnest(to_tsvector('lab.variant_cfg','ABBREVIATE'))),'types',(SELECT jsonb_agg(alias ORDER BY tokid)FROM ts_token_type('charabia.parser')))",label+'-round4-catalog'))
+    snapshot=json.loads(sql("SELECT jsonb_build_object('options',(SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.parallel'::regdictionary),'direct',ts_lexize('lab.parallel','ABBREVIATE'),'und',ts_lexize('lab.und_words','12345'),'und_dictionary',(SELECT mapdict::regdictionary::text FROM pg_ts_config_map WHERE mapcfg='lab.variant_cfg'::regconfig AND maptokentype=16),'positions',(SELECT jsonb_object_agg(lexeme,positions) FROM unnest(to_tsvector('lab.variant_cfg','ABBREVIATE'))),'types',(SELECT jsonb_agg(alias ORDER BY tokid)FROM ts_token_type('charabia.structured_parser')))",label+'-round4-catalog'))
     normalized=snapshot['options'].lower().replace("'",'').replace('"','')
     check('english = true'in normalized and 'stem = true'in normalized and 'normalize = false'in normalized,
           label+' restores the committed parallel English parameters',snapshot)
@@ -133,7 +344,7 @@ def observe_round4(label):
     check(sql("SELECT ts_headline('lab.variant_cfg','left PostgreSQL right','postgresql:*'::tsquery,'HighlightAll=true')",label+'-round4-merge-headline')=='left <b>PostgreSQL</b> right',
           label+' merged whole-word prefix highlights original text')
     # Direct und Dictionary behavior above is unchanged; the Parser now owns numbers as structured_tokens.
-    und_rows=json.loads(sql("SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze('12345')a",label+'-round4-und-span'))
+    und_rows=json.loads(sql("SELECT jsonb_agg(to_jsonb(a))FROM charabia.analyze('12345','public.charabia_structured')a",label+'-round4-und-span'))
     check(len(und_rows)==1 and und_rows[0]['raw']=='12345' and und_rows[0]['language']is None and
           und_rows[0]['kind']=='numword' and und_rows[0]['token_type']=='numword',
           label+' numeric Parser input has one literal structured token and no fabricated language',und_rows)
@@ -147,9 +358,52 @@ def observe_round4(label):
                 ('bm25_und',"SELECT id FROM lab.variant_docs ORDER BY body <@> to_bm25query('12345','lab.variant_bm25')LIMIT 20",'variant_bm25',[3])]
     observe_queries(label,queries)
 
+def observe_linguistic_mode(label, target_state=True):
+    """Independent literal/unit, ordinary-position, and target-state controls."""
+    cfg = 'lab.linguistic_cfg'
+    expected_ids = [1,2,3,4,5,6] if target_state else [2,3,4,5,6,99]
+    snapshot = json.loads(sql("SELECT jsonb_build_object("
+        "'config','lab.linguistic_cfg','parser',(SELECT pg_catalog.format('%I.%I',n.nspname,p.prsname) FROM pg_catalog.pg_ts_config c JOIN pg_catalog.pg_ts_parser p ON p.oid=c.cfgparser JOIN pg_catalog.pg_namespace n ON n.oid=p.prsnamespace WHERE c.oid='lab.linguistic_cfg'::regconfig),"
+        "'heap',(SELECT jsonb_agg(id ORDER BY id)FROM lab.linguistic_docs),"
+        "'options',(SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.linguistic_words'::regdictionary),"
+        "'eng_chain',(SELECT jsonb_agg(mapdict::regdictionary::text ORDER BY mapseqno)FROM pg_ts_config_map WHERE mapcfg='lab.linguistic_cfg'::regconfig AND maptokentype=1),"
+        "'stored_consistent',NOT EXISTS(SELECT FROM lab.linguistic_docs WHERE v IS DISTINCT FROM to_tsvector('lab.linguistic_cfg',body)))",label+'-linguistic-catalog'))
+    normalized = snapshot['options'].lower().replace("'",'').replace('"','')
+    boolean = 'true' if target_state else 'false'
+    check(snapshot['parser']=='charabia.linguistic_parser' and snapshot['heap']==expected_ids and snapshot['stored_consistent'],
+          label+' linguistic restores its actual Parser, independent rows, and maintained vectors',snapshot)
+    check(all(re.search(r'\b'+option+r'\s*=\s*'+boolean+r'\b',normalized)for option in('discard','stem','normalize')) and
+          snapshot['eng_chain']==(['lab.linguistic_words']if target_state else['simple']),
+          label+' linguistic committed parameters and mapping distinguish the WAL target',snapshot)
+    positions = json.loads(sql("SELECT jsonb_object_agg(lexeme,positions)FROM unnest(to_tsvector('lab.linguistic_cfg','alpha foo_bar.rs beta'))",label+'-linguistic-file-positions'))
+    check(all(positions.get(term)==[position]for term,position in(('foo',2),('bar',3),('rs',4),('beta',5))),
+          label+' linguistic ordinary file parts keep distinct consecutive positions',positions)
+    headline = sql("SELECT ts_headline('lab.linguistic_cfg','alpha foo_bar.rs beta','bar'::tsquery,'HighlightAll=true')",label+'-linguistic-headline')
+    check(headline=='alpha foo_<b>bar</b>.rs beta',label+' linguistic headline marks only the matching original part',headline)
+    literal_id = [1] if target_state else [99]
+    stem_ids = [4,6] if target_state else []
+    queries = [
+        ('gin_linguistic_literal',"SELECT id FROM lab.linguistic_docs WHERE to_tsvector('lab.linguistic_cfg',body) @@ '100ms'::tsquery",'linguistic_gin',literal_id),
+        ('gin_stored_linguistic_literal',"SELECT id FROM lab.linguistic_docs WHERE v @@ '100ms'::tsquery",'linguistic_stored_gin',literal_id),
+        ('bm25_linguistic_literal',"SELECT id FROM lab.linguistic_docs ORDER BY body <@> to_bm25query('100ms','lab.linguistic_bm25')LIMIT 20",'linguistic_bm25',literal_id),
+        ('gin_linguistic_missing_component',"SELECT id FROM lab.linguistic_docs WHERE to_tsvector('lab.linguistic_cfg',body) @@ 'ms'::tsquery",'linguistic_gin',[2]),
+        ('bm25_linguistic_missing_component',"SELECT id FROM lab.linguistic_docs ORDER BY body <@> to_bm25query('ms','lab.linguistic_bm25')LIMIT 20",'linguistic_bm25',[2]),
+        ('gin_linguistic_phrase',"SELECT id FROM lab.linguistic_docs WHERE to_tsvector('lab.linguistic_cfg',body) @@ 'foo <-> bar'::tsquery",'linguistic_gin',[3]),
+        ('gin_linguistic_stem',"SELECT id FROM lab.linguistic_docs WHERE to_tsvector('lab.linguistic_cfg',body) @@ 'run'::tsquery",'linguistic_gin',stem_ids),
+        ('gin_stored_linguistic_stem',"SELECT id FROM lab.linguistic_docs WHERE v @@ 'run'::tsquery",'linguistic_stored_gin',stem_ids),
+        ('bm25_linguistic_stem',"SELECT id FROM lab.linguistic_docs ORDER BY body <@> to_bm25query('run','lab.linguistic_bm25')LIMIT 20",'linguistic_bm25',stem_ids),
+    ]
+    observe_queries(label,queries)
+    REPORT.setdefault('mode_evidence',{}).setdefault(label,{})['linguistic'] = {
+        'config':cfg,'parser':snapshot['parser'],'catalog':snapshot,'positions':positions,'headline':headline,
+        'target_state':target_state,'query_kinds':[item[0]for item in queries],
+        'expectation_basis':'Handwritten literal 100ms versus separate ms, foo/bar/rs positions, English Running -> run, committed target IDs; no structured component oracle'}
+    save()
+
+
 def observe_structured_tokens(label,target_state=True):
     expected_ids=[1,2,3,4,5,6,7]if target_state else[2,3,4,5,6,7,99]
-    snapshot=json.loads(sql("SELECT jsonb_build_object('heap',(SELECT jsonb_agg(id ORDER BY id)FROM lab.structured_docs),'options',(SELECT jsonb_object_agg(k.kind,d.dictinitoption)FROM unnest(ARRAY['url','host','email','file','numword'])k(kind)JOIN pg_ts_dict d ON d.oid=('lab.structured_'||k.kind)::regdictionary),'maps',(SELECT jsonb_object_agg(t.alias,(SELECT jsonb_agg(m.mapdict::regdictionary::text ORDER BY m.mapseqno)FROM pg_ts_config_map m WHERE m.mapcfg='lab.structured_cfg'::regconfig AND m.maptokentype=t.tokid))FROM ts_token_type('charabia.parser')t WHERE t.alias IN('url','host','email','file','numword')),'stored_consistent',NOT EXISTS(SELECT FROM lab.structured_docs WHERE v IS DISTINCT FROM to_tsvector('lab.structured_cfg',body)))",label+'-structured_tokens-catalog'))
+    snapshot=json.loads(sql("SELECT jsonb_build_object('heap',(SELECT jsonb_agg(id ORDER BY id)FROM lab.structured_docs),'options',(SELECT jsonb_object_agg(k.kind,d.dictinitoption)FROM unnest(ARRAY['url','host','email','file','numword'])k(kind)JOIN pg_ts_dict d ON d.oid=('lab.structured_'||k.kind)::regdictionary),'maps',(SELECT jsonb_object_agg(t.alias,(SELECT jsonb_agg(m.mapdict::regdictionary::text ORDER BY m.mapseqno)FROM pg_ts_config_map m WHERE m.mapcfg='lab.structured_cfg'::regconfig AND m.maptokentype=t.tokid))FROM ts_token_type('charabia.structured_parser')t WHERE t.alias IN('url','host','email','file','numword')),'stored_consistent',NOT EXISTS(SELECT FROM lab.structured_docs WHERE v IS DISTINCT FROM to_tsvector('lab.structured_cfg',body)))",label+'-structured_tokens-catalog'))
     check(snapshot['heap']==expected_ids,label+' structured tokens contain the independently fixed committed rows',snapshot)
     check(snapshot['stored_consistent'],label+' structured stored vectors reflect the maintained target configuration',snapshot)
     for kind in STRUCTURED_TOKENS:
@@ -223,11 +477,18 @@ def observe_structured_tokens(label,target_state=True):
         headline=sql("SELECT ts_headline('lab.structured_cfg',body,plainto_tsquery('lab.structured_cfg','https://after.example.com/target'),'HighlightAll=true')FROM lab.structured_docs WHERE id=99",label+'-structured-post-target-headline')
         check(headline=='<b>https://after.example.com/target</b>',label+' later simple chain still highlights the full raw URL',headline)
     observe_queries(label,queries)
+    parser = sql("SELECT pg_catalog.format('%I.%I',n.nspname,p.prsname) FROM pg_catalog.pg_ts_config c JOIN pg_catalog.pg_ts_parser p ON p.oid=c.cfgparser JOIN pg_catalog.pg_namespace n ON n.oid=p.prsnamespace WHERE c.oid='lab.structured_cfg'::regconfig",label+'-structured-parser')
+    check(parser=='charabia.structured_parser',label+' structured uses its actual Parser',parser)
+    REPORT.setdefault('mode_evidence',{}).setdefault(label,{})['structured'] = {
+        'config':'lab.structured_cfg','parser':parser,
+        'catalog':snapshot,'target_state':target_state,'query_kinds':[item[0]for item in queries],
+        'whole_source_headline_checked':True,'atomic_positions_checked':target_state}
+    save()
 
 def observe(label,expected):
     heap=json.loads(sql('SELECT jsonb_agg(id ORDER BY id) FROM lab.docs',label+'-heap'))
     check(heap==expected,label+' heap at target',heap)
-    snapshot=json.loads(sql("SELECT jsonb_build_object('options',(SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.eng_stem'::regdictionary),'maps',(SELECT jsonb_agg(d.dictname ORDER BY m.mapseqno)FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict JOIN ts_token_type('charabia.parser')t ON t.tokid=m.maptokentype WHERE m.mapcfg='lab.cfg'::regconfig AND t.alias='eng'),'vector',to_tsvector('lab.cfg',"+literal(ENGLISH)+")::text,'stored_consistent',NOT EXISTS(SELECT FROM lab.docs WHERE v IS DISTINCT FROM to_tsvector('lab.cfg',body)))",label+'-catalog'))
+    snapshot=json.loads(sql("SELECT jsonb_build_object('options',(SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.eng_stem'::regdictionary),'maps',(SELECT jsonb_agg(d.dictname ORDER BY m.mapseqno)FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict JOIN pg_ts_config c ON c.oid=m.mapcfg JOIN LATERAL ts_token_type(c.cfgparser)t ON t.tokid=m.maptokentype WHERE m.mapcfg='lab.cfg'::regconfig AND t.alias='eng'),'vector',to_tsvector('lab.cfg',"+literal(ENGLISH)+")::text,'stored_consistent',NOT EXISTS(SELECT FROM lab.docs WHERE v IS DISTINCT FROM to_tsvector('lab.cfg',body)))",label+'-catalog'))
     check('stem = true' in snapshot['options'].lower().replace("'",""),label+' dictionary parameter restored',snapshot)
     check(snapshot['maps']==['eng_filter','eng_stem'],label+' mapping restored',snapshot)
     check("'run':" in snapshot['vector'] and snapshot['stored_consistent'],label+' analysis and stored vectors restored',snapshot)
@@ -249,6 +510,7 @@ def observe(label,expected):
     observe_queries(label,queries+chinese_queries())
     observe_round4(label)
     observe_structured_tokens(label)
+    observe_linguistic_mode(label)
 
 def literal(s):return "'"+s.replace("'","''")+"'"
 
@@ -257,6 +519,7 @@ def interrupt(signum,frame):raise InterruptedError(str(signum))
 signal.signal(signal.SIGINT,interrupt);signal.signal(signal.SIGTERM,interrupt)
 ENGLISH='The children were running through the garden while the teachers were reading books and sharing their happy memories together.'
 try:
+    enable_child_subreaper()
     package=Path(os.environ['PGCB_EXTENSION_STAGE'])
     stage=TMP/'stage/extension';shutil.copytree(package,stage)
     lib=stage/'pg_charabia.so'
@@ -280,8 +543,8 @@ try:
     durability=json.loads(sql("SELECT jsonb_build_object('fsync',current_setting('fsync'),'full_page_writes',current_setting('full_page_writes'),'synchronous_commit',current_setting('synchronous_commit'),'archive_mode',current_setting('archive_mode'),'wal_level',current_setting('wal_level'))",'durability'))
     check(all(durability[k]=='on' for k in ('fsync','full_page_writes','synchronous_commit','archive_mode')) and durability['wal_level']=='replica','durable archive settings',durability)
     sql("CREATE EXTENSION pg_charabia;CREATE EXTENSION pg_textsearch;CREATE SCHEMA lab;CREATE TEXT SEARCH CONFIGURATION lab.cfg(COPY=public.charabia);CREATE TEXT SEARCH DICTIONARY lab.eng_raw(TEMPLATE=charabia.linguistic_template,Language='eng',Stem=false,Discard=false,English=false);CREATE TEXT SEARCH DICTIONARY lab.eng_stem(TEMPLATE=charabia.linguistic_template,Language='eng',Stem=false,Discard=false,English=false);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_raw;CREATE TEXT SEARCH DICTIONARY lab.eng_filter(TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=false,Normalize=false,Filter=true,English=false);CREATE TABLE lab.docs(id int PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144),v tsvector);",'setup')
-    sql("CREATE TEXT SEARCH DICTIONARY lab.parallel(TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);CREATE TEXT SEARCH DICTIONARY lab.und_words(TEMPLATE=charabia.linguistic_template,Language='und',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);CREATE TEXT SEARCH CONFIGURATION lab.variant_cfg(PARSER=charabia.parser);DO $m$ DECLARE r record;BEGIN FOR r IN SELECT alias FROM ts_token_type('charabia.parser')WHERE alias NOT IN('blank','display_only')LOOP EXECUTE format('ALTER TEXT SEARCH CONFIGURATION lab.variant_cfg ADD MAPPING FOR %I WITH lab.parallel',r.alias);END LOOP;END$m$;ALTER TEXT SEARCH CONFIGURATION lab.variant_cfg ALTER MAPPING FOR und WITH lab.und_words;CREATE TABLE lab.variant_docs(id int PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144),v tsvector);INSERT INTO lab.variant_docs VALUES(1,'ABBREVIATE',NULL),(2,'PostgreSQL',NULL),(3,'12345',NULL);UPDATE lab.variant_docs SET v=to_tsvector('lab.variant_cfg',body);CREATE INDEX variant_gin ON lab.variant_docs USING gin(to_tsvector('lab.variant_cfg',body));CREATE INDEX variant_stored_gin ON lab.variant_docs USING gin(v);CREATE INDEX variant_bm25 ON lab.variant_docs USING bm25(body)WITH(text_config='lab.variant_cfg')",'round4-base-data')
-    structured_setup="CREATE TEXT SEARCH CONFIGURATION lab.structured_cfg(COPY=public.charabia);"
+    sql("CREATE TEXT SEARCH DICTIONARY lab.parallel(TEMPLATE=charabia.linguistic_template,Language='tur',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);CREATE TEXT SEARCH DICTIONARY lab.und_words(TEMPLATE=charabia.linguistic_template,Language='und',Discard=false,Stem=false,Normalize=false,Filter=false,English=false);CREATE TEXT SEARCH CONFIGURATION lab.variant_cfg(PARSER=charabia.structured_parser);DO $m$ DECLARE r record;BEGIN FOR r IN SELECT alias FROM ts_token_type('charabia.structured_parser')WHERE alias NOT IN('blank','display_only')LOOP EXECUTE format('ALTER TEXT SEARCH CONFIGURATION lab.variant_cfg ADD MAPPING FOR %I WITH lab.parallel',r.alias);END LOOP;END$m$;ALTER TEXT SEARCH CONFIGURATION lab.variant_cfg ALTER MAPPING FOR und WITH lab.und_words;CREATE TABLE lab.variant_docs(id int PRIMARY KEY,body text NOT NULL CHECK(octet_length(body)<=262144),v tsvector);INSERT INTO lab.variant_docs VALUES(1,'ABBREVIATE',NULL),(2,'PostgreSQL',NULL),(3,'12345',NULL);UPDATE lab.variant_docs SET v=to_tsvector('lab.variant_cfg',body);CREATE INDEX variant_gin ON lab.variant_docs USING gin(to_tsvector('lab.variant_cfg',body));CREATE INDEX variant_stored_gin ON lab.variant_docs USING gin(v);CREATE INDEX variant_bm25 ON lab.variant_docs USING bm25(body)WITH(text_config='lab.variant_cfg')",'round4-base-data')
+    structured_setup="CREATE TEXT SEARCH CONFIGURATION lab.structured_cfg(COPY=public.charabia_structured);"
     for kind in STRUCTURED_TOKENS:
         structured_setup+=("CREATE TEXT SEARCH DICTIONARY lab.structured_"+kind+"(TEMPLATE=charabia.structured_template,Kind="+literal(kind)+",Discard=false,Stem=false,Normalize=false);"
                        "ALTER TEXT SEARCH CONFIGURATION lab.structured_cfg ALTER MAPPING FOR "+kind+" WITH lab.structured_"+kind+";")
@@ -290,6 +553,15 @@ try:
     structured_setup+="UPDATE lab.structured_docs SET v=to_tsvector('lab.structured_cfg',body);CREATE INDEX structured_gin ON lab.structured_docs USING gin(to_tsvector('lab.structured_cfg',body));CREATE INDEX structured_stored_gin ON lab.structured_docs USING gin(v);CREATE INDEX structured_bm25 ON lab.structured_docs USING bm25(body)WITH(text_config='lab.structured_cfg');"
     sql(structured_setup,'structured-base-data')
     sql("INSERT INTO lab.docs VALUES(1,"+literal(ENGLISH)+",NULL),(2,'中文全文检索 PostgreSQL 18 支持 BM25',NULL),(3,'unrelated',NULL),(4,"+literal(ENGLISH)+",NULL);UPDATE lab.docs SET v=to_tsvector('lab.cfg',body);CREATE INDEX docs_gin ON lab.docs USING gin(to_tsvector('lab.cfg',body));CREATE INDEX docs_stored_gin ON lab.docs USING gin(v);CREATE INDEX docs_bm25 ON lab.docs USING bm25(body)WITH(text_config='lab.cfg');CHECKPOINT",'base-data')
+    sql("CREATE TEXT SEARCH DICTIONARY lab.linguistic_words(TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=false,Normalize=false,English=false);"
+        "CREATE TEXT SEARCH CONFIGURATION lab.linguistic_cfg(COPY=public.charabia_linguistic);"
+        "DO $ling$ DECLARE r record;BEGIN FOR r IN SELECT alias FROM ts_token_type('charabia.linguistic_parser')WHERE tokid<=16 LOOP EXECUTE format('ALTER TEXT SEARCH CONFIGURATION lab.linguistic_cfg ALTER MAPPING FOR %I WITH lab.linguistic_words',r.alias);END LOOP;END$ling$;"
+        "CREATE TABLE lab.linguistic_docs(id int PRIMARY KEY,body text NOT NULL,v tsvector);"
+        "INSERT INTO lab.linguistic_docs VALUES(1,'alpha 100ms beta',NULL),(2,'alpha ms beta',NULL),(3,'alpha foo_bar.rs beta',NULL),(4,'Running',NULL),(5,'unrelated',NULL);"
+        "UPDATE lab.linguistic_docs SET v=to_tsvector('lab.linguistic_cfg',body);"
+        "CREATE INDEX linguistic_gin ON lab.linguistic_docs USING gin(to_tsvector('lab.linguistic_cfg',body));"
+        "CREATE INDEX linguistic_stored_gin ON lab.linguistic_docs USING gin(v);"
+        "CREATE INDEX linguistic_bm25 ON lab.linguistic_docs USING bm25(body)WITH(text_config='lab.linguistic_cfg')",'linguistic-base-data')
     # A real online basebackup; post-backup changes must come from archived WAL.
     command([BIN/'pg_basebackup','-D',base,'--format=plain','--wal-method=stream','--checkpoint=fast','--no-password'],'basebackup')
     command([BIN/'pg_verifybackup',base],'verify-basebackup')
@@ -302,6 +574,10 @@ try:
     sql("INSERT INTO lab.structured_docs VALUES(7,'0x5fff',to_tsvector('lab.structured_cfg','0x5fff'))",'target-structured-unspilled')
     sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=false);ALTER TEXT SEARCH DICTIONARY lab.parallel(English=false,Stem=false);ROLLBACK",'rolled-back-ddl')
     sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.structured_url(Discard=false,Stem=false,Normalize=false);ALTER TEXT SEARCH CONFIGURATION lab.structured_cfg ALTER MAPPING FOR url WITH pg_catalog.simple;ROLLBACK",'rolled-back-structured-ddl')
+    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.linguistic_words(Discard=true,Stem=true,Normalize=true);"
+        "UPDATE lab.linguistic_docs SET v=to_tsvector('lab.linguistic_cfg',body);"
+        "REINDEX INDEX lab.linguistic_gin;REINDEX INDEX lab.linguistic_stored_gin;REINDEX INDEX lab.linguistic_bm25;COMMIT;"
+        "INSERT INTO lab.linguistic_docs VALUES(6,'Running',to_tsvector('lab.linguistic_cfg','Running'))",'target-linguistic-config-and-unspilled')
     observe('target',[1,2,3,5])
     target='pgcb_recovery_'+RUN.replace('-','_')
     lsn=sql('SELECT pg_create_restore_point('+literal(target)+')','restore-point')
@@ -309,6 +585,12 @@ try:
     sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.eng_stem(Stem=false);ALTER TEXT SEARCH DICTIONARY lab.parallel(English=false,Stem=false);ALTER TEXT SEARCH CONFIGURATION lab.cfg ALTER MAPPING FOR eng WITH lab.eng_raw;DELETE FROM lab.docs WHERE id=1;INSERT INTO lab.docs VALUES(99,'after target',to_tsvector('lab.cfg','after target'));COMMIT",'after-target')
     structured_changes=''.join("ALTER TEXT SEARCH DICTIONARY lab.structured_"+kind+"(Discard=false,Stem=false,Normalize=false);"for kind in STRUCTURED_TOKENS)
     sql("BEGIN;"+structured_changes+"ALTER TEXT SEARCH CONFIGURATION lab.structured_cfg ALTER MAPPING FOR url WITH pg_catalog.simple;DELETE FROM lab.structured_docs WHERE id=1;UPDATE lab.structured_docs SET v=to_tsvector('lab.structured_cfg',body);REINDEX INDEX lab.structured_gin;REINDEX INDEX lab.structured_stored_gin;REINDEX INDEX lab.structured_bm25;INSERT INTO lab.structured_docs VALUES(99,'https://after.example.com/target',to_tsvector('lab.structured_cfg','https://after.example.com/target'));COMMIT",'after-target-structured_tokens')
+    sql("BEGIN;ALTER TEXT SEARCH DICTIONARY lab.linguistic_words(Discard=false,Stem=false,Normalize=false);"
+        "ALTER TEXT SEARCH CONFIGURATION lab.linguistic_cfg ALTER MAPPING FOR eng WITH pg_catalog.simple;"
+        "DELETE FROM lab.linguistic_docs WHERE id=1;"
+        "UPDATE lab.linguistic_docs SET v=to_tsvector('lab.linguistic_cfg',body);"
+        "REINDEX INDEX lab.linguistic_gin;REINDEX INDEX lab.linguistic_stored_gin;REINDEX INDEX lab.linguistic_bm25;"
+        "INSERT INTO lab.linguistic_docs VALUES(99,'after target 100ms',to_tsvector('lab.linguistic_cfg','after target 100ms'));COMMIT",'after-target-linguistic')
     walfile=sql("SELECT pg_walfile_name(pg_switch_wal())",'wal-switch')
     deadline=time.monotonic()+30
     while not(archive/walfile).is_file()and time.monotonic()<deadline:time.sleep(.1)
@@ -322,7 +604,7 @@ try:
     check('stem = false'in sql("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.eng_stem'::regdictionary",'crash-dictionary').lower().replace("'",""),'crash recovery dictionary parameter')
     check('english = false'in sql("SELECT dictinitoption FROM pg_ts_dict WHERE oid='lab.parallel'::regdictionary",'crash-english').lower().replace("'",''),
           'crash recovery retains the later committed English option')
-    maps=json.loads(sql("SELECT jsonb_agg(d.dictname ORDER BY m.mapseqno)FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict JOIN ts_token_type('charabia.parser')t ON t.tokid=m.maptokentype WHERE m.mapcfg='lab.cfg'::regconfig AND t.alias='eng'",'crash-mapping'))
+    maps=json.loads(sql("SELECT jsonb_agg(d.dictname ORDER BY m.mapseqno)FROM pg_ts_config_map m JOIN pg_ts_dict d ON d.oid=m.mapdict JOIN pg_ts_config c ON c.oid=m.mapcfg JOIN LATERAL ts_token_type(c.cfgparser)t ON t.tokid=m.maptokentype WHERE m.mapcfg='lab.cfg'::regconfig AND t.alias='eng'",'crash-mapping'))
     check(maps==['eng_raw'],'crash recovery retains the committed post-target mapping',maps)
     REPORT.setdefault('observations',{})['crash']={'heap':[2,3,5,99],'maps':maps,'queries':[]};save()
     # The later English ALTER deliberately left old postings in place. Chinese
@@ -330,6 +612,7 @@ try:
     observe_queries('crash',chinese_queries())
     observe_chinese_headline('crash')
     observe_structured_tokens('crash',False)
+    observe_linguistic_mode('crash',False)
     with Session(env=ENV) as backend:
         analysis_sql="SELECT to_tsvector('lab.cfg','中文全文检索')"
         vector=backend.value(analysis_sql)
@@ -403,11 +686,15 @@ except BaseException as e:
 finally:
     signal.signal(signal.SIGINT,signal.SIG_IGN);signal.signal(signal.SIGTERM,signal.SIG_IGN)
     cleanup=[]
+    for process,proof in list(CLIENTS.values()):
+        try:
+            if not finish_client(process,proof,True):cleanup.append('Owned client group remains: '+str(process.pid))
+        except BaseException as e:cleanup.append(repr(e))
     for path in list(STARTED):
         try:stop(path)
         except BaseException as e:cleanup.append(repr(e))
     for path in TMP.glob('*.log'):shutil.copy2(path,OUT/path.name)
-    can_remove=not STARTED and(TMP/'.owner').read_text()==RUN
+    can_remove=not STARTED and not CLIENTS and(TMP/'.owner').read_text()==RUN
     if can_remove:shutil.rmtree(TMP)
-    REPORT['cleanup']={'marker_matches':can_remove,'clusters_stopped':not STARTED,'directory_removed':not TMP.exists(),'errors':cleanup};save()
+    REPORT['cleanup']={'marker_matches':can_remove,'clusters_stopped':not STARTED,'clients_joined':not CLIENTS,'directory_removed':not TMP.exists(),'errors':cleanup};save()
     if cleanup:raise RuntimeError(cleanup)

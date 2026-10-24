@@ -10,7 +10,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from report_contract import FORMAT, quality_case, validate_quality
+from report_contract import ANALYSIS_REVISION, FORMAT, quality_case, validate_quality
 
 if not __debug__:
     raise RuntimeError("Test assertions must not be disabled")
@@ -142,14 +142,14 @@ def record_quality_cases(cases):
     path = EVIDENCE / "quality-results.json"
     document = json.loads(path.read_text()) if path.exists() else {"format": FORMAT, "cases": []}
     validate_quality(document)
-    seen={case["id"] for case in document["cases"]}
+    seen={(case["mode"],case["id"]) for case in document["cases"]}
     recorded=[]
     for item in cases:
         case_id=item["id"]
-        if case_id in seen:
+        if (item["mode"],case_id) in seen:
             raise AssertionError(f"Quality case recorded twice: {case_id}")
         case=quality_case(case_id,**{key:value for key,value in item.items() if key!="id"})
-        seen.add(case_id)
+        seen.add((case["mode"],case_id))
         document["cases"].append(case)
         recorded.append(case)
     checked=validate_quality(document)
@@ -161,20 +161,22 @@ def record_quality_cases(cases):
     return recorded
 
 
-def record_quality_case(case_id, *, input, query, config, expected, actual, known_signature=None):
+def record_quality_case(case_id, *, input, query, config, expected, actual, mode, known_signature=None):
     """Preserve the exact signature; explicit closures never add exemptions."""
     return record_quality_cases([dict(id=case_id,input=input,query=query,config=config,
-        expected=expected,actual=actual,known_signature=known_signature)])[0]
+        expected=expected,actual=actual,mode=mode,analysis_revision=ANALYSIS_REVISION,known_signature=known_signature)])[0]
 
 
-def native_config_sql(name, stem=False, discard=False, normalize=True):
+def native_config_sql(name, stem=False, discard=False, normalize=True, *, mode='linguistic'):
     """Explicit native DDL test fixture; each language owns a normal dictionary."""
     import re
     if not re.fullmatch(r'[a-z_][a-z_0-9]{0,35}\.[a-z_][a-z_0-9]{0,35}', name):
         raise ValueError('Fixture name must be a short qualified SQL identifier')
+    if mode not in ('linguistic','structured'):
+        raise ValueError('Unknown analysis mode')
     schema, base = name.split('.')
     boolean = lambda flag: 'true' if flag else 'false'
-    return f"""CREATE TEXT SEARCH CONFIGURATION {name}(PARSER=charabia.parser);
+    return f"""CREATE TEXT SEARCH CONFIGURATION {name}(PARSER=charabia.{mode}_parser);
 DO $fixture$ DECLARE l jsonb; BEGIN
  FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
   EXECUTE format('CREATE TEXT SEARCH DICTIONARY %I.%I(TEMPLATE=charabia.linguistic_template,Language=%L,Discard=%s,Stem=%s,Normalize={boolean(normalize)},Filter=false)',

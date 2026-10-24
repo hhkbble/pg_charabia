@@ -30,17 +30,17 @@ SELECT pg_temp.assert_chain(ts_lexize('pgcb_chain_sql.tur_fold','IŞIKLAR')=ARRA
 SELECT pg_temp.assert_chain(ts_lexize('pgcb_chain_sql.tur_parallel','ABBREVIATE')=
  ARRAY['abbrevıate','abbrevıa','abbreviate','abbrevi'],
  'Turkish and English branches retain four ordered distinct alternatives');
-CREATE TEXT SEARCH CONFIGURATION pgcb_chain_sql.simple_all(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION pgcb_chain_sql.simple_all(PARSER=charabia.linguistic_parser);
 DO $fn$ DECLARE r record;BEGIN
- FOR r IN SELECT alias FROM ts_token_type('charabia.parser') WHERE alias NOT IN('blank','display_only') LOOP
+ FOR r IN SELECT alias FROM ts_token_type('charabia.linguistic_parser') WHERE alias NOT IN('blank','display_only') LOOP
   EXECUTE format('ALTER TEXT SEARCH CONFIGURATION pgcb_chain_sql.simple_all ADD MAPPING FOR %I WITH pg_catalog.simple',r.alias);
  END LOOP;
 END$fn$;
 SELECT pg_temp.assert_chain(to_tsvector('pgcb_chain_sql.simple_all','alpha, beta')='''alpha'':1 ''beta'':2'::tsvector,
  'external simple cannot accidentally index language-tagged blank spans');
-SELECT pg_temp.assert_chain((SELECT string_agg(token,'' ORDER BY ordinality)='alpha, beta' FROM ts_parse('charabia.parser','alpha, beta')WITH ORDINALITY),
+SELECT pg_temp.assert_chain((SELECT string_agg(token,'' ORDER BY ordinality)='alpha, beta' FROM ts_parse('charabia.linguistic_parser','alpha, beta')WITH ORDINALITY),
  'Parser preserves the original blank bytes for headline');
-SELECT pg_temp.assert_chain(NOT EXISTS(SELECT 1 FROM pg_ts_config_map m JOIN ts_token_type('charabia.parser')t ON t.tokid=m.maptokentype
+SELECT pg_temp.assert_chain(NOT EXISTS(SELECT 1 FROM pg_ts_config_map m JOIN ts_token_type('charabia.linguistic_parser')t ON t.tokid=m.maptokentype
  WHERE m.mapcfg='public.charabia'::regconfig AND t.alias IN('blank','display_only')),
  'default configuration leaves both nonlexical types unmapped');
 ROLLBACK;

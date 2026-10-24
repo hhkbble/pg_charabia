@@ -8,7 +8,7 @@ import statistics
 import threading
 import time
 
-from support import Session, literal, run, save, rss
+from support import ANALYSIS_REVISION, FORMAT, Session, literal, run, save, rss
 
 
 def interrupted(signum, _frame):
@@ -20,7 +20,7 @@ signal.signal(signal.SIGTERM, interrupted)
 HAS_HOOKS = os.environ.get("PGCB_TEST_HOOKS") == "1"
 LINUX = os.environ["PGCB_PLATFORM"] == "linux-amd64"
 MIB = 1024 * 1024
-results = {"memory": [], "cache_invalidation": {}, "concurrency": [], "parallel": {}}
+results = {"format": FORMAT, "analysis_revision": ANALYSIS_REVISION, "modes": {"linguistic": "public.charabia_linguistic", "structured": "public.charabia_structured"}, "memory": [], "cache_invalidation": {}, "concurrency": [], "parallel": {}}
 
 
 def checkpoint():
@@ -133,6 +133,7 @@ def parallel_execution():
         processed = sum(worker.get("Actual Rows", 0) * worker.get("Actual Loops", 0)
                         for worker in worker_rows)
         results["parallel"] = {
+            "mode": "linguistic", "config": "public.charabia",
             "backend": session.pid, "workers_launched": launched,
             "leader_participation": session.value("SHOW parallel_leader_participation"),
             "worker_scan_rows": worker_rows, "worker_rows_total": processed, "plan": plan,
@@ -161,7 +162,7 @@ def parallel_structured_execution():
         # Bound lexical work to 256 rows while keeping the existing parallel
         # table scan. The row-dependent URI prevents immutable constant folding.
         query = ("SELECT count(*) FROM stress.docs WHERE id BETWEEN 1 AND 256 AND "
-                 "to_tsvector('public.charabia','https://example.com/Running?q='||id::text) @@ 'run'::tsquery")
+                 "to_tsvector('public.charabia_structured','https://example.com/Running?q='||id::text) @@ 'run'::tsquery")
         plan = json.loads(session.value(
             "EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) " + query))
         scans = [node for node in nodes(plan) if node.get("Node Type") == "Seq Scan"
@@ -169,13 +170,14 @@ def parallel_structured_execution():
                  and node.get("Parallel Aware") is True and "to_tsvector(" in node.get("Filter", "")]
         workers = [dict(worker, scan_filter=scan["Filter"]) for scan in scans for worker in scan.get("Workers", [])]
         processed = sum(worker.get("Actual Rows", 0) * worker.get("Actual Loops", 0) for worker in workers)
-        record = {"query": query, "plan": plan, "workers": workers, "rows": processed,
+        record = {"mode": "structured", "config": "public.charabia_structured", "query": query, "plan": plan,
+                  "workers_launched":sum(node.get("Workers Launched",0)for node in nodes(plan)), "workers": workers, "rows": processed,
                   "leader_participation": session.value("SHOW parallel_leader_participation"),
                   "count": session.value(query),
                   "basis": "256 independent row IDs and upstream English running -> run; URI varies by row"}
         results["structured_parallel"] = record
         checkpoint()
-        assert record["leader_participation"] == "off" and scans and workers, record
+        assert record["leader_participation"] == "off" and record["workers_launched"] > 0 and scans and workers, record
         assert any(worker.get("Actual Rows", 0) > 0 and worker.get("Actual Loops", 0) > 0 for worker in workers), record
         assert processed == 256 and record["count"] == "256", record
 
@@ -192,6 +194,7 @@ def repeated_requests():
         headline_statement = "SELECT sum(length(ts_headline('public.charabia'," + literal(text) + " || ' ' || g::text,'cafe'::tsquery,'HighlightAll=true'))) FROM generate_series(1,250) g"
         session.value(statement)
         session.value(headline_statement)
+        results["linguistic_requests"] = {"mode":"linguistic","config":"public.charabia", "warm_hooks":hooks(session)}
         for batch in range(8):
             before = hooks(session)
             assert session.value(statement) == "250"
@@ -205,6 +208,9 @@ def repeated_requests():
                 assert after["parser_created"] == after["parser_dropped"], after
                 assert after["state_registered"] - before["state_registered"] == 500, (before, after)
                 assert after["state_released"] - before["state_released"] == 500, (before, after)
+                assert after["dictionary_created"] == before["dictionary_created"], (before,after)
+                assert after["dictionary_live_fst_bytes"] == 0, after
+                assert after["dictionary_live_referenced_fst_bytes"] == before["dictionary_live_referenced_fst_bytes"], (before,after)
         measured = results["memory"][2:]
         results["requests_rss"] = request_rss_summary(measured)
         checkpoint()
@@ -218,14 +224,14 @@ def repeated_structured_requests():
     with Session() as session:
         session.value("SET statement_timeout='60s';SET jit=off")
         text = "https://example.com/Running?q=100ms example.org User+tag@example.com /tmp/RunningTests.rs 100ms 0x5fff"
-        statement = ("SELECT count(to_tsvector('public.charabia'," + literal(text) +
+        statement = ("SELECT count(to_tsvector('public.charabia_structured'," + literal(text) +
                      "||' '||g::text)) FROM generate_series(1,250) g")
-        headline = ("SELECT sum(length(ts_headline('public.charabia'," + literal(text) +
+        headline = ("SELECT sum(length(ts_headline('public.charabia_structured'," + literal(text) +
                     "||' '||g::text,'run | ms | 5fff'::tsquery,'HighlightAll=true'))) FROM generate_series(1,250) g")
         session.value(statement)
         session.value(headline)
         samples = []
-        results["structured_requests"] = {"document": text, "vector_sql": statement,
+        results["structured_requests"] = {"mode":"structured","config":"public.charabia_structured", "warm_hooks":hooks(session), "document": text, "vector_sql": statement,
                                       "headline_sql": headline, "samples": samples}
         for batch in range(8):
             before = hooks(session)
@@ -252,7 +258,7 @@ def repeated_structured_requests():
 
 def cache_invalidation(structured=False):
     state = results.setdefault("structured_cache_invalidation", {}) if structured else results["cache_invalidation"]
-    state.update({"builtin_language": "eng", "sentinel": "the", "warmup": [], "control": [], "measurement": [],
+    state.update({"mode":"structured"if structured else"linguistic", "builtin_language": "eng", "sentinel": "the", "warmup": [], "control": [], "measurement": [],
                   "basis": "Pinned NLTK English stoplist contains the; Discard=false references no stop FST; all FST bytes are static"})
     # This test measures one real dictionary lifecycle, independent of automatic
     # language quality. All lexical types deliberately map to the same English
@@ -263,20 +269,21 @@ def cache_invalidation(structured=False):
         state["basis"] = "One real structured Dictionary borrows static English FST; raw alpha_the_beta_1 retains literals while the component stops"
         run("CREATE TEXT SEARCH DICTIONARY " + dictionary_name + "(TEMPLATE=charabia.structured_template,"
             "Kind='numword',Discard=false,Stem=false,Normalize=true);CREATE TEXT SEARCH CONFIGURATION " +
-            config + "(PARSER=charabia.parser);ALTER TEXT SEARCH CONFIGURATION " + config +
+            config + "(PARSER=charabia.structured_parser);ALTER TEXT SEARCH CONFIGURATION " + config +
             " ADD MAPPING FOR numword WITH " + dictionary_name)
     else:
         run("""CREATE TEXT SEARCH DICTIONARY stress.cache_words(
  TEMPLATE=charabia.linguistic_template,Language='eng',Discard=false,Stem=false,Normalize=true,Filter=false);
-CREATE TEXT SEARCH CONFIGURATION stress.cache_config(PARSER=charabia.parser);
+CREATE TEXT SEARCH CONFIGURATION stress.cache_config(PARSER=charabia.linguistic_parser);
 DO $map$ DECLARE l jsonb; BEGIN
  FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP
   EXECUTE format('ALTER TEXT SEARCH CONFIGURATION stress.cache_config ADD MAPPING FOR %I WITH stress.cache_words',l->>'language');
  END LOOP;
 END $map$;""")
+    state["config"] = config
     document = ("alpha_the_beta_1" if structured else
                 "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running. alpha beta the")
-    selected = json.loads(run("SELECT coalesce(json_agg(DISTINCT language),'[]'::json) FROM charabia.analyze(" + literal(document) + ") WHERE kind='word'"))
+    selected = json.loads(run("SELECT coalesce(json_agg(DISTINCT language),'[]'::json) FROM charabia.analyze(" + literal(document) + "," + literal(config) + ") WHERE kind='word'"))
     state["probe_document"] = document
     state["selected_languages"] = selected
     if structured:
@@ -429,11 +436,11 @@ def concurrency():
     run("CREATE TABLE stress.structured_docs(id int PRIMARY KEY,body text NOT NULL);"
         "INSERT INTO stress.structured_docs VALUES(1,'100ms'),(2,'200ms'),(3,'0x5fff'),"
         "(4,'https://example.com/Running');CREATE INDEX stress_structured_gin ON stress.structured_docs "
-        "USING gin(to_tsvector('public.charabia',body))")
+        "USING gin(to_tsvector('public.charabia_structured',body))")
     if LINUX:
         # Every writer mutation below must maintain an already-existing index.
         run("CREATE INDEX stress_bm25 ON stress.docs USING bm25(body) WITH(text_config='public.charabia')")
-        run("CREATE INDEX stress_structured_bm25 ON stress.structured_docs USING bm25(body) WITH(text_config='public.charabia')")
+        run("CREATE INDEX stress_structured_bm25 ON stress.structured_docs USING bm25(body) WITH(text_config='public.charabia_structured')")
     snapshots_ready = threading.Barrier(3)
     writes_committed = threading.Barrier(3)
     stop = threading.Event()
@@ -493,14 +500,14 @@ def concurrency():
                         ))
                         assert len(oracle) < 25000, len(oracle)
                         observation = {
-                            "batch": batch, "query": text, "snapshot": snapshot, "native_oracle": oracle,
+                            "batch": batch, "mode":"linguistic", "config":"public.charabia", "query": text, "snapshot": snapshot, "native_oracle": oracle,
                             "started_monotonic": started, "oracle_monotonic": time.monotonic(),
                         }
                         structured_text = "100ms" if batch % 2 == 0 else "5fff"
                         structured_oracle_sql = ("SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM stress.structured_docs "
-                            "WHERE tsvector_to_array(to_tsvector('public.charabia',body)) && "
-                            "tsvector_to_array(to_tsvector('public.charabia'," + literal(structured_text) + "))")
-                        observation["structured"] = {"query": structured_text, "oracle_sql": structured_oracle_sql,
+                            "WHERE tsvector_to_array(to_tsvector('public.charabia_structured',body)) && "
+                            "tsvector_to_array(to_tsvector('public.charabia_structured'," + literal(structured_text) + "))")
+                        observation["structured"] = {"mode":"structured", "config":"public.charabia_structured", "snapshot":snapshot, "query": structured_text, "oracle_sql": structured_oracle_sql,
                                                  "native_oracle": json.loads(session.value(structured_oracle_sql))}
                         record["batches"].append(observation)
                         # The index now contains committed writes newer than
@@ -531,6 +538,8 @@ def concurrency():
                             structured_actual = json.loads(session.value(structured_oracle_sql))
                             observation["structured"]["repeated_native"] = structured_actual
                             assert structured_actual == observation["structured"]["native_oracle"], observation
+                        observation["snapshot_after_both_modes"] = session.value("SELECT pg_current_snapshot()::text")
+                        assert observation["snapshot_after_both_modes"] == snapshot, observation
                         session.value("COMMIT")
                         error = session.query("SELECT * FROM charabia.analyze(repeat('x',262145))")
                         assert "ERROR:" in error and session.value("SELECT 1") == "1", error

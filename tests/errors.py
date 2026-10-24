@@ -4,7 +4,7 @@ import os
 import signal
 import sys
 import time
-from support import Session, json_query, literal, native_config_sql, run, save
+from support import ANALYSIS_REVISION, FORMAT, Session, json_query, literal, native_config_sql, run, save
 
 def interrupted(signum, _frame):
     raise InterruptedError(f"Received signal {signum}")
@@ -12,7 +12,7 @@ def interrupted(signum, _frame):
 
 signal.signal(signal.SIGTERM, interrupted)
 
-results = {"encoding": {}, "faults": []}
+results = {"format": FORMAT, "analysis_revision": ANALYSIS_REVISION, "modes": {"linguistic": "public.charabia_linguistic", "structured": "public.charabia_structured"}, "encoding": {}, "faults": []}
 database = "pgcb_ascii_" + str(os.getpid())
 run(f"CREATE DATABASE {database} TEMPLATE template0 ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'")
 try:
@@ -23,24 +23,28 @@ try:
     # Installation is correctly refused by INIT. Register the independent raw
     # parser and diagnostic callbacks to exercise their own encoding preflights.
     run("""
-CREATE FUNCTION public.raw_start(internal,integer) RETURNS internal AS 'pg_charabia','parser_start_wrapper' LANGUAGE c STRICT;
+CREATE FUNCTION public.raw_start(internal,integer) RETURNS internal AS 'pg_charabia','linguistic_parser_start_wrapper' LANGUAGE c STRICT;
 CREATE FUNCTION public.raw_gettoken(internal,internal,internal) RETURNS internal AS 'pg_charabia','parser_gettoken_wrapper' LANGUAGE c STRICT;
 CREATE FUNCTION public.raw_end(internal) RETURNS void AS 'pg_charabia','parser_end_wrapper' LANGUAGE c STRICT;
-CREATE FUNCTION public.raw_lextypes(internal) RETURNS internal AS 'pg_charabia','parser_lextypes_wrapper' LANGUAGE c STRICT;
+CREATE FUNCTION public.raw_lextypes(internal) RETURNS internal AS 'pg_charabia','linguistic_parser_lextypes_wrapper' LANGUAGE c STRICT;
 CREATE TEXT SEARCH PARSER public.raw_parser(START=public.raw_start,GETTOKEN=public.raw_gettoken,END=public.raw_end,LEXTYPES=public.raw_lextypes);
-CREATE FUNCTION public.raw_analyze(text) RETURNS TABLE(raw text,kind text,script text,charabia_language text,language text,language_source text,byte_start bigint,byte_end bigint,char_start bigint,char_end bigint,token_type text) AS 'pg_charabia','analyze_wrapper' LANGUAGE c STRICT;
+CREATE FUNCTION public.raw_structured_start(internal,integer) RETURNS internal AS 'pg_charabia','structured_parser_start_wrapper' LANGUAGE c STRICT;
+CREATE FUNCTION public.raw_structured_lextypes(internal) RETURNS internal AS 'pg_charabia','structured_parser_lextypes_wrapper' LANGUAGE c STRICT;
+CREATE TEXT SEARCH PARSER public.raw_structured_parser(START=public.raw_structured_start,GETTOKEN=public.raw_gettoken,END=public.raw_end,LEXTYPES=public.raw_structured_lextypes);
+CREATE FUNCTION public.raw_analyze(text,oid) RETURNS TABLE(raw text,kind text,script text,charabia_language text,language text,language_source text,byte_start bigint,byte_end bigint,char_start bigint,char_end bigint,token_type text) AS 'pg_charabia','analyze_wrapper' LANGUAGE c STRICT;
 CREATE FUNCTION public.raw_query_any(text,oid) RETURNS tsquery AS 'pg_charabia','query_any_wrapper' LANGUAGE c STRICT;
 """,database)
     for name, sql in {
-        "start": "SELECT * FROM ts_parse('public.raw_parser','hello')",
-        "diagnostic": "SELECT * FROM public.raw_analyze('hello')",
+        "linguistic_start": "SELECT * FROM ts_parse('public.raw_parser','hello')",
+        "structured_start": "SELECT * FROM ts_parse('public.raw_structured_parser','hello')",
+        "diagnostic": "SELECT * FROM public.raw_analyze('hello',0::oid)",
         "query_any": "SELECT public.raw_query_any('hello',0::oid)",
     }.items():
         result = run("\\set VERBOSITY verbose\n"+sql, database, check=False)
         assert result.returncode != 0 and "0A000" in result.stderr, result.stderr
         results["encoding"][name] = result.stderr.strip()
     with Session(database) as session:
-        output=session.query("SELECT * FROM public.raw_analyze(convert_from(decode('ff','hex'),'SQL_ASCII'))")
+        output=session.query("SELECT * FROM public.raw_analyze(convert_from(decode('ff','hex'),'SQL_ASCII'),0::oid)")
         results["encoding"]["diagnostic_invalid_utf8"]=output
         save("errors-results.json",results)
         assert "0A000" in output,output
@@ -51,15 +55,15 @@ finally:
 has_hooks = os.environ.get("PGCB_TEST_HOOKS") == "1"
 registered = int(run("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='charabia' AND p.proname LIKE 'test_%'"))
 assert registered == (2 if has_hooks else 0), registered
-assert json_query("SELECT charabia.analysis_info()") ["extension"] == "0.3.1"
+assert json_query("SELECT charabia.analysis_info()") ["extension"] == "0.4.0"
 
 DOCUMENT = "The children were running through the garden while the teachers were reading books and sharing their happy memories together. These cats were running."
 run("CREATE SCHEMA errors_runtime")
 run(native_config_sql("errors_runtime.healthy", stem=False, discard=False))
 HEALTHY = "SELECT to_tsvector('errors_runtime.healthy'," + literal(DOCUMENT) + ")"
 HEADLINE = "SELECT ts_headline('errors_runtime.healthy'," + literal(DOCUMENT) + ",'running'::tsquery,'HighlightAll=true')"
-STRUCTURED_HEALTHY = "SELECT to_tsvector('public.charabia','Running100') @@ 'run'::tsquery"
-STRUCTURED_HEADLINE = "SELECT ts_headline('public.charabia','alpha Running100 beta','run'::tsquery,'HighlightAll=true')"
+STRUCTURED_HEALTHY = "SELECT to_tsvector('public.charabia_structured','Running100') @@ 'run'::tsquery"
+STRUCTURED_HEADLINE = "SELECT ts_headline('public.charabia_structured','alpha Running100 beta','run'::tsquery,'HighlightAll=true')"
 
 # Exercise the direct dictionary entry, independently of START and analyze.
 # Oversized ASCII cannot fail UTF8 conversion in core before reaching LEXIZE.
@@ -87,19 +91,49 @@ def callback_live(value):
     return value["state_registered"]-value["state_released"]
 
 
+def mode_isolation(session):
+    """Interleave real modes and nest one START while the other state is live."""
+    statements = {
+        "linguistic": "SELECT to_tsvector('public.charabia_linguistic','100ms') @@ 'ms'::tsquery",
+        "structured": "SELECT to_tsvector('public.charabia_structured','100ms') @@ 'ms'::tsquery",
+    }
+    records = results["mode_isolation"] = []
+    for _ in range(3):
+        for mode in ("linguistic", "structured"):
+            actual = session.value(statements[mode])
+            records.append({"mode": mode, "sql": statements[mode], "actual": actual})
+            save("errors-results.json", results)
+            assert actual == ("t" if mode == "structured" else "f"), records[-1]
+    if has_hooks:
+        for outer, inner in (("linguistic", "structured"), ("structured", "linguistic")):
+            before = stats(session)
+            session.value("SELECT charabia.test_set_fault('gettoken'," + literal("nested_" + inner) + ")")
+            actual = session.value(statements[outer])
+            after = stats(session)
+            record = {"outer": outer, "inner": inner, "sql": statements[outer],
+                      "actual": actual, "before": before, "after": after}
+            results.setdefault("nested_modes", []).append(record)
+            save("errors-results.json", results)
+            assert actual == ("t" if outer == "structured" else "f"), record
+            assert after["nested_" + inner] - before["nested_" + inner] == 1, record
+            assert after["parser_created"] - before["parser_created"] == 2, record
+            assert after["parser_dropped"] - before["parser_dropped"] == 2, record
+            assert callback_live(after) == callback_live(before), record
+
+
 def registration_failures(session):
     results["registration_faults"]=[]
-    for role in ("parser", "dictionary", "structured_dictionary"):
+    for role in ("parser", "structured_parser", "dictionary", "structured_dictionary"):
         for point,modes in (("register_alloc",("error","panic","allocation_error")),("register_link",("error","panic","allocation_error"))):
             for mode in modes:
                 before=stats(session)
                 session.value(f"SELECT charabia.test_set_fault({literal(point)},{literal(mode)})")
-                sql=(HEALTHY if role=="parser" else
+                sql=(HEALTHY if role=="parser" else STRUCTURED_HEALTHY if role=="structured_parser" else
                      "CREATE TEXT SEARCH DICTIONARY public.registration_fault(TEMPLATE=charabia.structured_template,Kind='numword',Discard=true,Stem=true,Normalize=true)" if role=="structured_dictionary" else
                      "CREATE TEXT SEARCH DICTIONARY public.registration_fault(TEMPLATE=charabia.linguistic_template,Language='eng',Discard=true,Stem=false,Normalize=true,Filter=false)")
                 output=session.query(sql)
                 after=stats(session)
-                counter="dictionary" if role=="structured_dictionary" else role
+                counter="dictionary" if role=="structured_dictionary" else "parser" if role=="structured_parser" else role
                 record={"role":role,"point":point,"mode":mode,"sql":sql,"output":output,"before":before,"after":after}
                 results["registration_faults"].append(record)
                 save("errors-results.json",results)
@@ -220,7 +254,7 @@ def real_interrupt(reason,structured=False):
             assert session.value(STRUCTURED_HEALTHY)=="t"
             assert session.value(STRUCTURED_HEADLINE)=="alpha <b>Running100</b> beta"
         session.value("SET statement_timeout='1s'" if reason == "timeout" else "SET statement_timeout=0")
-        query = ("SELECT sum(length(ts_headline('public.charabia','alpha Running100 beta '||g::text,'run'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g" if structured else
+        query = ("SELECT sum(length(ts_headline('public.charabia_structured','alpha Running100 beta '||g::text,'run'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g" if structured else
                  "SELECT sum(length(ts_headline('errors_runtime.healthy'," + literal(DOCUMENT) + " || g::text,'running'::tsquery,'HighlightAll=true'))) FROM generate_series(1,100000) g")
         outcome = []
         def execute():
@@ -277,6 +311,8 @@ def real_interrupt(reason,structured=False):
 
 
 try:
+    with Session() as isolated:
+        mode_isolation(isolated)
     real_interrupt("cancel")
     real_interrupt("timeout")
     real_interrupt("cancel",structured=True)
@@ -306,7 +342,7 @@ try:
             for point in ("gettoken", "headline_selector", "headline_escape"):
                 interrupt(session,"cancel",point=point)
                 interrupt(session,"timeout",point=point)
-            for point in ("lexize","structured_emit","structured_emit_string","headline_selector","headline_escape"):
+            for point in ("start","gettoken","end","lexize","structured_emit","structured_emit_string","headline_selector","headline_escape"):
                 for mode in ("error","panic"):
                     before=stats(session)
                     session.value(f"SELECT charabia.test_set_fault({literal(point)},{literal(mode)})")

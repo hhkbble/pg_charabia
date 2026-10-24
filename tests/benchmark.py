@@ -11,7 +11,7 @@ import statistics
 import subprocess
 import time
 
-from support import EVIDENCE, Session, literal, run, save, native_config_sql
+from support import ANALYSIS_REVISION, FORMAT, EVIDENCE, Session, literal, run, save, native_config_sql
 
 if os.environ["PGCB_PLATFORM"] != "linux-amd64":
     raise AssertionError("The delivery benchmark requires Linux AMD64")
@@ -25,7 +25,7 @@ PARAGRAPHS = [
     ("swedish", "Flickornas röster hördes över den stora gården och skogarna medan hästarna vandrade längs vägen."),
     ("japanese-korean", "日本語の検索と技術文書 한국어 검색 데이터베이스 /usr/local v18.6 <doc> & café"),
 ]
-results = {"status": "running", "environment": {
+results = {"format": FORMAT, "analysis_revision": ANALYSIS_REVISION, "modes": {"linguistic": "public.charabia_linguistic", "structured": "public.charabia_structured"}, "status": "running", "environment": {
     "target": "Linux AMD64 + PG18; Docker emulation when host is ARM64",
     "clock": "Python perf_counter_ns roundtrip wall clock; /proc backend CPU ticks",
     "no_sla": True,
@@ -201,7 +201,7 @@ def structured_workloads():
     checkpoint()
     run(f"CREATE TEXT SEARCH DICTIONARY {SCHEMA}.structured_words(TEMPLATE=charabia.linguistic_template,Language='eng',"
         "Discard=false,Stem=false,Normalize=true,Filter=false,English=false);"
-        f"CREATE TEXT SEARCH CONFIGURATION {SCHEMA}.structured_default(COPY=public.charabia);"
+        f"CREATE TEXT SEARCH CONFIGURATION {SCHEMA}.structured_default(COPY=public.charabia_structured);"
         "DO $structured_tokens$ DECLARE l jsonb; BEGIN "
         "FOR l IN SELECT value FROM jsonb_array_elements(charabia.analysis_info()->'languages') LOOP "
         f"EXECUTE format('ALTER TEXT SEARCH CONFIGURATION {SCHEMA}.structured_default ALTER MAPPING FOR %I WITH {SCHEMA}.structured_words',l->>'language');"
@@ -216,7 +216,7 @@ def structured_workloads():
         table = f"{SCHEMA}.structured_docs_{mode}"
         gin_index, bm25_index = f"structured_{mode}_gin", f"structured_{mode}_bm25"
         run(f"CREATE TABLE {table}(id integer PRIMARY KEY,family text NOT NULL,body text NOT NULL CHECK(octet_length(body)<=262144))")
-        observations = record["modes"][mode] = {"configuration": config, "table": table}
+        observations = record["modes"][mode] = {"mode":"structured", "configuration": config, "analysis_revision":ANALYSIS_REVISION, "table": table}
         with Session() as session:
             session.value("SET statement_timeout='180s';SET client_min_messages=warning")
             verify_library(session)
@@ -224,7 +224,7 @@ def structured_workloads():
                 f"FROM generate_series(1,100)g JOIN {SCHEMA}.structured_source s ON s.family_id=g%5")
             memory(session, mode + "-structured-cold", config)
             measure(session, mode + "-structured-first-vector", f"SELECT to_tsvector({literal(config)},body)::text FROM {table} WHERE id=1")
-            measure(session, mode + "-structured-parser", f"SELECT sum((SELECT count(*)FROM charabia.analyze(d.body)))FROM {table} d", 3)
+            measure(session, mode + "-structured-parser", f"SELECT sum((SELECT count(*)FROM charabia.analyze(d.body,{literal(config)})))FROM {table} d", 3)
             measure(session, mode + "-structured-vectorize", f"SELECT sum(length(to_tsvector({literal(config)},body)))FROM {table}", 3)
             observations["vectors_tf_dl"] = json.loads(statement(session,
                 "SELECT jsonb_agg(jsonb_build_object('id',d.id,'family',d.family,'body',d.body,"
@@ -403,7 +403,7 @@ END $bench$;""")
                 session.value("SET statement_timeout='180s';SET client_min_messages=warning")
                 verify_library(session)
                 info = json.loads(statement(session, "SELECT charabia.analysis_info()", label + "-info"))
-                check(info["extension"] == "0.3.1", "benchmark uses a different release", info)
+                check(info["extension"] == "0.4.0", "benchmark uses a different release", info)
                 memory(session, label + "-loaded-cold", config)
                 measure(session, label + "-insert-bulk", f"INSERT INTO {table} SELECT g,s.family,repeat(s.body,1+g%3)||' '||g "
                         f"FROM generate_series(1,1000)g JOIN {SCHEMA}.source s ON s.family_id=g%6")
@@ -411,7 +411,7 @@ END $bench$;""")
                     f"SELECT jsonb_build_object('rows',count(*),'bytes',sum(octet_length(body)),'max_bytes',max(octet_length(body)))FROM {table}", label + "-corpus"))
                 measure(session, label + "-first-vector", f"SELECT length(to_tsvector({literal(config)},body))FROM {table} WHERE id=1")
                 memory(session, label + "-first-document", config)
-                measure(session, label + "-analyze-corpus", f"SELECT sum((SELECT count(*)FROM charabia.analyze(d.body)))FROM {table} d", 3)
+                measure(session, label + "-analyze-corpus", f"SELECT sum((SELECT count(*)FROM charabia.analyze(d.body,{literal(config)})))FROM {table} d", 3)
                 measure(session, label + "-vectorize-corpus", f"SELECT sum(length(to_tsvector({literal(config)},body)))FROM {table}", 3)
                 if label == "default":
                     logical_ablation(session, table, config)
@@ -428,7 +428,7 @@ END $bench$;""")
                     expected = list(range(1,1001)) if query == "PostgreSQL" else ([i for i in range(1,1001) if i%6 == 0] if stemming else [])
                     check(ids == expected, "benchmark corpus domain IDs changed", {"label": label,"query":query,"expected":expected,"actual":ids})
                     check(all(math.isfinite(row["score"]) for row in rows), "nonfinite actual BM25 score", rows)
-                    results.setdefault("rank_observations", []).append({"config":config,"query":query,"rows":rows,
+                    results.setdefault("rank_observations", []).append({"mode":"linguistic","config":config,"query":query,"rows":rows,
                         "independent_domain_ids":expected,"relevance_labels":"literal marker all rows; run relates only to fixed English family",
                         "interpretation":"scores/ties/ranks are observations; no float score or arbitrary tie-order assertion"})
                     checkpoint()
@@ -471,7 +471,7 @@ END $bench$;""")
                     check(len(rows) == min(limit,1080), "headline workload candidate count changed")
                     check(all(html.unescape(row["headline"].replace("<b>","").replace("</b>","")) == row["body"] for row in rows),
                           "headline performance path loses original text")
-                    results.setdefault("headline_workloads", []).append({"config":config,"flavor":flavor,"limit":limit,
+                    results.setdefault("headline_workloads", []).append({"mode":"linguistic","config":config,"flavor":flavor,"limit":limit,
                         "actual_rows":len(rows),"sql":query,"query_any_evaluations":1,
                         "cost_boundary":"BM25 raw-query analysis plus once-only query_any analysis plus per-result original document analysis/rendering"})
                 session.value("SET enable_seqscan=on;SET enable_indexscan=on;SET enable_indexonlyscan=on;SET enable_bitmapscan=on")
@@ -481,7 +481,7 @@ END $bench$;""")
                     measure(session, label + "-headline-render-" + suffix,
                         f"SELECT sum(octet_length(ts_headline({literal(config)},body,'postgresql'::tsquery,{literal(options)})))FROM {table}", 3)
                 coverage = json.loads(statement(session,
-                    f"SELECT jsonb_agg(DISTINCT a.language ORDER BY a.language)FROM {table} d CROSS JOIN LATERAL charabia.analyze(d.body)a",
+                    f"SELECT jsonb_agg(DISTINCT a.language ORDER BY a.language)FROM {table} d CROSS JOIN LATERAL charabia.analyze(d.body,{literal(config)})a",
                     label + "-touched-routes"))
                 results.setdefault("touched_routes", {})[label] = {"routes":coverage,
                     "meaning":"observed analysis routes; not an exact release PG live-state counter"}
