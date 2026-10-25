@@ -6,6 +6,7 @@ This guide covers installation, analysis changes, index maintenance, and backup 
 - [Build from source](#build-from-source)
 - [Download and install](#download-and-install)
 - [Fresh installation](#fresh-installation)
+- [Upgrade from 0.4.1](#upgrade-from-041)
 - [Optional pg_textsearch setup](#optional-pg_textsearch-setup)
 - [Schema ownership and permissions](#schema-ownership-and-permissions)
 - [Analysis changes and index maintenance](#analysis-changes-and-index-maintenance)
@@ -25,7 +26,7 @@ The project version and dependencies come from [Cargo.toml](../Cargo.toml) and [
 
 ## Build from source
 
-Source builds and locally generated release archives remain available alongside the [v0.4.1 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.1).
+Source builds and locally generated release archives remain available alongside the [v0.4.2 release package](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.2).
 
 Use the prerequisites and commands in [Build and test](development.md#build-and-test). The isolated runners build and stage the extension in a private PostgreSQL cluster. They do not install files into the target PostgreSQL distribution. A targeted build is not full release acceptance.
 
@@ -33,7 +34,7 @@ To generate a verified Linux AMD64 archive, follow [Release acceptance and packa
 
 ## Download and install
 
-Open the [v0.4.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.1). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
+Open the [v0.4.2 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.2). Download the complete Linux AMD64 `.tar.gz` asset and its matching `.tar.gz.sha256` file. GitHub's automatic source archives do not contain the installed extension binary.
 
 On the Linux AMD64 target host, put both downloaded files in the same directory. Set `RELEASE_ARCHIVE` to the downloaded archive filename, without a directory prefix. Verify the archive before extracting it:
 
@@ -52,7 +53,8 @@ Use the extracted, verified Linux AMD64 package for the installation steps below
 1. Match the package to the target PostgreSQL major, operating system, CPU architecture, ABI, and dynamic dependencies. Read `delivery-manifest.json` first.
 2. On the target host, enter the extracted package root. Set `PG_CONFIG` to that PostgreSQL 18 installation's `pg_config`.
 3. Run the inspection commands below. Stop on a checksum, architecture, PostgreSQL version, or dependency mismatch.
-4. Run the two `install` commands with administrative permissions. They change the target PostgreSQL installation.
+4. For an existing 0.4.1 installation, stop PostgreSQL as described in [Upgrade from 0.4.1](#upgrade-from-041) before replacing files.
+5. Run the two `install` commands with administrative permissions. They change the target PostgreSQL installation.
 
 ```sh
 : "${PG_CONFIG:?Set PG_CONFIG to the target PostgreSQL 18 pg_config}"
@@ -68,10 +70,9 @@ A macOS library cannot load into Linux PostgreSQL. Keep the complete package, ch
 
 ## Fresh installation
 
-The 0.4 series uses the fresh installation baseline introduced in 0.4.0.
-Version 0.4.1 provides no compatibility object names or SQL upgrade script from
-earlier versions. Do not run `ALTER EXTENSION ... UPDATE` or relabel an old
-installation as 0.4.1. Install the complete verified 0.4.1 package in a fresh database:
+Version 0.4.2 keeps the fresh installation baseline introduced in 0.4.0.
+It provides no compatibility object names or upgrade from 0.4.0 or 0.3.x.
+For a new database, install the complete verified 0.4.2 package, then run:
 
 ```text
 CREATE EXTENSION pg_charabia;
@@ -80,7 +81,7 @@ SELECT extversion AS catalog_version,
 FROM pg_catalog.pg_extension WHERE extname='pg_charabia';
 ```
 
-Both versions must be `0.4.1`. Installation creates three configurations:
+Both versions must be `0.4.2`. Installation creates three configurations:
 
 - `public.charabia_linguistic` uses ordinary language analysis.
 - `public.charabia_structured` adds structured recognition and expansion. Select it explicitly.
@@ -105,6 +106,26 @@ that old package, then create the new definitions and reanalyze original text in
 the fresh database. This is not an in-place extension upgrade. Validate independent
 document IDs, actual GIN/BM25 plans, and original-text headline before opening
 traffic. Keep old packages for recovery targets that require their exact library.
+
+## Upgrade from 0.4.1
+
+Version 0.4.2 preserves 0.4.1 SQL signatures, object definitions, dictionary defaults, resources and both analysis modes. The native upgrade changes the extension version without recreating objects. Existing object OIDs, permissions, user configurations, stored vectors and GIN/BM25 indexes remain valid. This upgrade alone needs no vector recomputation or index rebuild. Independent changes to dictionaries or mappings still require the [normal maintenance](#analysis-changes-and-index-maintenance).
+
+1. Verify the complete 0.4.2 package on the matching target. Retain the exact 0.4.1 package and a backup for older recovery targets.
+2. Pause application traffic and end old connections. Stop PostgreSQL before replacing the loaded binary. A configuration reload does not replace backend libraries.
+3. Install the verified binary, control file, 0.4.2 installation SQL and `pg_charabia--0.4.1--0.4.2.sql` with the [installation commands](#download-and-install). Keep older packages and installation SQL.
+4. Restart PostgreSQL with application traffic still paused. Open a new administrative connection and run the following in each database that has pg_charabia 0.4.1:
+
+```sql
+ALTER EXTENSION pg_charabia UPDATE TO '0.4.2';
+SELECT extversion AS catalog_version,
+       charabia.analysis_info()->>'extension' AS library_version
+FROM pg_catalog.pg_extension WHERE extname='pg_charabia';
+```
+
+Both versions must be `0.4.2`. Validate application queries and index plans, then reconnect applications and reopen traffic. Do not manually edit pg_extension or drop and recreate the extension for this upgrade. The new library reports 0.4.2 before ALTER updates the catalog, so keep traffic paused through that step.
+
+The default Rust heap now uses PG TopMemoryContext storage. Rust ownership and Drop still release individual objects through pfree. PG can retain freed capacity for reuse. This storage survives request resets and is not limited by work_mem. Infallible Rust OOM can still abort a backend and trigger PostgreSQL instance recovery. Allocation costs and memory residency can differ from 0.4.1. This release does not promise performance parity. See [Ownership and errors](architecture.md#ownership-and-errors) for the runtime contract.
 
 ## Optional pg_textsearch setup
 

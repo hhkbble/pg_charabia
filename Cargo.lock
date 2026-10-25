@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "pg_charabia"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "charabia",
  "fst",

@@ -274,11 +274,11 @@ Keep the delivery report in `artifacts/` or `dist/`, recording source/package id
 
 ### GitHub publication
 
-The packager creates local files. GitHub upload and publication happen separately. The [v0.4.1 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.1) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
+The packager creates local files. GitHub upload and publication happen separately. The [v0.4.2 release page](https://github.com/hhkbble/pg_charabia/releases/tag/v0.4.2) is the stable download entry point. Archive filenames include the tested commit, so documentation links to the version page.
 
 1. Finish full Linux acceptance, local macOS development validation, and separate hooks checks on the same clean final commit.
 2. Generate the archive and SHA256 file with the existing packager, then pass extracted-package validation.
-3. Push the final tested commit normally and wait for its Actions. Then push only the new annotated `v0.4.1` tag and wait for its Actions. Preserve unrelated remote commits, tags, and assets. Stop if the target version, tag, or Release already exists.
+3. Push the final tested commit normally and wait for its Actions. Then push only the new annotated `v0.4.2` tag and wait for its Actions. Preserve unrelated remote commits, tags, and assets. Stop if the target version, tag, or Release already exists.
 4. Create a draft Release for the existing tag. Upload the complete packager archive and its SHA256 file without changing their structure.
 5. Download the draft assets and compare their hashes, source commit, manifest, and verification records with the tested package.
 6. Publish the Release and download its public assets again. Match the checksums, source commit, manifest, and packaged library to the accepted archive. Write Release notes from the actual previous-tag difference, including behavior changes and required maintenance. Preserve existing Releases and assets.

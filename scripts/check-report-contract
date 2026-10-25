@@ -138,15 +138,20 @@ class ContractTests(unittest.TestCase):
                     require_public_api_abi(changed)
         with self.assertRaises(ValueError):require_public_api_abi(actual+[copy.deepcopy(actual[1])])
 
-    def test_staging_and_packaging_reject_old_installation_sql(self):
+    def test_staging_and_packaging_require_exact_installation_and_upgrade_sql(self):
         with tempfile.TemporaryDirectory() as directory:
             stage=Path(directory)
             current=stage/f"pg_charabia--{RELEASE_VERSION}.sql"
             current.write_text("-- owned current fixture\n")
+            with self.assertRaises(ValueError):require_installation_files(stage)
+            upgrade=stage/"pg_charabia--0.4.1--0.4.2.sql"
+            upgrade.write_text("-- owned exact upgrade fixture\n")
             require_installation_files(stage)
-            for old in ("pg_charabia--0.3.0.sql","pg_charabia--0.3.0--0.3.1.sql","pg_charabia--0.3.1--0.4.0.sql"):
+            for old in ("pg_charabia--0.3.0.sql","pg_charabia--0.3.0--0.3.1.sql","pg_charabia--0.3.1--0.4.0.sql",
+                        "pg_charabia--0.4.0.sql","pg_charabia--0.4.1.sql","pg_charabia--0.4.0--0.4.2.sql",
+                        "pg_charabia--0.4.2--0.4.3.sql"):
                 path=stage/old;path.write_text("-- rejected old fixture\n")
-                with self.assertRaisesRegex(ValueError,"fresh current installation"):
+                with self.assertRaisesRegex(ValueError,"exact 0.4.1 to 0.4.2 upgrade"):
                     require_installation_files(stage)
                 path.unlink()
             current.unlink()
@@ -955,7 +960,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             names = ("scripts/package-release", "scripts/report_contract.py", "LICENSE", "README.md",
-                     "Cargo.toml", "Cargo.lock", "build.rs", "AGENTS.md", ".gitattributes", ".cargo/config.toml", "rust-toolchain.toml", "pg_charabia.control", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz",
+                     "Cargo.toml", "Cargo.lock", "build.rs", "AGENTS.md", ".gitattributes", ".cargo/config.toml", "rust-toolchain.toml", "pg_charabia.control", "src/lib.rs", "sql/pg_charabia.sql", "sql/pg_charabia--0.4.1--0.4.2.sql", "docker/verify.Dockerfile", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz",
                      "resources/manifest.json", "docker/environment.lock.json", "tests/fixtures/quality-known.json", "tests/fixtures/quality-warnings-original.json", MODE_QUALITY_REVIEW["file"])
             for name in names:
                 target = root / name
@@ -995,6 +1000,7 @@ raise SystemExit('unexpected fake Docker command: '+repr(args))
             # bytes in the verified fixture to exercise the complete assembly path.
             shutil.copytree(root / "resources", package / "resources")
             (package/"extension"/f"pg_charabia--{RELEASE_VERSION}.sql").write_text("-- Synthetic source-copy fixture. Never load this.\n")
+            (package/"extension"/"pg_charabia--0.4.1--0.4.2.sql").write_text("-- Synthetic no-op upgrade fixture. Never load this.\n")
             # These are source-copy assembly fixtures, never runtime/release evidence.
             resource_path=root/"resources/manifest.json"
             fixture_resources=json.loads(resource_path.read_text())

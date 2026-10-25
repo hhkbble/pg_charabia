@@ -136,6 +136,11 @@ pub fn hit(point: &str) {
 
 #[pg_extern(sql = false)]
 fn test_set_fault(point: &str, mode: &str) {
+    #[cfg(not(test))]
+    if point == "allocator" {
+        allocator_probes::run(mode);
+        return;
+    }
     let mode = match mode {
         "error" => 1,
         "panic" => 2,
@@ -153,7 +158,12 @@ fn test_set_fault(point: &str, mode: &str) {
 
 #[pg_extern(sql = false)]
 fn test_stats() -> JsonB {
+    #[cfg(not(test))]
+    let allocator = allocator_probes::stats();
+    #[cfg(test)]
+    let allocator = serde_json::Value::Null;
     JsonB(serde_json::json!({
+        "allocator":allocator,
         "parser_created":PARSER_CREATED.load(Ordering::Relaxed),
         "parser_dropped":PARSER_DROPPED.load(Ordering::Relaxed),
         "nested_linguistic":NESTED_LINGUISTIC.load(Ordering::Relaxed),
@@ -171,4 +181,209 @@ fn test_stats() -> JsonB {
         "embedded_stop_fst_bytes":crate::resources::STOP_DATA.iter().flatten().map(|data|data.bytes.len()).sum::<usize>(),
         "embedded_english_fst_bytes":crate::resources::ENGLISH_BYTES.len(),
     }))
+}
+
+#[cfg(not(test))]
+mod allocator_probes {
+    use crate::{allocator::PgGlobal, pg_ffi};
+    use pgrx::pg_sys;
+    use std::{
+        alloc::{GlobalAlloc, Layout},
+        cell::RefCell,
+        ptr,
+        sync::atomic::{AtomicUsize, Ordering::Relaxed},
+    };
+
+    static LAYOUTS: AtomicUsize = AtomicUsize::new(0);
+    static RESET_DROPS: AtomicUsize = AtomicUsize::new(0);
+    static SMALL_SHRINK_REUSED: AtomicUsize = AtomicUsize::new(0);
+
+    struct ResetProbe(Box<[u8; 32]>);
+    impl Drop for ResetProbe {
+        fn drop(&mut self) {
+            RESET_DROPS.fetch_add(1, Relaxed);
+        }
+    }
+
+    struct ExitProbe(Option<Box<[u8; 64]>>);
+    impl Drop for ExitProbe {
+        fn drop(&mut self) {
+            drop(self.0.take());
+            // The marker follows Box deallocation. Do not use PG logging,
+            // formatting, or allocation during TLS teardown.
+            const MARKER: &[u8] = b"PGCB_ALLOCATOR_TLS_RELEASED\n";
+            unsafe extern "C" {
+                fn write(fd: std::ffi::c_int, data: *const u8, size: usize) -> isize;
+            }
+            // SAFETY: A fixed live byte slice is written to backend stderr.
+            unsafe { write(2, MARKER.as_ptr(), MARKER.len()) };
+        }
+    }
+    std::thread_local! {
+        static EXIT_PROBE: RefCell<Option<ExitProbe>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn run(mode: &str) {
+        match mode {
+            "contracts" => contracts(),
+            "tls_exit" => EXIT_PROBE.with(|slot| {
+                assert!(slot.borrow().is_none(), "TLS probe must be armed once");
+                let payload = Box::new([0x5a; 64]);
+                // SAFETY: This live nonzero Box must use the real global PG
+                // entry, not just the direct allocator contract probe.
+                unsafe {
+                    let top = pg_sys::TopMemoryContext;
+                    assert_eq!(
+                        pg_sys::GetMemoryChunkContext(payload.as_ptr().cast_mut().cast()),
+                        top
+                    );
+                }
+                *slot.borrow_mut() = Some(ExitProbe(Some(payload)));
+            }),
+            _ => pg_ffi::fail(
+                pgrx::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "unknown allocator probe",
+            ),
+        }
+    }
+
+    fn contracts() {
+        // Call the actual allocator interface. These are independent, fixed
+        // cases rather than allocation counts inferred from optimized Boxes.
+        let top = unsafe { pg_sys::TopMemoryContext };
+        let mut layouts = 0;
+        for size in [1, 31, 4096, 8193, 65537] {
+            for align in [1, 8, 16, 64, 4096] {
+                let layout = Layout::from_size_align(size, align).unwrap();
+                // SAFETY: Every layout is valid and nonzero. Each successful
+                // allocation is checked before access and released once.
+                unsafe {
+                    let p = PgGlobal.alloc(layout);
+                    assert!(!p.is_null());
+                    assert_eq!(p.addr() % align, 0);
+                    assert_eq!(pg_sys::GetMemoryChunkContext(p.cast()), top);
+                    ptr::write_bytes(p, 0x5a, size);
+                    assert!(
+                        std::slice::from_raw_parts(p, size)
+                            .iter()
+                            .all(|b| *b == 0x5a)
+                    );
+                    PgGlobal.dealloc(p, layout);
+                    let p = PgGlobal.alloc_zeroed(layout);
+                    assert!(!p.is_null());
+                    assert!(std::slice::from_raw_parts(p, size).iter().all(|b| *b == 0));
+                    ptr::write_bytes(p, 0xa5, size);
+                    let larger = size + 19;
+                    let p = PgGlobal.realloc(p, layout, larger);
+                    assert!(!p.is_null());
+                    assert_eq!(p.addr() % align, 0);
+                    assert!(
+                        std::slice::from_raw_parts(p, size)
+                            .iter()
+                            .all(|b| *b == 0xa5)
+                    );
+                    assert_eq!(pg_sys::GetMemoryChunkContext(p.cast()), top);
+                    ptr::write_bytes(p, 0x3c, larger);
+                    let smaller = (size / 2).max(1);
+                    let p = PgGlobal.realloc(
+                        p,
+                        Layout::from_size_align(larger, align).unwrap(),
+                        smaller,
+                    );
+                    assert!(!p.is_null());
+                    assert_eq!(p.addr() % align, 0);
+                    assert_eq!(pg_sys::GetMemoryChunkContext(p.cast()), top);
+                    assert!(
+                        std::slice::from_raw_parts(p, smaller)
+                            .iter()
+                            .all(|b| *b == 0x3c)
+                    );
+                    PgGlobal.dealloc(p, Layout::from_size_align(smaller, align).unwrap());
+                }
+                layouts += 1;
+            }
+        }
+        // SAFETY: The rejected layouts remain valid Rust layouts. Rejection
+        // happens before PG allocation and does not simulate malloc OOM.
+        unsafe {
+            assert!(
+                PgGlobal
+                    .alloc(Layout::from_size_align(1, 1 << 27).unwrap())
+                    .is_null()
+            );
+            for align in [8, 64, 4096] {
+                let huge = isize::MAX as usize - (align - 1);
+                let rejected = Layout::from_size_align(huge, align).unwrap();
+                assert!(PgGlobal.alloc(rejected).is_null());
+                let layout = Layout::from_size_align(32, align).unwrap();
+                let p = PgGlobal.alloc(layout);
+                assert!(!p.is_null());
+                ptr::write_bytes(p, 0x7b, 32);
+                assert!(PgGlobal.realloc(p, layout, huge).is_null());
+                assert!(std::slice::from_raw_parts(p, 32).iter().all(|b| *b == 0x7b));
+                PgGlobal.dealloc(p, layout);
+            }
+            // PG18 Top AllocSet keeps an ordinary small chunk when shrinking.
+            // Growth and aligned chunks have no in-place requirement.
+            let layout = Layout::from_size_align(256, 8).unwrap();
+            let p = PgGlobal.alloc(layout);
+            assert!(!p.is_null());
+            ptr::write_bytes(p, 0x42, 256);
+            let address = p.addr();
+            let p = PgGlobal.realloc(p, layout, 32);
+            assert!(!p.is_null());
+            assert_eq!(p.addr(), address);
+            assert_eq!(pg_sys::GetMemoryChunkContext(p.cast()), top);
+            assert!(std::slice::from_raw_parts(p, 32).iter().all(|b| *b == 0x42));
+            PgGlobal.dealloc(p, Layout::from_size_align(32, 8).unwrap());
+            SMALL_SHRINK_REUSED.store(1, Relaxed);
+        }
+
+        let mut context = pgrx::PgMemoryContexts::new("pgcb allocator contracts");
+        let layout = Layout::from_size_align(32, 8).unwrap();
+        let before = RESET_DROPS.load(Relaxed);
+        // SAFETY: The private context is live. No borrowed data escapes it.
+        // Global allocations belong to Top, including owned_state's Box.
+        let p = unsafe {
+            context.switch_to(|_| {
+                let p = PgGlobal.alloc(layout);
+                assert!(!p.is_null());
+                ptr::write_bytes(p, 0x69, 32);
+                let owner = ResetProbe(Box::new([0x5a; 32]));
+                assert_eq!(
+                    pg_sys::GetMemoryChunkContext(owner.0.as_ptr().cast_mut().cast()),
+                    top
+                );
+                let state = pg_ffi::owned_state(owner);
+                assert_eq!(
+                    pg_sys::GetMemoryChunkContext(pg_ffi::raw::<ResetProbe>(state).cast()),
+                    top
+                );
+                p
+            })
+        };
+        // SAFETY: The context owns only the reset callback, while both Rust
+        // owners and the separately retained raw block use Top storage.
+        unsafe {
+            context.reset();
+            assert_eq!(RESET_DROPS.load(Relaxed) - before, 1);
+            assert!(std::slice::from_raw_parts(p, 32).iter().all(|b| *b == 0x69));
+            assert_eq!(pg_sys::GetMemoryChunkContext(p.cast()), top);
+            PgGlobal.dealloc(p, layout);
+            context.reset();
+        }
+        assert_eq!(RESET_DROPS.load(Relaxed) - before, 1);
+        LAYOUTS.store(layouts, Relaxed);
+    }
+
+    pub(super) fn stats() -> serde_json::Value {
+        let (calls, first_top) = crate::allocator::diagnostics();
+        serde_json::json!({
+            "contract_layouts":LAYOUTS.load(Relaxed),
+            "reset_drops":RESET_DROPS.load(Relaxed),
+            "small_shrink_reused":SMALL_SHRINK_REUSED.load(Relaxed) == 1,
+            "alloc_calls":calls,
+            "first_alloc_top":first_top != 0 && first_top == unsafe { pg_sys::TopMemoryContext } as usize,
+        })
+    }
 }

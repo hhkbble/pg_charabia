@@ -43,7 +43,7 @@ def copy_committed_sources(delivery, commit):
         target.write_bytes(subprocess.check_output(["git", "cat-file", "blob", object_id], cwd=ROOT))
         target.chmod(0o755 if mode == "100755" else 0o644)
         copied.add(relative)
-    for relative in (".cargo/config.toml", "src/lib.rs", "sql/pg_charabia.sql", "docker/verify.Dockerfile", "docker/environment.lock.json", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz", "tests/fixtures/quality-warnings-original.json", MODE_QUALITY_REVIEW["file"]):
+    for relative in (".cargo/config.toml", "src/lib.rs", "sql/pg_charabia.sql", "sql/pg_charabia--0.4.1--0.4.2.sql", "docker/verify.Dockerfile", "docker/environment.lock.json", "scripts/generate-english.py", "scripts/rebuild-german", "resources/english/words.txt", "resources/english/attribution/headword-pages.txt.gz", "tests/fixtures/quality-warnings-original.json", MODE_QUALITY_REVIEW["file"]):
         require(relative in copied, f"Required rebuild/relink source file is not committed: {relative}")
     require(set(paths) - {".cargo", "scripts", "tests", "docs", "src", "sql", "resources", "docker"} <= copied, "Required delivery source files are not committed")
 

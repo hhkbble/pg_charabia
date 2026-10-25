@@ -102,7 +102,7 @@ def main():
                 raise ValueError("Invalid corresponding-source package path")
             if digest(delivery/source["package_path"])!=source["sha256"]:
                 raise ValueError("Missing or changed corresponding source archive")
-        for required in ("Cargo.toml","Cargo.lock","build.rs","src/lib.rs","sql/pg_charabia.sql","docker/verify.Dockerfile","scripts/generate-english.py","scripts/rebuild-german","resources/english/words.txt","resources/english/attribution/headword-pages.txt.gz"):
+        for required in ("Cargo.toml","Cargo.lock","build.rs","src/lib.rs","sql/pg_charabia.sql", "sql/pg_charabia--0.4.1--0.4.2.sql","docker/verify.Dockerfile","scripts/generate-english.py","scripts/rebuild-german","resources/english/words.txt","resources/english/attribution/headword-pages.txt.gz"):
             if not (delivery/required).is_file():
                 raise ValueError("Missing rebuild/relink material: " + required)
         manifest = json.loads((delivery / "delivery-manifest.json").read_text())

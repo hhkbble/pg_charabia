@@ -1,5 +1,5 @@
 comment = 'Charabia multilingual text search analysis'
-default_version = '0.4.1'
+default_version = '0.4.2'
 module_pathname = 'pg_charabia'
 relocatable = false
 superuser = true

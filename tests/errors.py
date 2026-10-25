@@ -1,6 +1,7 @@
 """Exercise real encoding rejection and supplemental guarded faults."""
 import json
 import os
+from pathlib import Path
 import signal
 import sys
 import time
@@ -90,6 +91,52 @@ def stats(session):
 
 def callback_live(value):
     return value["state_registered"]-value["state_released"]
+
+
+def allocator_contracts_and_exit():
+    """Direct contracts and actual backend/TLS exit, outside fault injection."""
+    log = Path(os.environ["PGCB_TEMP_DIR"]) / "server.log"
+    offset = log.stat().st_size
+    record = results["allocator"] = {"status": "running"}
+    save("errors-results.json", results)
+    with Session() as session:
+        record["pid"] = session.pid
+        session.value("SELECT charabia.test_set_fault('allocator','contracts')")
+        actual = stats(session)["allocator"]
+        record["contracts"] = actual
+        save("errors-results.json", results)
+        assert actual["contract_layouts"] == 25 and actual["reset_drops"] == 1, record
+        assert actual["small_shrink_reused"], record
+        assert actual["first_alloc_top"] and actual["alloc_calls"] > 0, record
+        session.value("SELECT charabia.test_set_fault('allocator','tls_exit')")
+        # Exercise dependency cold paths. Charabia disables Jieba HMM, so this
+        # does not claim to initialize HMM TLS. Literal token expectations
+        # remain in the existing native/structured suites.
+        for text in ("中文数据库全文检索", "日本語の検索と技術文書", "한국어 검색 데이터베이스", "ภาษาไทยค้นหาข้อมูล"):
+            assert session.value("SELECT length(to_tsvector('public.charabia'," + literal(text) + "))>0") == "t"
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(record["pid"], 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, record
+        time.sleep(0.02)
+    with log.open("rb") as handle:
+        handle.seek(offset)
+        tail = handle.read().decode("utf8", errors="replace")
+    record["backend_exited"] = True
+    record["exit_log"] = tail
+    record["tls_markers"] = tail.count("PGCB_ALLOCATOR_TLS_RELEASED")
+    record["tls_destructor"] = "executed-and-released" if record["tls_markers"] else "not-invoked-on-this-exit"
+    save("errors-results.json", results)
+    # Both supported normal PG18 exit paths independently executed this
+    # destructor. Missing execution is a regression, not successful release.
+    assert record["tls_markers"] == 1, record
+    assert "terminated by signal" not in tail and "PANIC:" not in tail, record
+    assert run("SELECT 1") == "1"
+    record["status"] = "passed"
+    save("errors-results.json", results)
 
 
 def checkpoint_interrupt(record, outcome, primary=None):
@@ -370,6 +417,8 @@ def real_interrupt(reason,structured=False):
 
 
 try:
+    if has_hooks:
+        allocator_contracts_and_exit()
     with Session() as isolated:
         mode_isolation(isolated)
     real_interrupt("cancel")

@@ -126,11 +126,11 @@ def explicit_option_matrix(session):
 
 
 def fresh_baseline():
-    """Use the real staged 0.4.1 objects without an older-version SQL alias."""
+    """Use the current installation and the single supported native upgrade."""
     stage = Path(os.environ['PGCB_EXTENSION_STAGE']).resolve()
-    check((stage / 'pg_charabia--0.4.1.sql').is_file()
-          and not list(stage.glob('pg_charabia--0.3*.sql')),
-          'fresh staging contains 0.4.1 installation SQL and no 0.3.x path')
+    check(sorted(path.name for path in stage.glob('pg_charabia--*.sql')) ==
+          ['pg_charabia--0.4.1--0.4.2.sql', 'pg_charabia--0.4.2.sql'],
+          'staging contains only current installation SQL and the exact supported upgrade')
     library = Path(os.environ['PGCB_LIBRARY_PATH'])
     check(hashlib.sha256(library.read_bytes()).hexdigest() == os.environ['PGCB_LIBRARY_SHA256'],
           'fresh baseline uses the identified current library')
@@ -147,11 +147,17 @@ def fresh_baseline():
         with Session(database) as s:
             check(value(s, 'SHOW default_text_search_config') == host_default,
                   'installation preserves the host default_text_search_config')
-            check(value(s, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'") == '0.4.1',
-                  'fresh CREATE EXTENSION installs 0.4.1')
+            check(value(s, "SELECT extversion FROM pg_extension WHERE extname='pg_charabia'") == '0.4.2',
+                  'fresh CREATE EXTENSION installs 0.4.2')
             check(value(s, "SELECT count(*) FROM pg_extension_update_paths('pg_charabia') "
-                           "WHERE source LIKE '0.3.%' OR target LIKE '0.3.%'") == '0',
-                  'fresh baseline exposes no old upgrade path')
+                           "WHERE source LIKE '0.3.%' OR target LIKE '0.3.%' "
+                           "OR source='0.4.0' OR target='0.4.0'") == '0',
+                  'fresh baseline exposes no 0.3.x or 0.4.0 upgrade path')
+            check(scalar_json(s, "SELECT jsonb_agg(jsonb_build_object('source',source,'target',target,'path',path)) "
+                                "FROM (SELECT * FROM pg_extension_update_paths('pg_charabia') ORDER BY source,target) paths") ==
+                  [{'source': '0.4.1', 'target': '0.4.2', 'path': '0.4.1--0.4.2'},
+                   {'source': '0.4.2', 'target': '0.4.1', 'path': None}],
+                  'only the native 0.4.1 to 0.4.2 upgrade is reachable')
             check(scalar_json(s, """SELECT jsonb_build_object(
                 'parser_equal',(SELECT cfgparser FROM pg_ts_config WHERE oid='public.charabia'::regconfig)=
                     (SELECT cfgparser FROM pg_ts_config WHERE oid='public.charabia_linguistic'::regconfig),

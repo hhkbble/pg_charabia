@@ -20,7 +20,8 @@ The [README](../README.md) introduces the extension. The [Usage reference](refer
 | [structured_dictionary.rs](../src/structured_dictionary.rs) | Separate terminal INIT/LEXIZE state for the five structured token kinds. |
 | [linguistic_dictionary.rs](../src/linguistic_dictionary.rs) | INIT validates options and owns state. LEXIZE analyzes one supplied token. |
 | [headline.rs](../src/headline.rs) | Strict option parsing, HTML escaping, and output-size accounting. |
-| [pg_ffi.rs](../src/pg_ffi.rs) | PG allocation, Datum conversion, guarded calls, callback ownership, query rewriting, and headline projection. |
+| [allocator.rs](../src/allocator.rs) | Rust global heap storage in TopMemoryContext and checked layouts. |
+| [pg_ffi.rs](../src/pg_ffi.rs) | PG output allocation, Datum conversion, guarded calls, callback ownership, query rewriting, and headline projection. |
 | [lib.rs](../src/lib.rs) | Module registration and the diagnostic/query functions. |
 | [pg_charabia.sql](../sql/pg_charabia.sql) | Public SQL signatures, default objects, permissions, and callback registration. |
 
@@ -239,13 +240,23 @@ Core matching and repeated-entry allocation happen before the callback. Its outp
 
 ## Ownership and errors
 
-Rust owns analysis vectors, strings, and stemmers. FST views borrow static library bytes, which Dictionary resets never free. PostgreSQL owns callback arrays, strings returned to core, and headline scratch memory. PG allocation and pointer conversion stay in `pg_ffi.rs`.
+Rust owns analysis vectors, strings, and stemmers. The private global allocator supplies their default heap storage from PostgreSQL's TopMemoryContext. Rust Drop still releases each object and returns its storage through `pfree`. FST views borrow static library bytes, which Dictionary resets never free. PostgreSQL owns callback arrays, strings returned to core, and headline scratch memory. Explicit PG output allocation and pointer conversion stay in `pg_ffi.rs`.
 
-`pg_ffi::owned_state` preserves a Box owner while allocating and initializing the reset callback in the original CurrentMemoryContext. After callback registration, it immediately uses `Box::into_raw` and installs that canonical pointer. No fallible operation or PG call can occur during that handoff. The guarded callback drops exactly that Box. Drop must not call PostgreSQL or panic.
+The allocator uses guarded PG calls with NO_OOM and HUGE after checked size and alignment limits. It rejects unsupported layouts with null. Callers and reviewed runtime dependencies must allocate and release only on the backend main thread, outside PG critical sections. They must keep Top storage and ownership valid through dependency destruction. The allocator does not check these calling conditions and owns no TLS wrapper.
+
+Legitimate calls must not reenter, raise PG ERROR, or unwind out of GlobalAlloc. A pgrx thread-check panic is not a legal allocator failure path. Unexpected PG ERROR conversion can allocate recursively without an active abort here. Invalid Top or critical-section state has no allocator-owned rejection path. The allocator never caches or resets Top, or switches CurrentMemoryContext. Zeroing uses Rust's default implementation.
+
+Reallocation checks the new size with the original alignment, then calls guarded `repalloc_extended` with NO_OOM and HUGE. Rust uses the returned pointer on success. A null result leaves the original block and its contents valid. PG handles ordinary and aligned blocks without a Rust copy/free step. Ordinary small Top AllocSet chunks retain their address when shrinking. Growth and high-alignment reallocation can move the block.
+
+Ordinary unit tests explicitly use System. Production has no System fallback, initialization protocol, or dedicated context. PG parallel workers are separate processes with their own Top contexts. Runtime Rust worker threads and shared-preload/postmaster execution are outside this allocator's supported scope. Explicit System allocation, direct C allocation, memory mappings, and other extensions do not use this global entry.
+
+Top storage survives request and transaction resets. PG can retain freed capacity for reuse instead of immediately reducing process RSS. This does not make the Rust heap subject to work_mem or release it in bulk at query end. Ordinary infallible Rust OOM can still abort a backend and cause PostgreSQL to terminate other backends and recover. It does not become a recoverable SQL ERROR. Static and TLS storage must remain valid through any destructors that run at normal exit. Abnormal exit does not guarantee Rust Drop.
+
+`pg_ffi::owned_state` preserves a Box owner while allocating and initializing the reset callback in the original CurrentMemoryContext. After callback registration, it immediately uses `Box::into_raw` and installs that canonical pointer. No fallible operation or PG call can occur during that handoff. The guarded callback drops exactly that Box. Drop must not panic. Its only PG calls are the checked allocator's allocation and release paths. It must not execute SQL, SPI, interrupt checks, cache invalidation, or other PG operations that can raise ERROR.
 
 Both Parser START callbacks register exactly `Option<ParserState>` through the same private helper. The state owns spans/cursor and borrows the PG input pointer, which lives through END. GETTOKEN copies an output descriptor before any later PG operation and returns a type ID as an int32 Datum through the SQL `internal` signature. EOF uses a zero Datum. END takes the state once, releasing its large vector. Reset later drops the empty Option container, or the still-present state after an error.
 
-Linguistic Dictionary INIT registers exactly `LinguisticDictionaryState` in the PG dictionary or DDL-validation context. LEXIZE borrows it only during pure Rust analysis, then ends the borrow before interrupt checks and PG output allocation. Code must not retain subsidiary-cache borrows across PG calls that can invalidate them.
+Linguistic Dictionary INIT registers exactly `LinguisticDictionaryState` in the PG dictionary or DDL-validation context. LEXIZE borrows it during analysis, which only calls PG through the checked allocator. These allocation and release paths do not invalidate dictionary caches. LEXIZE ends the borrow before interrupt checks and PG output allocation. Code must not retain subsidiary-cache borrows across PG calls that can invalidate them.
 
 The structured Template uses exactly `StructuredDictionaryState`, with its own paired callbacks.
 It uses the same RAII registration and reset helper, not casts between state types.
@@ -282,7 +293,7 @@ The extension adds no custom WAL resource manager, mutable data files, or runtim
 
 After restart, pg_textsearch rebuilds derived state from its metapage, durable chain, and segments. See [index/state.c](https://github.com/timescale/pg_textsearch/blob/fa142d049d08eac45a263f5abc250c8877ae076e/src/index/state.c). Core/Generic redo does not call Charabia to reconstruct old terms. Queries and new writes after recovery need the correct installed analyzer.
 
-Physical recovery establishes database consistency at a target, not agreement between old postings and a new analysis policy. Nor does it restore external installation files. Logical dump recreates extension members from installed SQL and ordinary user objects from their definitions. Version 0.4.0 is a fresh installation baseline with no 0.3.x upgrade path or old single-Parser alias. An old physical restore still needs its exact old package; WAL does not convert old postings or supply a newer installation library. These boundaries explain the [user backup requirements](operations.md#backup-and-recovery).
+Physical recovery establishes database consistency at a target, not agreement between old postings and a new analysis policy. Nor does it restore external installation files. Logical dump recreates extension members from installed SQL and ordinary user objects from their definitions. Version 0.4.0 is a fresh installation baseline with no 0.3.x upgrade path or old single-Parser alias. The 0.4.1 to 0.4.2 upgrade changes only the extension version and leaves SQL objects and analysis unchanged. An old physical restore still needs its exact old package; WAL does not convert old postings or supply a newer installation library. These boundaries explain the [user backup requirements](operations.md#backup-and-recovery).
 
 The retained [recovery test](../tests/recovery.py) exercises online backup, archived WAL, named-target restore, crash restart, cold initialization, GIN/BM25 paths, Chinese terms, and headline. Its scope is those controlled paths. It is not proof of every crash timing, high availability, logical decoding, or application-level integration.
 

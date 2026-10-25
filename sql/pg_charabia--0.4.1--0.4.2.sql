@@ -1,0 +1,2 @@
+-- Version 0.4.2 changes Rust heap storage only.
+-- SQL objects and analysis definitions remain unchanged.

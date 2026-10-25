@@ -3,6 +3,16 @@ use pgrx::{AnyElement, Internal, JsonB, pg_sys};
 use sha2::{Digest, Sha256};
 
 pgrx::pg_module_magic!();
+mod allocator;
+
+#[cfg(not(test))]
+#[global_allocator]
+static ALLOCATOR: allocator::PgGlobal = allocator::PgGlobal;
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: std::alloc::System = std::alloc::System;
+
 mod analysis;
 #[cfg(test)]
 mod benchmark_tests;

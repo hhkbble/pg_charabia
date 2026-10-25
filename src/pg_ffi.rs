@@ -43,9 +43,11 @@ pub fn pointer<T>(value: *mut T) -> Internal {
 }
 
 /// # Safety
-/// Call only in a live backend context. `T` must own its Rust resources and its
-/// Drop implementation must neither panic nor invoke PostgreSQL. The paired
-/// callbacks must use this exact type and respect the context's lifetime.
+/// Call only on the backend main thread in a live context. `T` must own its
+/// Rust resources, including resources released by dependency destructors. Its
+/// Drop must not panic or call PG except through the checked global allocator.
+/// In particular, it must not run SQL, SPI, interrupt checks, or cache
+/// invalidation. Paired callbacks must use this exact type and context lifetime.
 pub unsafe fn owned_state<T: 'static>(value: T) -> Internal {
     #[pgrx::pg_guard]
     unsafe extern "C-unwind" fn drop_state<T>(value: *mut c_void) {

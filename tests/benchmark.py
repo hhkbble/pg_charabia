@@ -403,7 +403,7 @@ END $bench$;""")
                 session.value("SET statement_timeout='180s';SET client_min_messages=warning")
                 verify_library(session)
                 info = json.loads(statement(session, "SELECT charabia.analysis_info()", label + "-info"))
-                check(info["extension"] == "0.4.1", "benchmark uses a different release", info)
+                check(info["extension"] == "0.4.2", "benchmark uses a different release", info)
                 memory(session, label + "-loaded-cold", config)
                 measure(session, label + "-insert-bulk", f"INSERT INTO {table} SELECT g,s.family,repeat(s.body,1+g%3)||' '||g "
                         f"FROM generate_series(1,1000)g JOIN {SCHEMA}.source s ON s.family_id=g%6")

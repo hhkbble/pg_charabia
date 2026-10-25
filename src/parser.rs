@@ -33,8 +33,9 @@ fn start(input: Internal, length: i32, mode: analysis::AnalysisMode) -> Internal
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::parser_created();
-    // SAFETY: The state owns its Vec, its Drop does not call PG, and GETTOKEN /
-    // END use exactly Option<ParserState> within the original input lifetime.
+    // SAFETY: The state owns its Vec. Drop only uses the checked allocator's
+    // PG deallocation path. GETTOKEN and END use exactly Option<ParserState>
+    // within the original input lifetime.
     let state = unsafe {
         pg_ffi::owned_state(Some(ParserState {
             input: pointer,

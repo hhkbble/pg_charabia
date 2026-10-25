@@ -23,8 +23,9 @@ fn structured_dictionary_init(options: Internal) -> Internal {
     pgrx::check_for_interrupts!();
     #[cfg(feature = "test-hooks")]
     let generation = crate::test_hooks::dictionary_created(0, options.referenced_fst_bytes());
-    // SAFETY: Paired LEXIZE uses this exact type; Drop is pure Rust and static
-    // FST bytes outlive every context. Registration retains RAII on failure.
+    // SAFETY: Paired LEXIZE uses this exact type. Drop only uses the checked
+    // allocator's PG deallocation path. Static FST bytes outlive every context.
+    // Registration retains RAII on failure.
     let state = unsafe {
         pg_ffi::owned_state(StructuredDictionaryState {
             options,
@@ -56,8 +57,9 @@ fn structured_dictionary_lexize(
         crate::test_hooks::hit("lexize");
     }
     let outcome = {
-        // SAFETY: The paired INIT allocated this state. No PG operation occurs
-        // while its options or subsidiary objects are borrowed.
+        // SAFETY: The paired INIT allocated this state. Analysis only calls PG
+        // through the checked allocator while borrowing its options. Those
+        // calls cannot invalidate dictionary caches or subsidiary objects.
         let options = &unsafe { pg_ffi::state::<StructuredDictionaryState>(&state) }.options;
         structured_tokens::analyze(text, options)
     };

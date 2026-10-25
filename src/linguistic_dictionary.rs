@@ -32,8 +32,9 @@ fn linguistic_dictionary_init(options: Internal) -> Internal {
     #[cfg(feature = "test-hooks")]
     let generation =
         crate::test_hooks::dictionary_created(fst_bytes(&options), options.referenced_fst_bytes());
-    // SAFETY: The state borrows static FST bytes, Drop is pure Rust, and LEXIZE borrows the
-    // exact type only while PG keeps the owning dictCtx alive.
+    // SAFETY: The state borrows static FST bytes. Drop only uses the checked
+    // allocator's PG deallocation path. LEXIZE borrows this exact type only
+    // while PG keeps the owning dictCtx alive.
     let state = unsafe {
         pg_ffi::owned_state(LinguisticDictionaryState {
             options,
@@ -66,7 +67,8 @@ fn linguistic_dictionary_lexize(
     }
     let outcome = {
         // SAFETY: The paired INIT created exactly LinguisticDictionaryState in a live
-        // context. Only pure Rust analysis runs while this borrow is live.
+        // context. Analysis only calls PG through the checked allocator while
+        // this borrow is live. Those calls cannot invalidate dictionary caches.
         let state = unsafe { pg_ffi::state::<LinguisticDictionaryState>(&state) };
         analysis::normalize(text, state.options.language(), &state.options)
     };

@@ -8,7 +8,7 @@ import re
 FORMAT = 3
 PROVENANCE_FORMAT = 2
 MODES = ("linguistic", "structured")
-RELEASE_VERSION = "0.4.1"
+RELEASE_VERSION = "0.4.2"
 ANALYSIS_REVISION = "route16-dual-mode-1"
 LANGUAGE_CODES = ("eng", "deu", "nld", "rus", "spa", "fra", "por", "ita", "ara", "tur", "cmn", "jpn", "kor", "vie", "tha", "und")
 ENGLISH_ELIGIBLE = frozenset(("deu", "nld", "spa", "fra", "por", "ita", "tur", "vie"))
@@ -159,8 +159,9 @@ def require_public_api_abi(actual):
 
 def require_installation_files(stage):
     actual=sorted(path.name for path in Path(stage).glob("pg_charabia--*.sql"))
-    if actual!=[f"pg_charabia--{RELEASE_VERSION}.sql"]:
-        raise ValueError("Only the fresh current installation SQL can enter staging or delivery")
+    expected=sorted((f"pg_charabia--{RELEASE_VERSION}.sql", "pg_charabia--0.4.1--0.4.2.sql"))
+    if actual!=expected:
+        raise ValueError("Only current installation SQL and the exact 0.4.1 to 0.4.2 upgrade can enter staging or delivery")
 
 
 def require_delivery_analysis_identity(manifest,info):
